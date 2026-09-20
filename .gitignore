@@ -1,0 +1,19 @@
+# Original papers, images, audio, transcripts, and local corpora must not be pushed by default.
+local_sources/
+*.pdf
+*.PDF
+*.mp3
+*.wav
+*.m4a
+*.zip
+*.7z
+*.rar
+*.hwp
+*.hwpx
+.env
+.env.*
+__pycache__/
+*.pyc
+
+# Downloaded exam papers and generated previews stay local.
+topik-past-papers/
