@@ -1,0 +1,956 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self'; frame-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>TOPIK 35 · 문항 검수실</title>
+  <style>
+    :root { color-scheme: light; font-family: "Pretendard", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif; background: #f4f5f2; color: #24332c; font-size: 15px; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; }
+    button, input, select, textarea { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .45; }
+    :focus-visible { outline: 3px solid #4a987a; outline-offset: 3px; }
+    a { color: #18674d; text-underline-offset: 3px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    .masthead { padding: 22px clamp(16px, 2.5vw, 40px) 18px; background: #18392e; color: #f7faf5; border-bottom: 4px solid #b1cc94; }
+    .masthead-inner { max-width: 1700px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 18px; }
+    .eyebrow { margin: 0 0 5px; color: #c5dcb1; font-size: .73rem; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(1.35rem, 2vw, 1.9rem); letter-spacing: -.045em; }
+    .masthead p:last-child { margin: 5px 0 0; color: #c6d5ce; font-size: .88rem; }
+    .masthead-badges { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .masthead-badges span { border: 1px solid #6a8777; border-radius: 99px; padding: 6px 11px; font-size: .76rem; color: #e0eddf; font-weight: 700; }
+    .workspace { max-width: 1700px; margin: 0 auto; padding: 20px clamp(12px, 1.5vw, 24px) 40px; }
+    .progress-panel { background: white; border: 1px solid #dce4dc; border-radius: 17px; padding: 17px 20px; margin-bottom: 18px; box-shadow: 0 6px 24px #1a302409; }
+    .progress-top { display: flex; justify-content: space-between; gap: 14px; align-items: center; flex-wrap: wrap; }
+    .progress-top strong { font-size: 1.03rem; }
+    .progress-label { color: #59695f; font-size: .85rem; }
+    .progress-track { height: 9px; background: #e7ece7; border-radius: 99px; margin: 13px 0 12px; overflow: hidden; }
+    .progress-fill { background: #317b5d; width: 0%; height: 100%; border-radius: inherit; transition: width .2s ease; }
+    .metrics { display: flex; flex-wrap: wrap; gap: 9px 18px; font-size: .82rem; color: #58675d; }
+    .metrics b { color: #253a2f; font-variant-numeric: tabular-nums; }
+    .layout { display: grid; grid-template-columns: minmax(222px, 265px) minmax(390px, 1fr) minmax(320px, .94fr); gap: 16px; align-items: start; }
+    .panel { background: #fff; border: 1px solid #dde4dc; border-radius: 18px; box-shadow: 0 6px 24px #1b33250a; min-width: 0; }
+    .sidebar { padding: 17px 12px; position: sticky; top: 12px; max-height: calc(100vh - 24px); display: flex; flex-direction: column; }
+    .sidebar-top { padding: 0 6px 12px; }
+    h2, h3, h4 { letter-spacing: -.035em; }
+    .sidebar h2 { font-size: 1rem; margin: 0 0 14px; }
+    .control-label { font-size: .77rem; font-weight: 800; color: #536458; display: block; margin: 12px 0 6px; }
+    .field, select, textarea { width: 100%; border: 1px solid #cad7cd; border-radius: 10px; padding: 10px 11px; background: #fff; color: #26392c; }
+    .field:focus, select:focus, textarea:focus { border-color: #388266; outline: 2px solid #38826624; }
+    textarea { line-height: 1.65; resize: vertical; min-height: 82px; }
+    .filter-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .filter-grid label:first-child { grid-column: 1 / -1; }
+    .sidebar-count { padding: 11px 8px 10px; border-top: 1px solid #e8eee7; color: #68786c; font-size: .8rem; }
+    .question-list { overflow: auto; min-height: 140px; padding: 0 3px 4px; display: grid; align-content: start; gap: 5px; }
+    .question-item { width: 100%; background: #fff; border: 1px solid transparent; border-radius: 11px; text-align: left; padding: 9px 10px; display: flex; justify-content: space-between; align-items: center; gap: 8px; color: #334439; }
+    .question-item:hover { background: #f0f5ef; }
+    .question-item.active { border-color: #39815f; background: #ecf5eb; box-shadow: inset 3px 0 #39815f; }
+    .question-id { font-size: .87rem; font-weight: 750; }
+    .question-sub { display: block; color: #718075; font-size: .73rem; margin-top: 2px; }
+    .item-right { display: inline-flex; align-items: center; gap: 6px; }
+    .image-tag { color: #825c27; background: #fff1d8; font-size: .72rem; border-radius: 5px; padding: 3px 5px; }
+    .state-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; background: #d29b35; }
+    .state-dot.verified { background: #2b9166; }
+    .state-dot.rejected { background: #c45b52; }
+    .editor { padding: clamp(16px, 2.25vw, 30px); }
+    .editor-top { display: flex; align-items: start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .subheading { margin: 0 0 5px; font-size: .73rem; letter-spacing: .13em; text-transform: uppercase; color: #68816d; font-weight: 800; }
+    .editor h2 { margin: 0; font-size: clamp(1.3rem, 2vw, 1.8rem); }
+    .nav-controls { display: flex; gap: 7px; }
+    .btn { border: 1px solid #cad9cc; background: #fff; border-radius: 10px; color: #29523d; font-weight: 750; font-size: .86rem; padding: 10px 13px; min-height: 40px; }
+    .btn:hover:not(:disabled) { background: #f0f6ee; }
+    .btn.primary { color: white; background: #276f50; border-color: #276f50; }
+    .btn.primary:hover:not(:disabled) { background: #1a5e43; }
+    .btn.danger { color: #a43e35; background: #fff; border-color: #dcafa9; }
+    .btn.danger:hover:not(:disabled) { background: #fff0ee; }
+    .btn.ghost { border-color: transparent; }
+    .badges { display: flex; flex-wrap: wrap; gap: 7px; margin: 16px 0 18px; }
+    .badge { background: #edf1eb; padding: 6px 9px; border-radius: 7px; font-size: .75rem; font-weight: 750; color: #56705a; }
+    .badge.status { background: #fff1d6; color: #926113; }
+    .badge.status.verified { background: #e1f5e8; color: #176445; }
+    .badge.status.rejected { background: #feebe9; color: #a33f36; }
+    .badge.dirty { background: #eaf0fc; color: #385a9a; }
+    .section-card { padding: 17px 0; border-top: 1px solid #e9eee9; }
+    .section-card h3 { font-size: .98rem; margin: 0 0 11px; }
+    .small-label { display: block; margin: 13px 0 6px; font-size: .76rem; font-weight: 800; color: #637369; }
+    .readonly { padding: 12px 13px; border: 1px solid #e5ece4; border-radius: 10px; background: #f8faf7; color: #475b4e; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; font-size: .86rem; }
+    .readonly.empty { color: #929e94; font-style: italic; }
+    .choice-row { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: start; gap: 9px; margin: 9px 0; }
+    .choice-number { display: grid; place-items: center; width: 28px; height: 38px; font-size: 1.1rem; color: #667b6a; }
+    .choice-row.correct .choice-number { color: #208157; font-weight: 900; }
+    .choice-row.correct input { border-color: #5ba47a; background: #f8fdf8; }
+    .hint { font-size: .79rem; line-height: 1.55; color: #718075; margin: 7px 0 0; }
+    .answer-note { background: #eaf5ea; border: 1px solid #c9e3cb; border-radius: 11px; padding: 12px; color: #26583d; font-size: .86rem; line-height: 1.6; margin-top: 12px; }
+    .action-bar { position: sticky; bottom: 0; margin: 20px -12px -15px; padding: 16px 12px 14px; background: #ffffffed; backdrop-filter: blur(12px); border-top: 1px solid #e1e8df; border-radius: 0 0 13px 13px; }
+    .action-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+    .action-buttons .btn { flex: 1 1 120px; }
+    .action-note { color: #778379; font-size: .74rem; margin: 9px 0 0; }
+    .reference { overflow: hidden; }
+    .reference-header { padding: 19px 20px 12px; }
+    .reference-header h2 { font-size: 1.06rem; margin: 0 0 6px; }
+    .reference-header p { font-size: .8rem; margin: 0; color: #748177; line-height: 1.5; }
+    .reference-body { padding: 0 15px 20px; }
+    .source-tabs { display: flex; gap: 5px; padding: 5px; background: #edf2ec; border-radius: 11px; margin-bottom: 11px; }
+    .source-tab { flex: 1; border: 0; border-radius: 8px; padding: 10px 5px; background: transparent; color: #607365; font-weight: 750; font-size: .8rem; }
+    .source-tab.active { background: #fff; color: #245a40; box-shadow: 0 2px 7px #20332417; }
+    .pdf-wrap { border: 1px solid #d7e1d8; border-radius: 11px; overflow: hidden; background: #f2f5ef; }
+    iframe { display: block; width: 100%; height: min(64vh, 760px); min-height: 410px; border: 0; background: #f7f9f4; }
+    .pdf-fallback { padding: 35px 18px; color: #6a796b; font-size: .85rem; }
+    .source-actions { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 11px 0 16px; flex-wrap: wrap; }
+    .source-actions p { font-size: .79rem; color: #7a897d; margin: 0; }
+    .media-card { padding: 15px 2px; border-top: 1px solid #e4eae3; }
+    .media-card h3 { font-size: .9rem; margin: 0 0 9px; }
+    .media-card audio { display: block; width: 100%; }
+    .audio-segment { margin: 12px 0; padding: 13px; border: 1px solid #dce7d9; border-radius: 11px; background: #f8fbf7; }
+    .audio-segment .small-label { margin-top: 0; }
+    .audio-time-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 12px 0; }
+    .audio-time-grid input { font-variant-numeric: tabular-nums; }
+    .audio-actions { display: flex; flex-wrap: wrap; gap: 7px; margin: 11px 0; }
+    .audio-actions button { flex: 1 1 110px; }
+    .audio-status { font-size: .82rem; line-height: 1.5; font-weight: 750; color: #536b56; }
+    .audio-shared { color: #805c24; padding: 8px 10px; border-radius: 8px; background: #fff5e1; font-size: .78rem; line-height: 1.5; }
+    .audio-feedback { font-size: .8rem; line-height: 1.55; color: #486554; min-height: 1.3em; }
+    .audio-feedback.error { color: #ab4436; }
+    .audio-feedback.success { color: #176445; }
+    .image-list { display: grid; gap: 10px; }
+    .image-list figure { margin: 0; border: 1px solid #e0e9df; border-radius: 10px; padding: 7px; background: #f7faf6; }
+    .image-list img { display: block; max-width: 100%; height: auto; margin: auto; }
+    .image-list figcaption { padding: 7px 4px 3px; font-size: .73rem; color: #6b7b6c; overflow-wrap: anywhere; }
+    .flags { display: grid; gap: 6px; }
+    .flag { padding: 9px 10px; border-radius: 8px; color: #805b23; background: #fff4df; font-size: .78rem; line-height: 1.5; overflow-wrap: anywhere; }
+    .history-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+    .history-list li { padding: 11px 12px; border-left: 3px solid #b5cbb9; background: #f7faf7; border-radius: 5px; line-height: 1.5; font-size: .79rem; overflow-wrap: anywhere; }
+    .history-list time { display: block; color: #819184; font-size: .71rem; margin-top: 4px; }
+    .alert { display: flex; justify-content: space-between; align-items: center; gap: 12px; border: 1px solid #d5dfd5; border-radius: 12px; padding: 12px 14px; margin-bottom: 15px; background: #fff; line-height: 1.5; font-size: .86rem; }
+    .alert.error { border-color: #e6aaa2; color: #9b3a30; background: #fff4f2; }
+    .alert.success { border-color: #a7d5b8; color: #246f46; background: #eef8f0; }
+    .alert.info { border-color: #c7d8e5; color: #3c607e; background: #f1f7fd; }
+    .alert button { flex-shrink: 0; }
+    .empty-state { padding: 55px 20px; text-align: center; color: #77867a; font-size: .94rem; line-height: 1.8; }
+    [hidden] { display: none !important; }
+    @media (max-width: 1250px) { .layout { grid-template-columns: 235px minmax(0, 1fr); } .reference { grid-column: 2; } iframe { height: 570px; } }
+    @media (max-width: 760px) { .masthead { padding: 18px 16px; } .workspace { padding: 12px 10px 36px; } .progress-panel { padding: 14px; } .layout { display: flex; flex-direction: column; gap: 12px; } .layout > * { width: 100%; } .sidebar { position: static; max-height: none; padding: 12px; } .sidebar h2 { margin-bottom: 5px; } .sidebar-top { padding-bottom: 8px; } .sidebar .filter-grid { grid-template-columns: 1fr 1fr 1fr; } .sidebar .filter-grid label:first-child { grid-column: auto; } .question-list { display: flex; overflow-x: auto; overflow-y: hidden; min-height: 0; padding-bottom: 8px; } .question-item { min-width: 115px; flex-shrink: 0; } .question-sub { font-size: .67rem; } .editor { padding: 18px 15px; } .reference { grid-column: auto; } iframe { height: 500px; min-height: 370px; } .action-bar { margin-left: -3px; margin-right: -3px; padding-left: 3px; padding-right: 3px; } }
+    @media (max-width: 420px) { .sidebar .filter-grid { grid-template-columns: 1fr; } .nav-controls { width: 100%; } .nav-controls button { flex: 1; } .reference-body { padding-left: 10px; padding-right: 10px; } iframe { height: 440px; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <div>
+        <p class="eyebrow">TOPIK DATABASE / REVIEW WORKSPACE</p>
+        <h1>35회 TOPIK I · 문항 검수실</h1>
+        <p>원문과 정답표를 나란히 확인하고, 검수 결과를 로컬 데이터베이스에 기록합니다.</p>
+      </div>
+      <div class="masthead-badges"><span>● LOCAL ONLY</span><span>35회 · I · B형</span><span id="connectionState">서버 확인 중</span></div>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <div id="notification" class="alert" role="status" aria-live="polite" hidden><span id="notificationText"></span><button type="button" id="reloadConflict" class="btn" hidden>서버 내용 다시 불러오기</button></div>
+    <section class="progress-panel" aria-label="검수 진행 상황">
+      <div class="progress-top"><strong>전체 검수 진행률</strong><span class="progress-label" id="progressLabel">문항을 불러오는 중…</span></div>
+      <div class="progress-track" role="progressbar" aria-label="검증 완료 비율" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progressTrack"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="metrics"><span>전체 <b id="countAll">—</b></span><span>승인 <b id="countVerified">—</b></span><span>검토 필요 <b id="countPending">—</b></span><span>반려 <b id="countRejected">—</b></span><span>그림 포함 <b id="countImages">—</b></span></div>
+    </section>
+
+    <div class="layout">
+      <aside class="sidebar panel" aria-label="문항 목록 및 필터">
+        <div class="sidebar-top">
+          <h2>문항 탐색</h2>
+          <label class="control-label" for="questionSearch">문항 번호 또는 ID</label>
+          <input class="field" id="questionSearch" type="search" placeholder="예: 31 또는 035-I-L" autocomplete="off">
+          <div class="filter-grid">
+            <label><span class="control-label">영역</span><select id="sectionFilter" aria-label="영역 필터"><option value="all">전체 영역</option><option value="listening">듣기</option><option value="reading">읽기</option></select></label>
+            <label><span class="control-label">상태</span><select id="statusFilter" aria-label="상태 필터"><option value="all">전체 상태</option><option value="needs_manual_review">검토 필요</option><option value="verified">승인</option><option value="rejected">반려</option></select></label>
+            <label><span class="control-label">그림</span><select id="imageFilter" aria-label="그림 필터"><option value="all">전체 문항</option><option value="yes">그림 포함</option><option value="no">그림 없음</option></select></label>
+          </div>
+        </div>
+        <div class="sidebar-count" id="listCount">불러오는 중…</div>
+        <nav class="question-list" id="questionList" aria-label="문항 선택"></nav>
+      </aside>
+
+      <section class="editor panel" aria-labelledby="editorTitle">
+        <div id="editorEmpty" class="empty-state">목록에서 검수할 문항을 선택하세요.</div>
+        <div id="editorContent" hidden>
+          <div class="editor-top">
+            <div><p class="subheading" id="questionSubtitle">35회 · TOPIK I</p><h2 id="editorTitle">문항 —</h2></div>
+            <div class="nav-controls"><button type="button" id="previousQuestion" class="btn" aria-label="이전 문항">← 이전</button><button type="button" id="nextQuestion" class="btn" aria-label="다음 문항">다음 →</button></div>
+          </div>
+          <div class="badges" id="questionBadges"></div>
+          <div class="section-card">
+            <h3>공통 지시문 및 지문</h3>
+            <span class="small-label">공통 지시문</span><div class="readonly" id="groupInstruction"></div>
+            <span class="small-label">공통 지문</span><div class="readonly" id="groupPassage"></div>
+          </div>
+          <div class="section-card">
+            <h3>문항 내용 수정</h3>
+            <label class="small-label" for="stemInput">문항 본문</label><textarea id="stemInput" rows="4" spellcheck="false" placeholder="원본 PDF와 대조해 문항 본문을 수정하세요."></textarea>
+            <label class="small-label">초기 추출 원문 · 공백 보정 전 기록 (읽기 전용)</label><div class="readonly" id="rawQuestion"></div>
+            <span class="small-label">선택지 ①–④</span>
+            <div class="choice-row" id="choiceRow1"><label class="choice-number" for="choice1">①</label><input id="choice1" class="field" type="text" autocomplete="off" aria-label="선택지 1"></div>
+            <div class="choice-row" id="choiceRow2"><label class="choice-number" for="choice2">②</label><input id="choice2" class="field" type="text" autocomplete="off" aria-label="선택지 2"></div>
+            <div class="choice-row" id="choiceRow3"><label class="choice-number" for="choice3">③</label><input id="choice3" class="field" type="text" autocomplete="off" aria-label="선택지 3"></div>
+            <div class="choice-row" id="choiceRow4"><label class="choice-number" for="choice4">④</label><input id="choice4" class="field" type="text" autocomplete="off" aria-label="선택지 4"></div>
+            <div class="answer-note" id="answerNote"></div>
+            <p class="hint">정답 번호와 배점은 이 화면에서 변경하지 않습니다. 정답표와 다르면 반려 사유에 남기세요. 그림 선택지의 빈 텍스트는 원본을 확인해 판단하세요.</p>
+          </div>
+          <div class="section-card" id="transcriptEditorSection" hidden>
+            <h3>듣기 대본 검수</h3>
+            <label class="small-label" for="transcriptInput">대본 · 원본 PDF와 대조</label><textarea id="transcriptInput" rows="7" spellcheck="false" placeholder="추출 대본을 확인하고 필요한 부분만 수정하세요."></textarea>
+            <p class="hint" id="transcriptHint">전체 음원만 제공됩니다. 문항별 재생 구간을 추정하지 않습니다.</p>
+          </div>
+          <div class="section-card">
+            <h3>검수 기록</h3>
+            <label class="small-label" for="reviewNote">검수 메모 / 근거</label><textarea id="reviewNote" rows="3" placeholder="확인한 부분과 근거를 기록하세요. 반려 시 사유 입력은 필수입니다."></textarea>
+            <p class="hint">저장은 미검수 상태로만 기록합니다. 승인 및 반려는 각각 명시적으로 선택해야 합니다.</p>
+          </div>
+          <div class="action-bar">
+            <div class="action-buttons"><button type="button" id="saveDraft" class="btn">미검수 저장</button><button type="button" id="approveQuestion" class="btn primary">✓ 검수 승인</button><button type="button" id="rejectQuestion" class="btn danger">× 반려</button></div>
+            <p class="action-note">Ctrl+S: 미검수 상태로 저장 · 승인/반려 후에도 원본 정답은 변경되지 않습니다.</p>
+          </div>
+        </div>
+      </section>
+
+      <aside class="reference panel" aria-label="원본 자료 비교">
+        <div class="reference-header"><h2>원본 자료 대조</h2><p>시험지·정답표·듣기 대본을 PDF 원본 페이지로 확인하세요.</p></div>
+        <div class="reference-body">
+          <div class="source-tabs" role="group" aria-label="PDF 자료 선택"><button class="source-tab active" type="button" data-source="question" aria-pressed="true">문제지</button><button class="source-tab" type="button" data-source="answer" aria-pressed="false">정답표</button><button class="source-tab" type="button" data-source="transcript" aria-pressed="false">대본</button></div>
+          <div class="pdf-wrap"><iframe id="sourceFrame" title="원본 PDF 미리보기" loading="lazy" referrerpolicy="no-referrer" hidden></iframe><div class="pdf-fallback" id="pdfFallback">문항을 선택하면 원본 PDF가 여기에 표시됩니다.</div></div>
+          <div class="source-actions"><p id="sourcePage">원본 페이지 —</p><a id="sourceLink" class="btn" target="_blank" rel="noopener noreferrer" hidden>새 탭에서 열기 ↗</a></div>
+          <div class="media-card" id="audioSection" hidden>
+            <h3>듣기 음원 · 문항별 구간 검수</h3>
+            <p class="hint">시작·종료 시각은 실제 녹음을 듣고 직접 지정하세요. 저장만으로 검증 완료되지 않습니다.</p>
+            <div class="audio-segment" id="audioSegmentPanel" hidden>
+              <div id="audioSegmentStatus" class="audio-status" aria-live="polite">구간 없음</div>
+              <div class="audio-time-grid">
+                <label><span class="small-label">시작 (초)</span><input class="field" id="audioStart" type="number" inputmode="decimal" min="0" step="0.001" placeholder="예: 12.500" aria-label="음원 구간 시작 시각, 초"></label>
+                <label><span class="small-label">종료 (초)</span><input class="field" id="audioEnd" type="number" inputmode="decimal" min="0" step="0.001" placeholder="예: 19.250" aria-label="음원 구간 종료 시각, 초"></label>
+              </div>
+              <p id="audioDurationHint" class="hint">원본 길이를 확인하는 중…</p>
+              <p id="audioSharedNote" class="audio-shared" hidden></p>
+              <div class="audio-actions">
+                <button type="button" class="btn" id="audioPreview">설정 구간 듣기</button>
+                <button type="button" class="btn" id="audioSaveCandidate">후보 구간 저장</button>
+                <button type="button" class="btn primary" id="audioVerify" disabled>청취 후 구간 검증</button>
+                <button type="button" class="btn" id="audioExport" disabled>검증 구간 MP3 추출</button>
+              </div>
+              <p class="audio-feedback" id="audioFeedback" role="status" aria-live="polite">구간을 설정하고 처음부터 끝까지 재생해야 검증할 수 있습니다.</p>
+              <a id="audioClipLink" class="btn" target="_blank" rel="noopener noreferrer" hidden>검증된 문항 음원 열기 ↗</a>
+            </div>
+            <audio id="audioPlayer" controls preload="metadata" aria-label="전체 듣기 음원"></audio>
+            <p class="hint" id="audioFullHint">전체 원본 음원도 위 재생기에서 언제든 들을 수 있습니다.</p>
+          </div>
+          <div class="media-card" id="imageSection" hidden><h3>원본 이미지</h3><div id="imageList" class="image-list"></div></div>
+          <div class="media-card"><h3>초기 미리보기의 추출 주의사항</h3><p class="hint">아래 표시는 최초 HTML 추출 시점의 기록입니다. 이후 대본·음원이 등록되었을 수 있으니 현재 자료 패널을 우선 확인하세요.</p><div id="flagList" class="flags"><p class="hint">문항을 선택하면 확인할 항목이 나타납니다.</p></div></div>
+          <div class="media-card"><h3>검수 이력</h3><ol id="historyList" class="history-list"><li>기록을 불러오면 여기에 표시됩니다.</li></ol></div>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    'use strict';
+    (() => {
+      const $ = (id) => document.getElementById(id);
+      const CHOICE_SYMBOLS = ['①', '②', '③', '④'];
+      const STATUS_NAMES = { verified: '승인', needs_manual_review: '검토 필요', rejected: '반려' };
+      const SECTION_NAMES = { listening: '듣기', reading: '읽기' };
+      const state = { items: [], detail: null, baseline: '', selectedId: null, visible: [], pdfTab: 'question', loading: false, saving: false, requestId: 0, csrfToken: null,
+        audio: { available: false, saving: false, preview: null, heardSignature: null, durationMs: null, error: false } };
+
+      function notice(message, type = 'info', conflict = false) {
+        $('notificationText').textContent = String(message);
+        $('notification').className = `alert ${type}`;
+        $('notification').hidden = false;
+        $('reloadConflict').hidden = !conflict;
+      }
+      function clearNotice() { $('notification').hidden = true; $('reloadConflict').hidden = true; }
+      function sameOriginURL(value) {
+        if (typeof value !== 'string' || !value.trim() || value.startsWith('//')) return null;
+        try {
+          const url = new URL(value, window.location.href);
+          if (!['http:', 'https:'].includes(url.protocol) || url.origin !== window.location.origin || url.username || url.password) return null;
+          return url;
+        } catch (_) { return null; }
+      }
+      function sourceWithPage(value, page) {
+        const url = sameOriginURL(value);
+        if (!url) return null;
+        const n = Number(page);
+        if (Number.isSafeInteger(n) && n > 0) url.hash = `page=${n}`;
+        return url.href;
+      }
+      function statusName(value) { return STATUS_NAMES[value] || '상태 미확인'; }
+      function element(tag, className, text) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = String(text);
+        return node;
+      }
+      function textBox(id, value, fallback = '내용 없음') {
+        const node = $(id);
+        const content = typeof value === 'string' ? value : '';
+        node.textContent = content.trim() ? content : fallback;
+        node.classList.toggle('empty', !content.trim());
+      }
+      async function request(url, options = {}) {
+        const result = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...options });
+        if (!result.ok) {
+          let reason = '';
+          try {
+            const body = await result.json();
+            if (typeof body?.error === 'string') reason = body.error;
+          } catch (_) { /* Keep the HTTP status when no JSON error is available. */ }
+          const error = new Error(result.status === 409
+            ? '다른 검수 기록이 먼저 저장되어 버전이 달라졌습니다. 현재 입력을 유지했으니 비교 후 서버 내용을 다시 불러오세요.'
+            : reason || `서버 요청 실패 (HTTP ${result.status})`);
+          error.status = result.status;
+          throw error;
+        }
+        try { return await result.json(); }
+        catch (_) { throw new Error('서버 응답이 올바른 JSON이 아닙니다.'); }
+      }
+      function counts() {
+        const list = state.items;
+        const verified = list.filter(item => item.status === 'verified').length;
+        const pending = list.filter(item => item.status === 'needs_manual_review').length;
+        const rejected = list.filter(item => item.status === 'rejected').length;
+        $('countAll').textContent = list.length;
+        $('countVerified').textContent = verified;
+        $('countPending').textContent = pending;
+        $('countRejected').textContent = rejected;
+        $('countImages').textContent = list.filter(item => item.requires_image).length;
+        $('progressLabel').textContent = `${verified} / ${list.length}문항 승인`;
+        const percent = list.length ? (verified / list.length) * 100 : 0;
+        $('progressFill').style.width = `${percent}%`;
+        $('progressTrack').setAttribute('aria-valuenow', String(Math.round(percent)));
+      }
+      function filterItems() {
+        const term = $('questionSearch').value.trim().toLowerCase();
+        const section = $('sectionFilter').value;
+        const status = $('statusFilter').value;
+        const image = $('imageFilter').value;
+        state.visible = state.items.filter(item =>
+          (section === 'all' || item.section === section) &&
+          (status === 'all' || item.status === status) &&
+          (image === 'all' || Boolean(item.requires_image) === (image === 'yes')) &&
+          (!term || String(item.number).includes(term) || String(item.id).toLowerCase().includes(term))
+        );
+        $('listCount').textContent = `${state.visible.length} / ${state.items.length}문항 표시`;
+        const root = $('questionList');
+        root.replaceChildren();
+        if (!state.visible.length) { root.append(element('p', 'hint', '조건에 맞는 문항이 없습니다.')); return; }
+        for (const item of state.visible) {
+          const button = element('button', 'question-item');
+          button.type = 'button';
+          button.classList.toggle('active', item.id === state.selectedId);
+          button.setAttribute('aria-current', item.id === state.selectedId ? 'true' : 'false');
+          button.setAttribute('aria-label', `${item.number}번, ${SECTION_NAMES[item.section] || item.section}, ${statusName(item.status)}`);
+          const left = element('span');
+          left.append(element('span', 'question-id', `${item.number}번 문항`), element('span', 'question-sub', SECTION_NAMES[item.section] || item.section));
+          const right = element('span', 'item-right');
+          if (item.requires_image) right.append(element('span', 'image-tag', '그림'));
+          const dot = element('span', `state-dot ${item.status === 'verified' || item.status === 'rejected' ? item.status : ''}`);
+          dot.title = statusName(item.status);
+          right.append(dot);
+          button.append(left, right);
+          button.addEventListener('click', () => selectQuestion(item.id));
+          root.append(button);
+        }
+      }
+      async function loadList() {
+        const data = await request('/api/questions');
+        if (!data || !Array.isArray(data.items)) throw new Error('문항 목록 응답 형식이 올바르지 않습니다.');
+        if (typeof data.csrf_token !== 'string' || !data.csrf_token) throw new Error('검수 보안 토큰이 없습니다. 서버를 새로고침하세요.');
+        state.csrfToken = data.csrf_token;
+        state.items = [...data.items].sort((a, b) => Number(a.number) - Number(b.number));
+        counts();
+        filterItems();
+        $('connectionState').textContent = '로컬 서버 연결됨';
+      }
+      function draft() {
+        if (!state.detail) return null;
+        return {
+          stem: $('stemInput').value,
+          choices: [1, 2, 3, 4].map(n => $(`choice${n}`).value),
+          transcript_text: state.detail.section === 'listening' ? $('transcriptInput').value : null,
+          note: $('reviewNote').value
+        };
+      }
+      function dirty() { return !!state.detail && JSON.stringify(draft()) !== state.baseline; }
+      function audioSegment() {
+        const segment = state.detail?.audio_segment;
+        return segment && typeof segment === 'object' ? segment : null;
+      }
+      function seconds(ms) { return (ms / 1000).toFixed(3); }
+      function audioDurationMs() {
+        const source = audioSegment()?.source_duration_ms;
+        return Number.isSafeInteger(source) && source > 0 ? source : state.audio.durationMs;
+      }
+      function audioInterval() {
+        const parse = (id, label) => {
+          const raw = $(id).value.trim();
+          if (!/^\d+(?:\.\d{1,3})?$/.test(raw)) throw new Error(`${label}을 0 이상의 초 단위로 입력하세요. 소수 셋째 자리까지 가능합니다.`);
+          const value = Math.round(Number(raw) * 1000);
+          if (!Number.isSafeInteger(value)) throw new Error(`${label}이 너무 큽니다.`);
+          return value;
+        };
+        const start_ms = parse('audioStart', '시작 시각');
+        const end_ms = parse('audioEnd', '종료 시각');
+        if (start_ms >= end_ms) throw new Error('종료 시각은 시작 시각보다 커야 합니다.');
+        if (end_ms - start_ms < 500) throw new Error('구간 길이는 최소 0.5초 이상이어야 합니다.');
+        if (end_ms - start_ms > 600000) throw new Error('10분을 초과하는 구간은 별도로 처리해야 합니다.');
+        const duration = audioDurationMs();
+        if (!Number.isSafeInteger(duration) || duration <= 0) throw new Error('원본 음원 길이가 확인되지 않았습니다. 음원이 로드된 후 다시 시도하세요.');
+        if (end_ms > duration) throw new Error(`종료 시각이 전체 음원 길이 ${seconds(duration)}초를 초과했습니다.`);
+        return { start_ms, end_ms };
+      }
+      function audioSignature(interval) { return `${state.detail?.id}:${interval.start_ms}-${interval.end_ms}`; }
+      function audioDirty() {
+        if (!state.detail || state.detail.section !== 'listening' || !state.audio.available) return false;
+        const segment = audioSegment();
+        const start = $('audioStart').value.trim();
+        const end = $('audioEnd').value.trim();
+        if (!segment) return Boolean(start || end);
+        try {
+          const interval = audioInterval();
+          return interval.start_ms !== segment.start_ms || interval.end_ms !== segment.end_ms;
+        } catch (_) { return true; }
+      }
+      function audioFeedback(message, kind = '') {
+        $('audioFeedback').textContent = message;
+        $('audioFeedback').className = `audio-feedback ${kind}`;
+      }
+      function audioSharedNumbers(q) {
+        const supplied = q.audio_segment?.shared_questions;
+        if (Array.isArray(supplied) && supplied.every(n => Number.isSafeInteger(n) && n >= 1 && n <= 30)) return supplied;
+        for (const pair of [[25, 26], [27, 28], [29, 30]]) if (pair.includes(q.number)) return pair;
+        return [];
+      }
+      function refreshAudioActions() {
+        const q = state.detail;
+        const segment = audioSegment();
+        const enabled = !!q && q.section === 'listening' && state.audio.available &&
+          !state.audio.saving && !state.saving && !state.loading && !state.audio.error && Boolean($('audioPlayer').src);
+        let interval = null;
+        if (enabled) {
+          try { interval = audioInterval(); } catch (_) { /* Invalid or not loaded: buttons remain disabled. */ }
+        }
+        const same = !!interval && !!segment && interval.start_ms === segment.start_ms && interval.end_ms === segment.end_ms;
+        const heard = !!interval && state.audio.heardSignature === audioSignature(interval);
+        $('audioPreview').disabled = !enabled || !interval;
+        $('audioPreview').textContent = state.audio.preview ? '구간 듣기 중단' : '설정 구간 듣기';
+        $('audioSaveCandidate').disabled = !enabled || !interval || (same && segment.status === 'candidate');
+        if (same && segment?.status === 'verified') $('audioSaveCandidate').disabled = true;
+        $('audioVerify').disabled = !enabled || !interval || !same || segment.status !== 'candidate' || !heard || !!state.audio.preview;
+        $('audioExport').disabled = !enabled || !segment || segment.status !== 'verified' || !!segment.clip_url || audioDirty();
+        ['audioStart', 'audioEnd'].forEach(id => { $(id).disabled = state.audio.saving || state.saving || state.loading || !state.audio.available; });
+      }
+      function updateAudioSummary() {
+        const q = state.detail;
+        if (!q || q.section !== 'listening') return;
+        const segment = audioSegment();
+        const names = { candidate: '후보 구간 · 청취 검증 전', verified: '검증 완료 구간' };
+        $('audioSegmentStatus').textContent = !state.audio.available
+          ? '현재 서버에서 문항별 음원 구간 기능을 제공하지 않습니다. 서버를 다시 실행하세요.'
+          : segment ? `${names[segment.status] || '상태 미확인'} · 구간 버전 ${segment.version}` : '설정된 구간 없음 · 시작·종료 시각을 직접 입력하세요.';
+        const duration = audioDurationMs();
+        $('audioDurationHint').textContent = Number.isSafeInteger(duration) && duration > 0
+          ? `전체 원본 길이: ${seconds(duration)}초 · 시작과 종료는 소수 셋째 자리까지 입력` : '전체 원본 길이를 확인하는 중입니다. 재생기에서 음원을 로드하세요.';
+        const shared = audioSharedNumbers(q);
+        $('audioSharedNote').hidden = shared.length < 2;
+        if (shared.length >= 2) $('audioSharedNote').textContent = `${shared.join('·')}번은 동일한 대화를 공유하므로 이 구간을 저장·검증하면 두 문항에 함께 반영됩니다. 원본 녹음에서 공유 대화 전체의 시작과 끝을 직접 듣고 확인하세요.`;
+        const clip = segment?.status === 'verified' ? sameOriginURL(segment.clip_url) : null;
+        $('audioClipLink').hidden = !clip;
+        if (clip) $('audioClipLink').href = clip.href;
+        else $('audioClipLink').removeAttribute('href');
+        refreshAudioActions();
+        refreshDirty();
+      }
+      function renderAudioSegment(q, audioUrl) {
+        state.audio.available = q.section === 'listening' && !!audioUrl &&
+          Object.prototype.hasOwnProperty.call(q, 'audio_segment');
+        state.audio.preview = null;
+        state.audio.heardSignature = null;
+        state.audio.durationMs = null;
+        state.audio.error = false;
+        const segment = audioSegment();
+        $('audioSegmentPanel').hidden = q.section !== 'listening' || !audioUrl;
+        $('audioStart').value = Number.isSafeInteger(segment?.start_ms) ? seconds(segment.start_ms) : '';
+        $('audioEnd').value = Number.isSafeInteger(segment?.end_ms) ? seconds(segment.end_ms) : '';
+        audioFeedback(state.audio.available
+          ? '구간을 처음부터 끝까지 재생한 뒤 후보로 저장하고 별도로 검증하세요.'
+          : '원본 전체 음원은 들을 수 있지만, 문항별 구간 API를 사용할 수 없습니다.');
+        updateAudioSummary();
+      }
+      function stopAudioPreview(message = '구간 듣기를 중단했습니다. 검증하려면 처음부터 끝까지 다시 들으세요.') {
+        const active = state.audio.preview;
+        state.audio.preview = null;
+        if (active) $('audioPlayer').pause();
+        if (active && message) audioFeedback(message);
+        refreshAudioActions();
+      }
+      function finishAudioPreview() {
+        const preview = state.audio.preview;
+        if (!preview || preview.questionId !== state.detail?.id) return;
+        state.audio.preview = null;
+        $('audioPlayer').pause();
+        state.audio.heardSignature = preview.signature;
+        audioFeedback('설정한 구간을 끝까지 들었습니다. 후보 저장 후 별도로 검증할 수 있습니다.', 'success');
+        refreshAudioActions();
+      }
+      function previewAudio() {
+        if (state.audio.preview) { stopAudioPreview(); return; }
+        if (!state.audio.available || !state.detail || state.audio.saving || state.saving) return;
+        let interval;
+        try { interval = audioInterval(); }
+        catch (error) { audioFeedback(error.message, 'error'); return; }
+        const player = $('audioPlayer');
+        if (!player.src || player.readyState < 1) {
+          audioFeedback('전체 음원이 아직 준비되지 않았습니다. 잠시 후 다시 재생하세요.', 'error');
+          return;
+        }
+        player.pause();
+        state.audio.heardSignature = null;
+        const preview = { ...interval, questionId: state.detail.id, signature: audioSignature(interval),
+          lastSecond: interval.start_ms / 1000, playedMs: 0, allowInitialSeek: true };
+        state.audio.preview = preview;
+        try {
+          player.currentTime = interval.start_ms / 1000;
+          if (!player.seeking) preview.allowInitialSeek = false;
+          audioFeedback(`${seconds(interval.start_ms)}초부터 ${seconds(interval.end_ms)}초까지 재생 중입니다.`);
+          refreshAudioActions();
+          player.play().catch(error => {
+            if (state.audio.preview === preview) stopAudioPreview(`음원을 재생하지 못했습니다: ${error.message}`);
+          });
+        } catch (error) { stopAudioPreview(`음원 구간으로 이동할 수 없습니다: ${error.message}`); }
+      }
+      function audioTimeUpdate() {
+        const preview = state.audio.preview;
+        if (!preview || preview.questionId !== state.detail?.id || preview.allowInitialSeek) return;
+        const position = $('audioPlayer').currentTime;
+        const delta = position - preview.lastSecond;
+        if (delta < -0.12 || delta > 1.75 || position < preview.start_ms / 1000 - 0.12) {
+          stopAudioPreview('재생 위치가 건너뛰었습니다. 청취 검증을 위해 구간을 처음부터 다시 재생하세요.');
+          return;
+        }
+        if (delta > 0) preview.playedMs += delta * 1000;
+        preview.lastSecond = position;
+        if (position >= preview.end_ms / 1000 - 0.05) {
+          if (preview.playedMs + 550 >= preview.end_ms - preview.start_ms) finishAudioPreview();
+          else stopAudioPreview('끝까지 연속해서 재생되지 않았습니다. 다시 들어 주세요.');
+        }
+      }
+      function audioInputChanged() {
+        if (state.audio.preview) stopAudioPreview();
+        state.audio.heardSignature = null;
+        audioFeedback('구간이 바뀌었습니다. 새 구간을 듣고 후보로 저장해야 검증할 수 있습니다.');
+        refreshAudioActions();
+        refreshDirty();
+      }
+      async function saveAudioSegment(status) {
+        if (!state.audio.available || !state.detail || state.audio.saving || state.saving || state.loading) return;
+        let interval;
+        try { interval = audioInterval(); }
+        catch (error) { audioFeedback(error.message, 'error'); return; }
+        const segment = audioSegment();
+        if (status === 'verified' && (!segment || segment.status !== 'candidate' ||
+            segment.start_ms !== interval.start_ms || segment.end_ms !== interval.end_ms ||
+            state.audio.heardSignature !== audioSignature(interval) || state.audio.preview)) {
+          audioFeedback('먼저 동일한 구간을 후보로 저장하고 처음부터 끝까지 들은 후 검증하세요.', 'error');
+          return;
+        }
+        if (status === 'candidate' && segment?.status === 'verified' &&
+            segment.start_ms === interval.start_ms && segment.end_ms === interval.end_ms) return;
+        if (state.audio.preview) stopAudioPreview();
+        const id = state.detail.id;
+        state.audio.saving = true;
+        refreshAudioActions();
+        updateNavigation();
+        try {
+          const updated = await request(`/api/questions/${encodeURIComponent(id)}/audio-segment`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Review-Token': state.csrfToken },
+            body: JSON.stringify({ version: Number.isSafeInteger(segment?.version) ? segment.version : 0,
+              start_ms: interval.start_ms, end_ms: interval.end_ms, status })
+          });
+          if (!updated || updated.id !== id || updated.audio_segment?.status !== status ||
+              updated.audio_segment.start_ms !== interval.start_ms || updated.audio_segment.end_ms !== interval.end_ms) {
+            throw new Error('구간 저장 응답이 올바르지 않습니다. 서버 상태를 확인하세요.');
+          }
+          // Preserve the question editor's unsaved draft; the audio segment is a separate review.
+          state.detail.audio_segment = updated.audio_segment;
+          if (Number.isSafeInteger(updated.version)) state.detail.version = updated.version;
+          audioFeedback(status === 'verified' ? '청취 확인 후 해당 음원 구간이 검증되었습니다.' : '후보 구간을 저장했습니다. 검증하려면 해당 구간을 끝까지 들어야 합니다.', 'success');
+          updateAudioSummary();
+        } catch (error) {
+          audioFeedback(error.status === 409
+            ? '다른 탭에서 음원 구간이 수정되었습니다. 현재 입력을 유지합니다. 서버 내용을 다시 불러와 비교하세요.'
+            : error.message, 'error');
+          notice(error.message, 'error', error.status === 409);
+        } finally {
+          state.audio.saving = false;
+          refreshAudioActions();
+          updateNavigation();
+        }
+      }
+      async function exportAudioClip() {
+        const q = state.detail;
+        const segment = audioSegment();
+        if (!q || !state.audio.available || state.audio.saving || state.saving || state.loading ||
+            segment?.status !== 'verified' || segment.clip_url || audioDirty()) return;
+        state.audio.saving = true;
+        refreshAudioActions();
+        updateNavigation();
+        try {
+          const updated = await request(`/api/questions/${encodeURIComponent(q.id)}/export-clip`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Review-Token': state.csrfToken }, body: '{}'
+          });
+          if (!updated || updated.id !== q.id || updated.audio_segment?.status !== 'verified' ||
+              !sameOriginURL(updated.audio_segment.clip_url)) throw new Error('MP3 추출 응답에 유효한 로컬 파일 주소가 없습니다.');
+          state.detail.audio_segment = updated.audio_segment;
+          if (Number.isSafeInteger(updated.version)) state.detail.version = updated.version;
+          updateAudioSummary();
+          audioFeedback('검증된 구간의 MP3 추출이 완료되었습니다. 아래 링크에서 파일을 확인하세요.', 'success');
+        } catch (error) { audioFeedback(error.message, 'error'); notice(error.message, 'error'); }
+        finally { state.audio.saving = false; refreshAudioActions(); updateNavigation(); }
+      }
+      function refreshDirty() {
+        const badge = $('dirtyBadge');
+        if (badge) badge.hidden = !dirty();
+        document.title = `${dirty() || audioDirty() ? '● ' : ''}TOPIK 35 · 문항 검수실`;
+      }
+      function canNavigate() {
+        if (state.saving || state.audio.saving || state.loading) return false;
+        return !(dirty() || audioDirty()) || window.confirm('저장하지 않은 문항 또는 음원 구간 변경사항이 있습니다. 저장하지 않고 이동할까요?');
+      }
+      function updateNavigation() {
+        const position = state.items.findIndex(item => item.id === state.selectedId);
+        $('previousQuestion').disabled = state.saving || state.audio.saving || state.loading || position <= 0;
+        $('nextQuestion').disabled = state.saving || state.audio.saving || state.loading || position < 0 || position >= state.items.length - 1;
+      }
+      function setLoading(value) {
+        state.loading = value;
+        $('saveDraft').disabled = value || state.saving || !state.detail;
+        $('approveQuestion').disabled = value || state.saving || !state.detail;
+        $('rejectQuestion').disabled = value || state.saving || !state.detail;
+        updateNavigation();
+        refreshAudioActions();
+      }
+      async function selectQuestion(id, { force = false } = {}) {
+        if (!force && id === state.selectedId && state.detail) return;
+        if (!force && !canNavigate()) return;
+        if (state.saving || state.audio.saving) return;
+        const token = ++state.requestId;
+        state.selectedId = id;
+        state.detail = null;
+        state.baseline = '';
+        state.audio.preview = null;
+        state.audio.heardSignature = null;
+        $('audioPlayer').pause();
+        $('editorContent').hidden = true;
+        $('editorEmpty').hidden = false;
+        $('editorEmpty').textContent = '문항을 불러오는 중…';
+        clearNotice();
+        filterItems();
+        setLoading(true);
+        try {
+          const detail = await request(`/api/questions/${encodeURIComponent(id)}`);
+          if (token !== state.requestId) return;
+          if (!detail || detail.id !== id || !Array.isArray(detail.choices)) throw new Error('문항 상세 응답 형식이 올바르지 않습니다.');
+          state.detail = detail;
+          state.pdfTab = 'question';
+          renderDetail();
+        } catch (error) {
+          if (token !== state.requestId) return;
+          $('editorEmpty').textContent = '문항을 불러오지 못했습니다. 목록에서 다시 선택하거나 새로고침하세요.';
+          notice(error.message, 'error');
+        } finally {
+          if (token === state.requestId) setLoading(false);
+        }
+      }
+      function badge(text, className = '') { return element('span', `badge ${className}`, text); }
+      function renderDetail() {
+        const q = state.detail;
+        $('editorEmpty').hidden = true;
+        $('editorContent').hidden = false;
+        $('editorTitle').textContent = `${q.number}번 문항`;
+        $('questionSubtitle').textContent = `35회 · TOPIK I · ${SECTION_NAMES[q.section] || q.section}`;
+        $('questionBadges').replaceChildren(
+          badge(statusName(q.review_status), `status ${q.review_status}`),
+          badge(q.id),
+          badge(`${q.points}점`),
+          badge(`원본 PDF ${q.source_pdf_page || '—'}쪽`),
+          ...(q.requires_image ? [badge('그림 확인 필요')] : []),
+          badge('미저장 변경', 'dirty')
+        );
+        $('questionBadges').lastElementChild.id = 'dirtyBadge';
+        textBox('groupInstruction', q.group?.instruction, '공통 지시문 없음');
+        textBox('groupPassage', q.group?.passage_text, '공통 지문 없음');
+        textBox('rawQuestion', q.raw_question_text, '추출 원문 없음');
+        $('stemInput').value = typeof q.stem === 'string' ? q.stem : '';
+        for (let n = 1; n <= 4; n++) {
+          const choice = q.choices.find(item => Number(item.number) === n);
+          $(`choice${n}`).value = choice && typeof choice.text === 'string' ? choice.text : '';
+          $(`choiceRow${n}`).classList.toggle('correct', Number(q.answer?.choice_number) === n);
+        }
+        $('answerNote').textContent = `정답 ${CHOICE_SYMBOLS[Number(q.answer?.choice_number) - 1] || '미확인'} · 정답표 ${q.answer_key_number ?? '—'}번 · 정답표 PDF ${q.answer?.source_pdf_page ?? '—'}쪽 · ${q.points}점`;
+        $('transcriptEditorSection').hidden = q.section !== 'listening';
+        $('transcriptInput').value = typeof q.transcript?.text === 'string' ? q.transcript.text : '';
+        $('transcriptHint').textContent = `대본 검수 상태: ${statusName(q.transcript?.review_status)} · 원본 PDF ${q.transcript?.source_pdf_page || '—'}쪽 · 오른쪽에서 음원 구간을 별도로 듣고 검증할 수 있습니다. 대본 승인과 구간 검증은 별개입니다.`;
+        $('reviewNote').value = '';
+        state.baseline = JSON.stringify(draft());
+        refreshDirty();
+        renderReferences();
+        renderHistory();
+        filterItems();
+        updateNavigation();
+      }
+      function renderPdf() {
+        const q = state.detail;
+        if (!q) { $('sourceFrame').hidden = true; $('pdfFallback').hidden = false; return; }
+        const files = {
+          question: { url: q.source_pdf_url, page: q.source_pdf_page, label: '시험지' },
+          answer: { url: q.answer_pdf_url, page: q.answer?.source_pdf_page, label: '정답표' },
+          transcript: { url: q.transcript_pdf_url, page: q.transcript?.source_pdf_page, label: '듣기 대본' }
+        };
+        const file = files[state.pdfTab];
+        const url = sourceWithPage(file.url, file.page);
+        $('sourceFrame').hidden = !url;
+        $('pdfFallback').hidden = !!url;
+        $('pdfFallback').textContent = file.url ? '원본 PDF 주소가 로컬 서버와 다른 출처이거나 올바르지 않습니다.' : `${file.label} 파일이 제공되지 않았습니다.`;
+        if (url) $('sourceFrame').src = url;
+        else $('sourceFrame').removeAttribute('src');
+        $('sourceLink').hidden = !url;
+        if (url) $('sourceLink').href = url;
+        else $('sourceLink').removeAttribute('href');
+        $('sourcePage').textContent = `${file.label} · ${file.page ? `PDF ${file.page}쪽` : '페이지 정보 없음'}`;
+        document.querySelectorAll('.source-tab').forEach(button => {
+          const active = button.dataset.source === state.pdfTab;
+          button.classList.toggle('active', active);
+          button.setAttribute('aria-pressed', String(active));
+          button.disabled = button.dataset.source === 'transcript' && q.section !== 'listening';
+        });
+      }
+      function renderReferences() {
+        const q = state.detail;
+        renderPdf();
+        const audioUrl = q.section === 'listening' ? sameOriginURL(q.audio_url) : null;
+        $('audioSection').hidden = q.section !== 'listening';
+        const player = $('audioPlayer');
+        state.audio.preview = null;
+        player.pause();
+        player.removeAttribute('src');
+        player.load();
+        renderAudioSegment(q, audioUrl);
+        if (audioUrl) { player.src = audioUrl.href; player.load(); }
+        player.hidden = !audioUrl;
+        $('audioFullHint').textContent = q.audio_url && !audioUrl
+          ? '음원 주소가 로컬 서버 외부이거나 잘못되어 재생을 차단했습니다.'
+          : '전체 원본 음원도 재생기에서 언제든 들을 수 있습니다. 구간 미지정 시 자동 분할하거나 검증하지 않습니다.';
+        refreshAudioActions();
+        const imageList = $('imageList');
+        imageList.replaceChildren();
+        const images = Array.isArray(q.images) ? q.images : [];
+        $('imageSection').hidden = !images.length;
+        for (const item of images) {
+          const figure = element('figure');
+          const url = sameOriginURL(item.url);
+          if (url) {
+            const image = element('img');
+            image.src = url.href;
+            image.alt = `${q.number}번 원본 그림, ${item.key || '이미지'}`;
+            image.loading = 'lazy';
+            const link = element('a');
+            link.href = url.href;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.title = '원본 이미지 새 탭에서 열기';
+            link.append(image);
+            figure.append(link);
+          } else figure.append(element('p', 'hint', '이미지가 로컬 서버 외부에 있거나 주소가 올바르지 않습니다.'));
+          figure.append(element('figcaption', '', item.key || '원본 이미지'));
+          imageList.append(figure);
+        }
+        const flags = $('flagList');
+        flags.replaceChildren();
+        const warnings = Array.isArray(q.preview_flags) ? q.preview_flags : [];
+        if (!warnings.length) flags.append(element('p', 'hint', '제공된 추출 주의사항이 없습니다. 원본과 대조해 검수하세요.'));
+        else warnings.forEach(flag => flags.append(element('div', 'flag', flag)));
+      }
+      function renderHistory() {
+        const history = $('historyList');
+        history.replaceChildren();
+        const rows = Array.isArray(state.detail.history) ? state.detail.history : [];
+        if (!rows.length) { history.append(element('li', '', '검수 이력이 없습니다.')); return; }
+        for (const item of rows) {
+          const line = element('li');
+          line.append(element('strong', '', statusName(item.status) === '상태 미확인' ? (item.status || '기록') : statusName(item.status)));
+          if (item.scope) line.append(element('span', '', ` · ${item.scope}`));
+          if (item.note || item.evidence) line.append(element('p', '', item.note || item.evidence));
+          if (item.reviewed_at) {
+            const time = element('time', '', String(item.reviewed_at));
+            time.dateTime = String(item.reviewed_at);
+            line.append(time);
+          }
+          history.append(line);
+        }
+      }
+      async function sendReview(status) {
+        if (!state.detail || state.loading || state.saving || state.audio?.saving) return;
+        const input = draft();
+        if (status === 'rejected' && !input.note.trim()) {
+          notice('반려 사유를 검수 메모에 입력해야 합니다.', 'error');
+          $('reviewNote').focus();
+          return;
+        }
+        if (status === 'rejected' && !window.confirm('이 문항을 반려 상태로 기록할까요?')) return;
+        let nextQuestionId = null;
+        let approvedNumber = null;
+        state.saving = true;
+        setLoading(false);
+        try {
+          const id = state.detail.id;
+          const updated = await request(`/api/questions/${encodeURIComponent(id)}/review`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Review-Token': state.csrfToken },
+            body: JSON.stringify({ version: state.detail.version, status, stem: input.stem, choices: input.choices, transcript_text: input.transcript_text, note: input.note })
+          });
+          if (!updated || updated.id !== id || !Array.isArray(updated.choices)) throw new Error('저장 응답 형식이 올바르지 않습니다. 서버 상태를 확인하세요.');
+          state.detail = updated;
+          const row = state.items.find(item => item.id === id);
+          if (row) { row.status = updated.review_status; row.requires_image = updated.requires_image; }
+          renderDetail();
+          if (status === 'verified') {
+            approvedNumber = updated.number;
+            const index = state.items.findIndex(item => item.id === id);
+            nextQuestionId = state.items[index + 1]?.id || null;
+          }
+          notice(status === 'verified' ? '문항이 검수 승인되었습니다.' : status === 'rejected' ? '문항이 반려되었습니다.' : '수정 내용이 미검수 상태로 저장되었습니다.', 'success');
+          // Refresh server-side counts/list, but the successful saved detail remains visible if this fails.
+          try { await loadList(); }
+          catch (error) { notice(`문항 저장은 완료되었지만 목록을 갱신하지 못했습니다: ${error.message}`, 'info'); }
+        } catch (error) {
+          notice(error.message, 'error', error.status === 409);
+        } finally {
+          state.saving = false;
+          setLoading(false);
+        }
+        // Move only after a successful approval; failed saves leave the current draft intact.
+        if (nextQuestionId) {
+          await selectQuestion(nextQuestionId);
+          if (state.detail?.id === nextQuestionId) {
+            notice(`${approvedNumber}번 문항을 승인하고 다음 ${state.detail.number}번 문항으로 이동했습니다.`, 'success');
+          }
+        }
+      }
+      function neighbor(delta) {
+        const index = state.items.findIndex(item => item.id === state.selectedId);
+        if (index < 0) return;
+        const item = state.items[index + delta];
+        if (item) selectQuestion(item.id);
+      }
+      function installHandlers() {
+        ['questionSearch', 'sectionFilter', 'statusFilter', 'imageFilter'].forEach(id => $(id).addEventListener('input', filterItems));
+        ['stemInput', 'transcriptInput', 'reviewNote', 'choice1', 'choice2', 'choice3', 'choice4'].forEach(id => $(id).addEventListener('input', refreshDirty));
+        ['audioStart', 'audioEnd'].forEach(id => $(id).addEventListener('input', audioInputChanged));
+        $('audioPreview').addEventListener('click', previewAudio);
+        $('audioSaveCandidate').addEventListener('click', () => saveAudioSegment('candidate'));
+        $('audioVerify').addEventListener('click', () => saveAudioSegment('verified'));
+        $('audioExport').addEventListener('click', exportAudioClip);
+        $('audioPlayer').addEventListener('loadedmetadata', () => {
+          const duration = $('audioPlayer').duration;
+          state.audio.durationMs = Number.isFinite(duration) && duration > 0 ? Math.round(duration * 1000) : null;
+          updateAudioSummary();
+        });
+        $('audioPlayer').addEventListener('durationchange', () => {
+          const duration = $('audioPlayer').duration;
+          if (Number.isFinite(duration) && duration > 0) {
+            state.audio.durationMs = Math.round(duration * 1000);
+            updateAudioSummary();
+          }
+        });
+        $('audioPlayer').addEventListener('timeupdate', audioTimeUpdate);
+        $('audioPlayer').addEventListener('seeking', () => {
+          const preview = state.audio.preview;
+          if (!preview) return;
+          if (preview.allowInitialSeek && Math.abs($('audioPlayer').currentTime - preview.start_ms / 1000) < 0.1) return;
+          stopAudioPreview('재생 위치를 직접 이동했습니다. 검증 전에는 구간을 처음부터 끝까지 다시 들어야 합니다.');
+        });
+        $('audioPlayer').addEventListener('seeked', () => {
+          const preview = state.audio.preview;
+          if (preview?.allowInitialSeek) {
+            preview.allowInitialSeek = false;
+            preview.lastSecond = $('audioPlayer').currentTime;
+          }
+        });
+        $('audioPlayer').addEventListener('pause', () => {
+          // pause() from stopping an earlier full-track play can queue an event
+          // after the new preview starts. Only an actually paused player aborts.
+          if (state.audio.preview && $('audioPlayer').paused)
+            stopAudioPreview('재생이 중단되었습니다. 구간을 끝까지 들어야 검증할 수 있습니다.');
+        });
+        $('audioPlayer').addEventListener('ended', () => {
+          if (state.audio.preview) audioTimeUpdate();
+          if (state.audio.preview) stopAudioPreview('구간 끝까지 청취하지 못했습니다. 다시 재생하세요.');
+        });
+        $('audioPlayer').addEventListener('error', () => {
+          state.audio.error = true;
+          if (state.audio.preview) stopAudioPreview('전체 음원을 열지 못해 미리 듣기를 중단했습니다.');
+          audioFeedback('음원 파일을 읽을 수 없습니다. 원본 경로와 로컬 서버 상태를 확인하세요.', 'error');
+          refreshAudioActions();
+        });
+        $('previousQuestion').addEventListener('click', () => neighbor(-1));
+        $('nextQuestion').addEventListener('click', () => neighbor(1));
+        $('saveDraft').addEventListener('click', () => sendReview('needs_manual_review'));
+        $('approveQuestion').addEventListener('click', () => sendReview('verified'));
+        $('rejectQuestion').addEventListener('click', () => sendReview('rejected'));
+        document.querySelectorAll('.source-tab').forEach(button => button.addEventListener('click', () => { if (!state.detail) return; state.pdfTab = button.dataset.source; renderPdf(); }));
+        $('reloadConflict').addEventListener('click', () => {
+          if (!state.selectedId || state.saving || state.audio.saving) return;
+          if ((dirty() || audioDirty()) && !window.confirm('현재 문항 및 음원 구간 입력을 버리고 서버의 최신 내용을 불러올까요?')) return;
+          selectQuestion(state.selectedId, { force: true });
+        });
+        window.addEventListener('beforeunload', event => {
+          if (!(dirty() || audioDirty()) && !state.audio.saving) return;
+          event.preventDefault();
+          event.returnValue = '';
+        });
+        document.addEventListener('keydown', event => {
+          if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+            event.preventDefault();
+            sendReview('needs_manual_review');
+          }
+        });
+      }
+      async function init() {
+        installHandlers();
+        const host = location.hostname.toLowerCase();
+        if (host !== '127.0.0.1' || location.protocol !== 'http:') {
+          $('connectionState').textContent = '접속 차단';
+          $('editorEmpty').textContent = '이 검수 화면은 PowerShell에 표시된 http://127.0.0.1:포트번호/ 주소에서 실행해야 합니다.';
+          $('listCount').textContent = '로컬 접속 필요';
+          notice('보호를 위해 외부 주소 또는 file://에서 API 요청을 실행하지 않습니다. 로컬 서버 주소로 접속하세요.', 'error');
+          return;
+        }
+        try {
+          await loadList();
+          if (state.items.length) await selectQuestion(state.items[0].id);
+          else $('editorEmpty').textContent = '검수할 문항이 없습니다.';
+        } catch (error) {
+          $('connectionState').textContent = '서버 연결 실패';
+          $('listCount').textContent = '목록을 불러오지 못했습니다.';
+          $('editorEmpty').textContent = '로컬 API 서버가 실행 중인지 확인하고 페이지를 새로고침하세요.';
+          notice(error.message, 'error');
+        }
+      }
+      init();
+    })();
+  </script>
+</body>
+</html>

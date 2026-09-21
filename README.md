@@ -1,6 +1,6 @@
 # TopikDatabase - PDF collector starter
 
-**Status:** SOURCE INDEX & SCRIPT ONLY. No original exam PDF has been downloaded or pushed as part of creating this package.
+**Repository status:** Source index and collector code are Git-tracked. A separate, Git-ignored local corpus is now present in `topik-past-papers/` for 12 exam sessions; its PDFs, audio, transcripts, manifests, and verification report are **not** pushed to GitHub. See `topik-past-papers/README.md` on this computer for local corpus scope and verification limits.
 
 This tool scans **12 verified TOPIK GUIDE landing pages** (35/36/37/41/47/52/60/64/83/91/96/102), identifies candidate PDF links, optionally saves actual PDF bytes, checks PDF signature/trailer, and writes a CSV provenance log with SHA-256. It performs no Git or GitHub operations.
 
@@ -11,6 +11,8 @@ This tool scans **12 verified TOPIK GUIDE landing pages** (35/36/37/41/47/52/60/
 3. `py -3 collect_topik_pdfs.py` — source scan only, populates `catalog/pdf_inventory.csv`.
 4. `py -3 collect_topik_pdfs.py --download` — when you have confirmed applicable source use terms, save PDF files to `local_sources/035/TOPIK_I/` etc.
 5. Inspect `catalog/collection_summary.json` and any `file_error` rows. Verify content/answer keys manually; a PDF signature alone does not guarantee that the file matches the session or correct answer sheet.
+
+The collector above writes to `local_sources/` and does not automatically merge with the independently gathered `topik-past-papers/` corpus. To recheck that corpus, run `py -3 topik-past-papers/verify_corpus.py` on the computer with its local verification dependencies installed. This confirms file parsing and asset-category coverage, not full exam-content correctness.
 
 To test on a small sample: `py -3 collect_topik_pdfs.py --download --limit 5`.
 
