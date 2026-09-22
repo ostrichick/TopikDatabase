@@ -13,6 +13,7 @@ import http.client
 import io
 import json
 import errno
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -259,6 +260,33 @@ class TestReviewStore(unittest.TestCase):
             conn.execute("UPDATE source_files SET relative_path=? WHERE id=?", (original, source_id))
             conn.commit()
         self.assertTrue(self.store.media_path(self.listening_id, "paper").is_file())
+
+    def test_changed_source_pdf_cannot_be_served_or_used_to_approve(self):
+        # Reproduce source drift with a private copy. Never change the PDF
+        # belonging to the user's real corpus.
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            relative = conn.execute(
+                "SELECT s.relative_path FROM questions q JOIN source_files s "
+                "ON s.id=q.source_file_id WHERE q.id=?", (self.listening_id,),
+            ).fetchone()[0]
+        isolated_root = Path(self.sandbox.name) / "isolated-corpus"
+        paper = isolated_root / relative
+        paper.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / relative, paper)
+        self.assertEqual(paper.stat().st_size, (ROOT / relative).stat().st_size)
+        with paper.open("r+b") as source:
+            source.seek(16)
+            previous = source.read(1)
+            source.seek(16)
+            source.write(bytes([previous[0] ^ 1]))
+        isolated_store = review_ui.ReviewStore(self.db_path, root=isolated_root)
+        payload = self._payload(self.listening_id)
+        baseline = (self._row(self.listening_id), self._history(self.listening_id))
+        with self.assertRaisesRegex(review_ui.Conflict, "checksum changed"):
+            isolated_store.media_path(self.listening_id, "paper")
+        with self.assertRaisesRegex(review_ui.Conflict, "checksum changed"):
+            isolated_store.save_review(self.listening_id, payload)
+        self.assertEqual((self._row(self.listening_id), self._history(self.listening_id)), baseline)
 
 
 class TestReviewHTTP(unittest.TestCase):

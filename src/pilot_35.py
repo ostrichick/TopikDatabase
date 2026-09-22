@@ -140,6 +140,13 @@ def _report(conn: sqlite3.Connection, *, unchanged: bool = False) -> dict:
     counts = dict(conn.execute("SELECT name, count(*) FROM sections JOIN questions "
                                "ON questions.section_id=sections.id GROUP BY name"))
     review = dict(conn.execute("SELECT review_status, count(*) FROM questions GROUP BY review_status"))
+    has_segments = bool(scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master "
+                               "WHERE type='table' AND name='audio_segments')"))
+    audio_status = (dict(conn.execute("SELECT status, count(*) FROM audio_segments GROUP BY status"))
+                    if has_segments else {})
+    timed_segments = scalar("SELECT count(*) FROM audio_segments") if has_segments else 0
+    exported_segments = (scalar("SELECT count(*) FROM audio_segments WHERE status='verified' "
+                                "AND clip_relative_path IS NOT NULL") if has_segments else 0)
     image_q = [item[0] for item in conn.execute(
         "SELECT exam_number FROM questions WHERE requires_image=1 ORDER BY exam_number")]
     return {
@@ -157,17 +164,21 @@ def _report(conn: sqlite3.Connection, *, unchanged: bool = False) -> dict:
         "active_image_blobs": scalar("SELECT count(DISTINCT image_key) FROM question_images"),
         "image_question_links": scalar("SELECT count(*) FROM question_images"),
         "image_required_questions": image_q,
-        "audio_segments_with_timestamps": 0,
+        "audio_segments_with_timestamps": timed_segments,
+        "audio_segment_status": audio_status,
+        "audio_segments_with_exported_clip": exported_segments,
         "review_status": review,
-        "manual_review_required": True,
+        "manual_review_required": (review.get("needs_manual_review", 0) > 0 or
+                                   review.get("rejected", 0) > 0 or
+                                   audio_status.get("verified", 0) != 30),
         "extraction_correction_version": dict(conn.execute("SELECT key,value FROM import_metadata")).get(
             "extraction_correction_version", "not_applied"),
         "limitations": [
-            "The original HTML preview was not human-approved: all 70 question texts/choices remain needs_manual_review.",
+            "The original HTML preview was not human-approved; use review_status for current per-question progress.",
             "PDF answer values and points are mechanically cross-checked; their semantic correctness is not independently certified.",
             "Transcript text comes from PDF extraction and must be compared visually with the original.",
             "Image crops were embedded in the original preview and need manual layout checks.",
-            "Full audio is linked, but per-question playback timestamps have not been established.",
+            "Audio intervals are unverified until a person checks the recording; candidate timestamps are not approval.",
             "Source material and derived database are local and not licensed for redistribution by this import.",
         ],
         "reused_existing_database": unchanged,
@@ -401,9 +412,13 @@ def main() -> dict:
             raise
         finally:
             connection.close()
-        if DB_PATH.exists():
-            raise RuntimeError("DB appeared during import; refusing to overwrite it")
-        os.replace(temp_filename, DB_PATH)
+        # The existence check alone cannot protect a review DB created between
+        # the check and publication. A same-directory hard link creates the
+        # destination atomically and fails if another process already owns it.
+        try:
+            os.link(temp_filename, DB_PATH)
+        except FileExistsError as exc:
+            raise RuntimeError("DB appeared during import; refusing to overwrite it") from exc
         atomic_json(REPORT_PATH, report)
         return report
     finally:

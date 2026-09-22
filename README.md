@@ -44,4 +44,4 @@ Official TOPIK copyright/use enquiry: topik@korea.kr (PBT, per NIIED).
 
 ## Git repository
 
-Only the collector source code, tests, and source-page metadata are version-controlled. Downloaded exam PDFs, extracted previews, archives, caches, and local corpora remain local and are excluded by .gitignore.
+The collector, local pilot/review code, tests, documentation, and source-page metadata are version-controlled. Downloaded exam PDFs, extracted previews, archives, caches, and local corpora remain local and are excluded by .gitignore. For the verified implementation status and outstanding human checks as of 2026-09-22, see `docs/project-audit-2026-09-22.md`.

@@ -398,6 +398,11 @@ class ReviewStore:
         with closing(self._connect(writable=True)) as db:
             db.execute("BEGIN IMMEDIATE")
             question = self._question(db, question_id)
+            # A reviewer must be comparing the same originals whose hashes
+            # were recorded during import, including the independent answer key.
+            for kind in (("paper", "answer", "transcript") if question["section"] == "listening"
+                         else ("paper", "answer")):
+                self.media_path(question_id, kind)
             old_choices = [row[0] for row in db.execute(
                 "SELECT text FROM choices WHERE question_id=? ORDER BY number", (question_id,)
             )]
@@ -451,10 +456,11 @@ class ReviewStore:
                 source_id = record[0] if record else None
             if source_id is None:
                 raise NotFound("This question has no such source")
-            record = db.execute("SELECT relative_path FROM source_files WHERE id=?", (source_id,)).fetchone()
+            record = db.execute("SELECT relative_path,sha256,byte_size FROM source_files WHERE id=?",
+                                (source_id,)).fetchone()
             if record is None:
                 raise NotFound("Source does not exist")
-            relative = record[0]
+            relative = record["relative_path"]
             if not relative or "\\" in relative or Path(relative).is_absolute():
                 raise ReviewError("Unsafe stored source path")
             source = (self.root / relative).resolve()
@@ -464,6 +470,14 @@ class ReviewStore:
                 raise ReviewError("Source escapes the approved 35th folder") from exc
             if not source.is_file() or source.suffix.lower() != (".mp3" if kind == "audio" else ".pdf"):
                 raise NotFound("Source file unavailable or of unexpected type")
+            if source.stat().st_size != record["byte_size"]:
+                raise Conflict("Original source file size changed; review is blocked")
+            checksum = hashlib.sha256()
+            with source.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    checksum.update(chunk)
+            if checksum.hexdigest() != record["sha256"]:
+                raise Conflict("Original source file checksum changed; review is blocked")
             return source
 
     def get_image(self, question_id: str, index: int) -> tuple[bytes, str]:

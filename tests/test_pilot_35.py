@@ -5,6 +5,8 @@ user's existing derived pilot database.
 """
 
 import hashlib
+import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -47,6 +49,8 @@ class TestPilot35(unittest.TestCase):
                 self.assertEqual(first["active_image_blobs"], 6)
                 self.assertEqual(first["image_question_links"], 7)
                 self.assertEqual(first["review_status"], {"needs_manual_review": 70})
+                self.assertEqual(first["audio_segments_with_timestamps"], 0)
+                self.assertEqual(first["audio_segment_status"], {})
                 before = hashlib.sha256(db_path.read_bytes()).hexdigest()
                 with closing(sqlite3.connect(db_path)) as connection:
                     self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
@@ -84,6 +88,28 @@ class TestPilot35(unittest.TestCase):
                     pilot_35.main()
                 self.assertEqual(hashlib.sha256(db_path.read_bytes()).hexdigest(), altered_hash)
 
+    def test_concurrent_database_creation_cannot_be_overwritten(self):
+        with tempfile.TemporaryDirectory(prefix="topik-35-race-") as tmp:
+            directory = Path(tmp)
+            db_path, report_path = directory / "pilot.sqlite", directory / "report.json"
+            original_link = os.link
+            protected = b"existing reviewer database must survive publication race"
+
+            def publish_after_race(source, destination):
+                self.assertEqual(Path(destination), db_path)
+                db_path.write_bytes(protected)
+                return original_link(source, destination)
+
+            with patch.object(pilot_35, "OUTPUT_DIR", directory), \
+                 patch.object(pilot_35, "DB_PATH", db_path), \
+                 patch.object(pilot_35, "REPORT_PATH", report_path), \
+                 patch.object(pilot_35.os, "link", side_effect=publish_after_race):
+                with self.assertRaisesRegex(RuntimeError, "refusing to overwrite"):
+                    pilot_35.main()
+            self.assertEqual(db_path.read_bytes(), protected)
+            self.assertFalse(report_path.exists())
+            self.assertEqual(list(directory.glob(".035-I-*.part")), [])
+
     def test_importer_reuse_preserves_real_human_review(self):
         with tempfile.TemporaryDirectory(prefix="topik-35-reviewed-") as tmp:
             directory = Path(tmp)
@@ -104,6 +130,37 @@ class TestPilot35(unittest.TestCase):
                 second = pilot_35.main()
                 self.assertTrue(second["reused_existing_database"])
                 self.assertEqual(second["review_status"], {"needs_manual_review": 69, "verified": 1})
+                self.assertFalse(any("all 70" in note for note in second["limitations"]))
+                self.assertEqual(hashlib.sha256(db_path.read_bytes()).hexdigest(), before)
+
+    def test_reused_report_counts_candidate_audio_without_approving_it(self):
+        with tempfile.TemporaryDirectory(prefix="topik-35-audio-report-") as tmp:
+            directory = Path(tmp)
+            db_path, report_path = directory / "pilot.sqlite", directory / "report.json"
+            with patch.object(pilot_35, "OUTPUT_DIR", directory), \
+                 patch.object(pilot_35, "DB_PATH", db_path), \
+                 patch.object(pilot_35, "REPORT_PATH", report_path):
+                pilot_35.main()
+                with closing(sqlite3.connect(db_path)) as db:
+                    source_sha = db.execute(
+                        "SELECT s.sha256 FROM audio_assets a JOIN source_files s "
+                        "ON s.id=a.source_file_id"
+                    ).fetchone()[0]
+                    db.executemany(
+                        "INSERT INTO audio_segments(question_id,audio_asset_id,start_ms,end_ms,"
+                        "status,version,source_sha256,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                        [(f"035-I-L-{number:03d}", "035-I-B-audio", 1000, 2000,
+                          "candidate", 1, source_sha, "2026-09-22T00:00:00Z")
+                         for number in range(1, 31)],
+                    )
+                    db.commit()
+                before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+                report = pilot_35.main()
+                self.assertEqual(report["audio_segments_with_timestamps"], 30)
+                self.assertEqual(report["audio_segment_status"], {"candidate": 30})
+                self.assertEqual(report["audio_segments_with_exported_clip"], 0)
+                self.assertTrue(report["manual_review_required"])
+                self.assertEqual(json.loads(report_path.read_text(encoding="utf-8")), report)
                 self.assertEqual(hashlib.sha256(db_path.read_bytes()).hexdigest(), before)
 
 
