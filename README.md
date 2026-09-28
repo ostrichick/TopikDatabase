@@ -6,7 +6,7 @@ This tool scans **12 verified TOPIK GUIDE landing pages** (35/36/37/41/47/52/60/
 
 ## Windows usage
 
-1. Unzip these files into `C:\Users\gip4k\OneDrive\Documents\Projects\TopikDatabase` (merge with existing files only after comparing names).
+1. Unzip these files into `C:\Projects\TopikDatabase` (merge with existing files only after comparing names).
 2. Open PowerShell in that folder.
 3. `py -3 collect_topik_pdfs.py` — source scan only, populates `catalog/pdf_inventory.csv`.
 4. `py -3 collect_topik_pdfs.py --download` — when you have confirmed applicable source use terms, save PDF files to `local_sources/035/TOPIK_I/` etc.
