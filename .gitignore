@@ -17,3 +17,17 @@ __pycache__/
 
 # Downloaded exam papers and generated previews stay local.
 topik-past-papers/
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+credentials.json
+service-account*.json
+service_account*.json
