@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import errno
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -32,6 +33,10 @@ STATUSES = ("needs_manual_review", "verified", "rejected")
 MAX_POST_BYTES = 64 * 1024
 SHARED_AUDIO = {25: (25, 26), 26: (25, 26), 27: (27, 28), 28: (27, 28),
                 29: (29, 30), 30: (29, 30)}
+AI_AUDIT_TABLES = frozenset({
+    "ai_audit_source_snapshots", "ai_audit_runs", "ai_audit_passes",
+    "ai_audit_results", "ai_audit_findings", "ai_audit_finding_occurrences",
+})
 
 
 class ReviewError(ValueError):
@@ -97,9 +102,260 @@ class ReviewStore:
                 "FROM questions q JOIN sections s ON s.id=q.section_id ORDER BY q.exam_number"
             ).fetchall()
             items = [dict(row) for row in rows]
+            ai_available, ai_summaries = self._ai_audit_summaries(db)
+            if ai_available:
+                for item in items:
+                    summary = ai_summaries.get(item["id"])
+                    audit = self._ai_audit_list_summary(summary) if summary else {}
+                    run_id = summary.get("run_id") if summary else None
+                    execution = self._ai_audit_execution(db, subject_id=item["id"], run_id=run_id)
+                    execution_summary = self._ai_audit_execution_list_summary(execution)
+                    if execution_summary:
+                        audit.update(execution_summary)
+                    if audit:
+                        item["ai_audit"] = audit
             counts = {status: sum(item["status"] == status for item in items) for status in STATUSES}
             counts["total"] = len(items)
-            return {"items": items, "counts": counts}
+            return {"items": items, "counts": counts, "ai_audit_available": ai_available}
+
+    @staticmethod
+    def _has_ai_audit_tables(db: sqlite3.Connection) -> bool:
+        existing = {
+            row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'ai_audit_%'"
+            )
+        }
+        return AI_AUDIT_TABLES.issubset(existing)
+
+    @classmethod
+    def _ai_audit_summaries(cls, db: sqlite3.Connection) -> tuple[bool, dict]:
+        if not cls._has_ai_audit_tables(db):
+            return False, {}
+        try:
+            from src.ai_audit_35 import summarize_all_questions
+        except ImportError:
+            # A legacy checkout can encounter a DB upgraded by a newer audit
+            # tool. Keep the human review screen usable until code catches up.
+            return False, {}
+        aggregate = summarize_all_questions(db)
+        if not isinstance(aggregate, dict):
+            return True, {}
+        normalized = {}
+        if isinstance(aggregate.get("questions"), list):
+            for summary in aggregate["questions"]:
+                item = cls._normalize_ai_audit_summary(summary)
+                if item and item.get("subject_id"):
+                    normalized[item["subject_id"]] = item
+        else:
+            for question_id, summary in aggregate.items():
+                item = cls._normalize_ai_audit_summary(summary, subject_id=question_id)
+                if item:
+                    normalized[question_id] = item
+        return True, normalized
+
+    @classmethod
+    def _ai_audit_summary(cls, db: sqlite3.Connection, question_id: str) -> dict | None:
+        if not cls._has_ai_audit_tables(db):
+            return None
+        try:
+            from src.ai_audit_35 import summarize_question
+        except ImportError:
+            return None
+        summary = summarize_question(db, question_id)
+        normalized = cls._normalize_ai_audit_summary(summary, subject_id=question_id)
+        run_id = normalized.get("run_id") if normalized else None
+        execution = cls._ai_audit_execution(db, subject_id=question_id, run_id=run_id)
+        history = cls._ai_audit_history(db, question_id)
+        if normalized is None and execution is None and history is None:
+            return None
+        if normalized is None:
+            normalized = cls._normalize_ai_audit_summary({
+                "subject_id": question_id,
+                "total": 0,
+                "clear": 0,
+                "finding": 0,
+                "uncertain": 0,
+                "unresolved_findings": 0,
+                "disagreement": False,
+                "risk_score": 0,
+                "risk_level": "none",
+            }, subject_id=question_id)
+        if execution:
+            normalized["execution"] = execution
+            normalized.update(cls._ai_audit_execution_list_summary(execution))
+            if execution.get("latest_run"):
+                normalized["latest_run"] = execution["latest_run"]
+        if history:
+            normalized["history"] = history
+        return normalized
+
+    @staticmethod
+    def _ai_audit_history(db: sqlite3.Connection, question_id: str) -> dict | None:
+        """Transport backend-owned multi-run history for one frozen subject."""
+        try:
+            from src.ai_audit_35 import question_audit_history
+        except ImportError:
+            return None
+        history = question_audit_history(db, question_id)
+        if not isinstance(history, dict):
+            return None
+        runs = history.get("runs")
+        if not isinstance(runs, list) or not runs:
+            return None
+        return history
+
+    @staticmethod
+    def _ai_audit_table_names(db: sqlite3.Connection) -> set[str]:
+        return {
+            row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'ai_audit_%'"
+            )
+        }
+
+    @classmethod
+    def _ai_audit_execution(
+        cls,
+        db: sqlite3.Connection,
+        *,
+        subject_id: str,
+        run_id: str | None = None,
+    ) -> dict | None:
+        """Transport backend run/pass/attempt status without deriving audit decisions."""
+        required = {"ai_audit_runs", "ai_audit_passes", "ai_audit_results", "ai_audit_checkpoints"}
+        if not required.issubset(cls._ai_audit_table_names(db)):
+            return None
+        try:
+            from src.ai_audit_35 import status_report
+        except ImportError:
+            return None
+        # Older audit helpers exposed only run-wide execution state. Do not
+        # misattribute those attempts to every question; wait for the
+        # subject-scoped contract instead.
+        if "subject_id" not in inspect.signature(status_report).parameters:
+            return None
+        report = status_report(db, run_id, subject_id=subject_id)
+        return cls._normalize_ai_audit_execution(report)
+
+    @staticmethod
+    def _normalize_ai_audit_execution(report: object) -> dict | None:
+        if not isinstance(report, dict):
+            return None
+        latest_run = dict(report["latest_run"]) if isinstance(report.get("latest_run"), dict) else None
+        passes = [dict(item) for item in report.get("passes", []) if isinstance(item, dict)] \
+            if isinstance(report.get("passes"), list) else []
+        if latest_run is None and not passes:
+            return None
+        if latest_run and latest_run.get("subject_id") and not passes:
+            return None
+        statuses = ("succeeded", "failed", "timed_out", "invalid")
+        raw_counts = latest_run.get("attempt_status_counts") if latest_run else None
+        attempt_counts = {
+            status: raw_counts.get(status, 0) if isinstance(raw_counts, dict) else 0
+            for status in statuses
+        }
+        for status in statuses:
+            if type(attempt_counts[status]) is not int or attempt_counts[status] < 0:
+                attempt_counts[status] = 0
+        attempts = [
+            attempt for audit_pass in passes
+            for attempt in (audit_pass.get("attempts") if isinstance(audit_pass.get("attempts"), list) else [])
+            if isinstance(attempt, dict)
+        ]
+        if not isinstance(raw_counts, dict):
+            attempt_counts = {
+                status: sum(attempt.get("status") == status for attempt in attempts)
+                for status in statuses
+            }
+        attempt_total = latest_run.get("attempt_total") if latest_run else None
+        if type(attempt_total) is not int or attempt_total < 0:
+            attempt_total = sum(attempt_counts.values())
+        retry_count = sum(
+            type(attempt.get("attempt_number")) is int and attempt["attempt_number"] > 1
+            for attempt in attempts
+        )
+        pass_total = latest_run.get("pass_total") if latest_run else None
+        if type(pass_total) is not int or pass_total < 0:
+            pass_total = len(passes)
+        completed_passes = latest_run.get("completed_passes") if latest_run else None
+        if type(completed_passes) is not int or completed_passes < 0:
+            completed_passes = sum(item.get("state") == "complete" for item in passes)
+        return {
+            "latest_run": latest_run,
+            "passes": passes,
+            "attempt_total": attempt_total,
+            "attempt_status_counts": attempt_counts,
+            "retry_count": retry_count,
+            "incomplete_passes": max(0, pass_total - completed_passes),
+            "has_partial_failures": any(attempt_counts[status] for status in ("failed", "timed_out", "invalid")),
+        }
+
+    @staticmethod
+    def _normalize_ai_audit_summary(summary: object, subject_id: str | None = None) -> dict | None:
+        """Normalize helper output for the browser without recomputing audit decisions."""
+        if not isinstance(summary, dict) or not summary:
+            return None
+        resolved_subject = summary.get("subject_id")
+        if not isinstance(resolved_subject, str):
+            resolved_subject = subject_id if isinstance(subject_id, str) else None
+        totals = summary.get("totals") if isinstance(summary.get("totals"), dict) else {}
+        clear = summary.get("clear", totals.get("clear", 0))
+        finding = summary.get("finding", totals.get("finding", 0))
+        uncertain = summary.get("uncertain", totals.get("uncertain", 0))
+        clear = clear if type(clear) is int and clear >= 0 else 0
+        finding = finding if type(finding) is int and finding >= 0 else 0
+        uncertain = uncertain if type(uncertain) is int and uncertain >= 0 else 0
+        total = summary.get("total")
+        total = total if type(total) is int and total >= 0 else clear + finding + uncertain
+        unresolved = summary.get("unresolved_findings", 0)
+        if isinstance(unresolved, list):
+            unresolved_details = unresolved
+            unresolved_count = len(unresolved)
+        else:
+            unresolved_details = summary.get("findings") if isinstance(summary.get("findings"), list) else []
+            unresolved_count = unresolved if type(unresolved) is int and unresolved >= 0 else len(unresolved_details)
+        entries = [dict(item) for item in summary.get("entries", []) if isinstance(item, dict)] \
+            if isinstance(summary.get("entries"), list) else []
+        latest_run = dict(summary["latest_run"]) if isinstance(summary.get("latest_run"), dict) else None
+        latest_at = next(
+            (item.get("created_at") for item in reversed(entries)
+             if isinstance(item.get("created_at"), str) and item["created_at"]),
+            latest_run.get("created_at") if latest_run else None,
+        )
+        result = dict(summary)
+        if resolved_subject:
+            result["subject_id"] = resolved_subject
+        result.update({
+            "total": total,
+            "clear": clear,
+            "finding": finding,
+            "uncertain": uncertain,
+            "unresolved_findings": unresolved_count,
+            "unresolved_details": unresolved_details,
+            "entries": entries,
+            "latest_run": latest_run,
+            "latest_at": latest_at,
+        })
+        return result
+
+    @staticmethod
+    def _ai_audit_list_summary(summary: dict) -> dict:
+        """Keep question-list payloads small; detailed pass logs load on demand."""
+        keys = (
+            "run_id", "total", "clear", "finding", "uncertain",
+            "unresolved_findings", "disagreement", "risk_score", "risk_level",
+            "convergence", "cross_run_convergence", "latest_run", "latest_at",
+        )
+        return {key: summary[key] for key in keys if key in summary}
+
+    @staticmethod
+    def _ai_audit_execution_list_summary(execution: dict | None) -> dict:
+        if not isinstance(execution, dict):
+            return {}
+        keys = (
+            "attempt_total", "attempt_status_counts", "retry_count",
+            "incomplete_passes", "has_partial_failures", "latest_run",
+        )
+        return {key: execution[key] for key in keys if key in execution}
 
     @staticmethod
     def _has_audio_segments(db: sqlite3.Connection) -> bool:
@@ -305,6 +561,7 @@ class ReviewStore:
         with closing(self._connect()) as db:
             row = self._question(db, question_id)
             question = dict(row)
+            ai_audit = self._ai_audit_summary(db, question_id)
             choices = [dict(item) for item in db.execute(
                 "SELECT number, text FROM choices WHERE question_id=? ORDER BY number", (question_id,)
             )]
@@ -361,6 +618,8 @@ class ReviewStore:
                 "preview_flags": json.loads(question["preview_flags_json"]),
                 "history": history,
             }
+            if ai_audit:
+                result["ai_audit"] = ai_audit
             return result
 
     @staticmethod

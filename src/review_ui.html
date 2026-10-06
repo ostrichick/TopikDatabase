@@ -53,6 +53,10 @@
     .question-sub { display: block; color: #718075; font-size: .73rem; margin-top: 2px; }
     .item-right { display: inline-flex; align-items: center; gap: 6px; }
     .image-tag { color: #825c27; background: #fff1d8; font-size: .72rem; border-radius: 5px; padding: 3px 5px; }
+    .ai-tag { color: #3d5c78; background: #eaf2fa; font-size: .68rem; border-radius: 5px; padding: 3px 5px; font-weight: 800; }
+    .ai-tag.risk-high { color: #993d35; background: #fdecea; }
+    .ai-tag.risk-critical { color: #8a241b; background: #f9deda; }
+    .ai-tag.risk-medium { color: #815a19; background: #fff2d9; }
     .state-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; background: #d29b35; }
     .state-dot.verified { background: #2b9166; }
     .state-dot.rejected { background: #c45b52; }
@@ -122,6 +126,28 @@
     .image-list figcaption { padding: 7px 4px 3px; font-size: .73rem; color: #6b7b6c; overflow-wrap: anywhere; }
     .flags { display: grid; gap: 6px; }
     .flag { padding: 9px 10px; border-radius: 8px; color: #805b23; background: #fff4df; font-size: .78rem; line-height: 1.5; overflow-wrap: anywhere; }
+    .ai-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 10px 0 12px; }
+    .ai-metric { border: 1px solid #dce5eb; border-radius: 9px; background: #f7fafc; padding: 9px 10px; }
+    .ai-metric span { display: block; color: #71808a; font-size: .7rem; margin-bottom: 3px; }
+    .ai-metric strong { display: block; color: #334b5d; font-size: .82rem; line-height: 1.4; overflow-wrap: anywhere; }
+    .ai-disclaimer { color: #657783; background: #f2f6f8; border-radius: 8px; padding: 9px 10px; font-size: .75rem; line-height: 1.55; }
+    .ai-log { margin: 11px 0 0; padding: 0; list-style: none; display: grid; gap: 7px; }
+    .ai-log li { padding: 10px 11px; border-left: 3px solid #afc5d3; background: #f7fafc; border-radius: 5px; font-size: .77rem; line-height: 1.5; overflow-wrap: anywhere; }
+    .ai-log li.finding { border-left-color: #d37a70; background: #fff7f5; }
+    .ai-log li.uncertain { border-left-color: #d0a04d; background: #fffaf0; }
+    .ai-log .meta { display: block; color: #778793; font-size: .69rem; margin-top: 4px; }
+    .ai-subhead { margin: 14px 0 6px; color: #526b7a; font-size: .78rem; }
+    .ai-attempt { margin-top: 8px; padding-top: 8px; border-top: 1px solid #dde6eb; }
+    .ai-attempt:first-of-type { margin-top: 5px; }
+    .ai-attempt.failed, .ai-attempt.timed_out, .ai-attempt.invalid { color: #8a493f; }
+    .ai-evidence { margin-top: 6px; }
+    .ai-evidence summary { cursor: pointer; color: #526d80; font-weight: 750; }
+    .ai-json { margin: 6px 0 0; padding: 8px 9px; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 6px; background: #edf3f6; color: #334b5d; font: .68rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .ai-history { display: grid; gap: 7px; margin-top: 8px; }
+    .ai-run-card { border: 1px solid #dce5eb; border-radius: 8px; background: #f8fbfc; padding: 8px 10px; }
+    .ai-run-card > summary { cursor: pointer; color: #334b5d; font-size: .76rem; line-height: 1.45; font-weight: 800; overflow-wrap: anywhere; }
+    .ai-run-card .meta { display: block; color: #778793; font-size: .69rem; margin-top: 5px; }
+    .ai-history-note { margin: 7px 0 0; color: #657783; font-size: .72rem; line-height: 1.5; }
     .history-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
     .history-list li { padding: 11px 12px; border-left: 3px solid #b5cbb9; background: #f7faf7; border-radius: 5px; line-height: 1.5; font-size: .79rem; overflow-wrap: anywhere; }
     .history-list time { display: block; color: #819184; font-size: .71rem; margin-top: 4px; }
@@ -168,6 +194,8 @@
             <label><span class="control-label">영역</span><select id="sectionFilter" aria-label="영역 필터"><option value="all">전체 영역</option><option value="listening">듣기</option><option value="reading">읽기</option></select></label>
             <label><span class="control-label">상태</span><select id="statusFilter" aria-label="상태 필터"><option value="all">전체 상태</option><option value="needs_manual_review">검토 필요</option><option value="verified">승인</option><option value="rejected">반려</option></select></label>
             <label><span class="control-label">그림</span><select id="imageFilter" aria-label="그림 필터"><option value="all">전체 문항</option><option value="yes">그림 포함</option><option value="no">그림 없음</option></select></label>
+            <label id="aiFilterWrap" hidden><span class="control-label">AI 감사</span><select id="aiFilter" aria-label="AI 감사 필터"><option value="all">전체</option><option value="unresolved">미해결 발견</option><option value="finding">발견 있음</option><option value="disagreement">감사 불일치</option><option value="uncertain">불확실 있음</option><option value="high">고위험</option><option value="unaudited">미감사</option></select></label>
+            <label id="sortOrderWrap" hidden><span class="control-label">정렬</span><select id="sortOrder" aria-label="문항 정렬"><option value="number">문항 번호</option><option value="risk">AI 위험 높은 순</option><option value="findings">미해결 발견 많은 순</option><option value="latest">최근 AI 감사 순</option></select></label>
           </div>
         </div>
         <div class="sidebar-count" id="listCount">불러오는 중…</div>
@@ -247,6 +275,20 @@
           </div>
           <div class="media-card" id="imageSection" hidden><h3>원본 이미지</h3><div id="imageList" class="image-list"></div></div>
           <div class="media-card"><h3>초기 미리보기의 추출 주의사항</h3><p class="hint">아래 표시는 최초 HTML 추출 시점의 기록입니다. 이후 대본·음원이 등록되었을 수 있으니 현재 자료 패널을 우선 확인하세요.</p><div id="flagList" class="flags"><p class="hint">문항을 선택하면 확인할 항목이 나타납니다.</p></div></div>
+          <div class="media-card" id="aiAuditSection" hidden>
+            <h3>AI 독립 감사 · 읽기 전용</h3>
+            <p class="ai-disclaimer">AI 감사 결과는 사람의 검수 상태·검수 이력·음원 검증 상태를 변경하지 않습니다. 사람 검수 시 우선 확인할 단서로만 사용하세요.</p>
+            <div id="aiAuditSummary" class="ai-summary"></div>
+            <div id="aiHistorySection" hidden>
+              <h4 class="ai-subhead">감사 회차 이력</h4>
+              <div id="aiHistorySummary" class="ai-summary"></div>
+              <div id="aiRunHistory" class="ai-history"></div>
+            </div>
+            <h4 class="ai-subhead">실행 시도 · 재시도 기록</h4>
+            <ol id="aiAttemptLog" class="ai-log"></ol>
+            <h4 class="ai-subhead">완료된 문항 verdict · 발견 근거</h4>
+            <ol id="aiAuditLog" class="ai-log"></ol>
+          </div>
           <div class="media-card"><h3>검수 이력</h3><ol id="historyList" class="history-list"><li>기록을 불러오면 여기에 표시됩니다.</li></ol></div>
         </div>
       </aside>
@@ -260,7 +302,10 @@
       const CHOICE_SYMBOLS = ['①', '②', '③', '④'];
       const STATUS_NAMES = { verified: '승인', needs_manual_review: '검토 필요', rejected: '반려' };
       const SECTION_NAMES = { listening: '듣기', reading: '읽기' };
-      const state = { items: [], detail: null, baseline: '', selectedId: null, visible: [], pdfTab: 'question', loading: false, saving: false, requestId: 0, csrfToken: null,
+      const AI_VERDICT_NAMES = { clear: '이상 없음', finding: '결함 발견', uncertain: '불확실' };
+      const AI_ATTEMPT_NAMES = { succeeded: '성공', failed: '실패', timed_out: '시간 초과', invalid: '잘못된 응답' };
+      const AI_RISK_NAMES = { none: '없음', low: '낮음', medium: '중간', high: '높음', critical: '매우 높음' };
+      const state = { items: [], detail: null, baseline: '', selectedId: null, visible: [], pdfTab: 'question', loading: false, saving: false, requestId: 0, csrfToken: null, aiAuditAvailable: false,
         audio: { available: false, saving: false, preview: null, heardSignature: null, durationMs: null, error: false } };
 
       function notice(message, type = 'info', conflict = false) {
@@ -286,11 +331,60 @@
         return url.href;
       }
       function statusName(value) { return STATUS_NAMES[value] || '상태 미확인'; }
+      function aiAudit(item) {
+        const value = item?.ai_audit;
+        return value && typeof value === 'object' ? value : null;
+      }
+      function aiNumber(value) {
+        const number = Number(value);
+        return Number.isFinite(number) && number >= 0 ? number : 0;
+      }
+      function aiRisk(audit) {
+        if (!audit) return { score: 0, level: 'none' };
+        const score = Math.max(0, Math.min(100, aiNumber(audit.risk_score)));
+        const level = ['none', 'low', 'medium', 'high', 'critical'].includes(audit.risk_level)
+          ? audit.risk_level : score >= 90 ? 'critical' : score >= 70 ? 'high' : score >= 40 ? 'medium' : score > 0 ? 'low' : 'none';
+        return { score, level };
+      }
+      function aiTimestamp(audit) {
+        const raw = audit?.latest_run?.completed_at || audit?.latest_run?.finished_at ||
+          audit?.latest_at || audit?.latest_run?.created_at || '';
+        const timestamp = Date.parse(raw);
+        return Number.isFinite(timestamp) ? timestamp : 0;
+      }
+      function aiConvergenceText(value) {
+        if (typeof value === 'string' && value.trim()) {
+          const names = {
+            stable: '안정 · 최근 2개 실행의 판정·발견이 동일',
+            changed: '변화 · 최근 실행에서 판정 또는 발견 변화',
+            insufficient_runs: '판단 자료 부족 · 완료된 실행 2개 미만',
+          };
+          return names[value] || value;
+        }
+        if (!value || typeof value !== 'object') return '판단 자료 부족';
+        if (value.summary || value.label || value.status || value.state)
+          return value.summary || value.label || value.status || value.state;
+        const passes = aiNumber(value.completed_passes);
+        const newFindings = aiNumber(value.new_findings_latest_pass);
+        if (!passes) return '완료된 독립 감사 없음';
+        if (value.converged === true) return `최근 pass 추가 발견 ${newFindings}건 · ${passes}회 완료`;
+        if (passes < 2) return `판단 자료 부족 · ${passes}회 완료`;
+        return `최근 pass 추가 발견 ${newFindings}건 · ${passes}회 완료`;
+      }
       function element(tag, className, text) {
         const node = document.createElement(tag);
         if (className) node.className = className;
         if (text !== undefined) node.textContent = String(text);
         return node;
+      }
+      function aiStructuredDetails(label, value) {
+        if (value === undefined || value === null) return null;
+        let text;
+        try { text = JSON.stringify(value, null, 2); }
+        catch (_) { text = String(value); }
+        const details = element('details', 'ai-evidence');
+        details.append(element('summary', '', label), element('pre', 'ai-json', text));
+        return details;
       }
       function textBox(id, value, fallback = '내용 없음') {
         const node = $(id);
@@ -335,12 +429,37 @@
         const section = $('sectionFilter').value;
         const status = $('statusFilter').value;
         const image = $('imageFilter').value;
+        const ai = $('aiFilter').value;
+        const sort = $('sortOrder').value;
         state.visible = state.items.filter(item =>
           (section === 'all' || item.section === section) &&
           (status === 'all' || item.status === status) &&
           (image === 'all' || Boolean(item.requires_image) === (image === 'yes')) &&
+          (() => {
+            const audit = aiAudit(item);
+            if (ai === 'all') return true;
+            if (ai === 'unaudited') return !audit || aiNumber(audit.total) === 0;
+            if (!audit) return false;
+            if (ai === 'unresolved') return aiNumber(audit.unresolved_findings) > 0;
+            if (ai === 'finding') return aiNumber(audit.finding) > 0;
+            if (ai === 'disagreement') return Boolean(audit.disagreement);
+            if (ai === 'uncertain') return aiNumber(audit.uncertain) > 0;
+            if (ai === 'high') return ['high', 'critical'].includes(aiRisk(audit).level);
+            return true;
+          })() &&
           (!term || String(item.number).includes(term) || String(item.id).toLowerCase().includes(term))
         );
+        const numberOrder = (a, b) => Number(a.number) - Number(b.number);
+        if (sort === 'risk') state.visible.sort((a, b) =>
+          aiRisk(aiAudit(b)).score - aiRisk(aiAudit(a)).score ||
+          aiNumber(aiAudit(b)?.unresolved_findings) - aiNumber(aiAudit(a)?.unresolved_findings) ||
+          numberOrder(a, b));
+        else if (sort === 'findings') state.visible.sort((a, b) =>
+          aiNumber(aiAudit(b)?.unresolved_findings) - aiNumber(aiAudit(a)?.unresolved_findings) ||
+          aiRisk(aiAudit(b)).score - aiRisk(aiAudit(a)).score || numberOrder(a, b));
+        else if (sort === 'latest') state.visible.sort((a, b) =>
+          aiTimestamp(aiAudit(b)) - aiTimestamp(aiAudit(a)) || numberOrder(a, b));
+        else state.visible.sort(numberOrder);
         $('listCount').textContent = `${state.visible.length} / ${state.items.length}문항 표시`;
         const root = $('questionList');
         root.replaceChildren();
@@ -350,11 +469,22 @@
           button.type = 'button';
           button.classList.toggle('active', item.id === state.selectedId);
           button.setAttribute('aria-current', item.id === state.selectedId ? 'true' : 'false');
-          button.setAttribute('aria-label', `${item.number}번, ${SECTION_NAMES[item.section] || item.section}, ${statusName(item.status)}`);
+          const audit = aiAudit(item);
+          const unresolved = aiNumber(audit?.unresolved_findings);
+          const risk = aiRisk(audit);
+          const attemptTotal = aiNumber(audit?.attempt_total);
+          button.setAttribute('aria-label', `${item.number}번, ${SECTION_NAMES[item.section] || item.section}, ${statusName(item.status)}${audit ? `, AI 최근 실행 verdict ${aiNumber(audit.total)}회, 최근 실행 attempt ${attemptTotal}회, 위험 ${AI_RISK_NAMES[risk.level]}` : ''}`);
           const left = element('span');
           left.append(element('span', 'question-id', `${item.number}번 문항`), element('span', 'question-sub', SECTION_NAMES[item.section] || item.section));
           const right = element('span', 'item-right');
           if (item.requires_image) right.append(element('span', 'image-tag', '그림'));
+          if (audit && (aiNumber(audit.total) > 0 || attemptTotal > 0)) {
+            const aiTag = element('span', `ai-tag${unresolved ? ` risk-${risk.level}` : ''}`, `최근 V ${aiNumber(audit.total)} · A ${attemptTotal}`);
+            aiTag.title = `최근 실행 완료 verdict ${aiNumber(audit.total)}회 · 최근 실행 attempt ${attemptTotal}회 · 이상 없음 ${aiNumber(audit.clear)} · 발견 ${aiNumber(audit.finding)} · 불확실 ${aiNumber(audit.uncertain)} · 미해결 발견 ${unresolved}건`;
+            right.append(aiTag);
+          }
+          if (audit?.has_partial_failures) right.append(element('span', 'ai-tag risk-medium', '실행경고'));
+          if (audit?.disagreement) right.append(element('span', 'ai-tag risk-medium', '불일치'));
           const dot = element('span', `state-dot ${item.status === 'verified' || item.status === 'rejected' ? item.status : ''}`);
           dot.title = statusName(item.status);
           right.append(dot);
@@ -363,11 +493,32 @@
           root.append(button);
         }
       }
+      function filterChanged() {
+        filterItems();
+        if (!state.selectedId || state.visible.some(item => item.id === state.selectedId)) return;
+        const next = state.visible[0];
+        if (!next) {
+          notice('현재 상세 문항은 필터 결과에 포함되지 않습니다. 필터를 바꾸면 다시 목록에서 선택할 수 있습니다.', 'info');
+          return;
+        }
+        if (!canNavigate()) {
+          notice('현재 상세 문항이 필터 결과 밖이지만 저장하지 않은 변경사항 때문에 자동 이동하지 않았습니다.', 'info');
+          return;
+        }
+        return selectQuestion(next.id, { force: true });
+      }
       async function loadList() {
         const data = await request('/api/questions');
         if (!data || !Array.isArray(data.items)) throw new Error('문항 목록 응답 형식이 올바르지 않습니다.');
         if (typeof data.csrf_token !== 'string' || !data.csrf_token) throw new Error('검수 보안 토큰이 없습니다. 서버를 새로고침하세요.');
         state.csrfToken = data.csrf_token;
+        state.aiAuditAvailable = data.ai_audit_available === true;
+        $('aiFilterWrap').hidden = !state.aiAuditAvailable;
+        $('sortOrderWrap').hidden = !state.aiAuditAvailable;
+        if (!state.aiAuditAvailable) {
+          $('aiFilter').value = 'all';
+          $('sortOrder').value = 'number';
+        }
         state.items = [...data.items].sort((a, b) => Number(a.number) - Number(b.number));
         counts();
         filterItems();
@@ -687,6 +838,10 @@
           badge(`${q.points}점`),
           badge(`원본 PDF ${q.source_pdf_page || '—'}쪽`),
           ...(q.requires_image ? [badge('그림 확인 필요')] : []),
+          ...(aiNumber(aiAudit(q)?.total) ? [badge(`AI 최근 위험 ${AI_RISK_NAMES[aiRisk(aiAudit(q)).level]} · ${aiRisk(aiAudit(q)).score}`)] : []),
+          ...(aiNumber(aiAudit(q)?.unresolved_findings) ? [badge(`AI 최근 미해결 ${aiNumber(aiAudit(q).unresolved_findings)}건`)] : []),
+          ...(aiNumber(aiAudit(q)?.attempt_total) ? [badge(`AI 최근 실행 ${aiNumber(aiAudit(q).attempt_total)}회`)] : []),
+          ...(aiAudit(q)?.has_partial_failures ? [badge('AI 실행 실패·재시도 이력')] : []),
           badge('미저장 변경', 'dirty')
         );
         $('questionBadges').lastElementChild.id = 'dirtyBadge';
@@ -707,6 +862,7 @@
         state.baseline = JSON.stringify(draft());
         refreshDirty();
         renderReferences();
+        renderAiAudit();
         renderHistory();
         filterItems();
         updateNavigation();
@@ -801,6 +957,188 @@
           history.append(line);
         }
       }
+      function renderAiAudit() {
+        const section = $('aiAuditSection');
+        const summary = $('aiAuditSummary');
+        const historySection = $('aiHistorySection');
+        const historySummary = $('aiHistorySummary');
+        const historyRoot = $('aiRunHistory');
+        const attemptLog = $('aiAttemptLog');
+        const log = $('aiAuditLog');
+        const audit = aiAudit(state.detail);
+        const total = aiNumber(audit?.total);
+        const execution = audit?.execution && typeof audit.execution === 'object' ? audit.execution : {};
+        const latest = audit?.latest_run && typeof audit.latest_run === 'object'
+          ? audit.latest_run : execution.latest_run && typeof execution.latest_run === 'object' ? execution.latest_run : {};
+        const attempts = aiNumber(audit?.attempt_total ?? execution.attempt_total);
+        const passTotal = aiNumber(latest.pass_total);
+        section.hidden = !audit || (total === 0 && attempts === 0 && passTotal === 0);
+        summary.replaceChildren();
+        historySummary.replaceChildren();
+        historyRoot.replaceChildren();
+        attemptLog.replaceChildren();
+        log.replaceChildren();
+        historySection.hidden = true;
+        if (section.hidden) return;
+        const risk = aiRisk(audit);
+        const outcomes = `이상 없음 ${aiNumber(audit.clear)} · 발견 ${aiNumber(audit.finding)} · 불확실 ${aiNumber(audit.uncertain)}`;
+        const attemptCounts = audit.attempt_status_counts && typeof audit.attempt_status_counts === 'object'
+          ? audit.attempt_status_counts : execution.attempt_status_counts && typeof execution.attempt_status_counts === 'object'
+            ? execution.attempt_status_counts : {};
+        const attemptSummary = `성공 ${aiNumber(attemptCounts.succeeded)} · 실패 ${aiNumber(attemptCounts.failed)} · 시간초과 ${aiNumber(attemptCounts.timed_out)} · 잘못된 응답 ${aiNumber(attemptCounts.invalid)} · 재시도 ${aiNumber(audit.retry_count ?? execution.retry_count)}`;
+        const metrics = [
+          ['최근 실행 verdict', `${total}회 · ${outcomes}`],
+          ['최근 실행 attempt', `${attempts}회 · ${attemptSummary}`],
+          ['최근 pass 진행', `${aiNumber(latest.completed_passes)} / ${passTotal} 완료 · 미완료 ${aiNumber(audit.incomplete_passes ?? execution.incomplete_passes)}`],
+          ['최근 실행 발견', `${aiNumber(audit.unresolved_findings)}건${audit.disagreement ? ' · 감사자 간 불일치' : ''}`],
+          ['최근 실행 위험도', `${risk.score} / 100 · ${AI_RISK_NAMES[risk.level]}`],
+          ['최근 신규 발견 수렴', aiConvergenceText(audit.convergence)],
+          ...(audit.cross_run_convergence ? [['회차 간 안정성', aiConvergenceText(audit.cross_run_convergence)]] : []),
+          ['최근 실행', [latest.run_id || latest.id, latest.label, latest.created_at].filter(Boolean).join(' · ') || '—'],
+          ['최근 실행 요약',
+            Number.isFinite(Number(latest.pass_total))
+              ? `${aiNumber(latest.completed_passes)} / ${aiNumber(latest.pass_total)} pass 완료 · 완료 verdict ${total}회 · 실행 attempt ${attempts}회`
+              : latest.summary || latest.status ||
+                `${total}회 완료 · 이상 없음 ${aiNumber(audit.clear)} · 발견 ${aiNumber(audit.finding)} · 불확실 ${aiNumber(audit.uncertain)}`],
+        ];
+        for (const [label, value] of metrics) {
+          const cell = element('div', 'ai-metric');
+          cell.append(element('span', '', label), element('strong', '', value));
+          summary.append(cell);
+        }
+        const history = audit.history && typeof audit.history === 'object' ? audit.history : null;
+        const runs = Array.isArray(history?.runs) ? history.runs : [];
+        if (history && runs.length) {
+          historySection.hidden = false;
+          const cumulative = history.verdict_counts && typeof history.verdict_counts === 'object' ? history.verdict_counts : {};
+          const historicalFindings = Array.isArray(history.historical_findings) ? history.historical_findings : [];
+          const historyMetrics = [
+            ['전체 누적 verdict', `${aiNumber(history.audit_count)}회 · 이상 없음 ${aiNumber(cumulative.clear)} · 발견 ${aiNumber(cumulative.finding)} · 불확실 ${aiNumber(cumulative.uncertain)}`],
+            ['감사 실행 회차', `${aiNumber(history.run_count)}개 run · 불일치 run ${aiNumber(history.disagreement_run_count)}개`],
+            ['발견 추적', `${historicalFindings.length}개 fingerprint · 최신 실행 발견 ${aiNumber(history.latest_run_finding_count)}개`],
+          ];
+          for (const [label, value] of historyMetrics) {
+            const cell = element('div', 'ai-metric');
+            cell.append(element('span', '', label), element('strong', '', value));
+            historySummary.append(cell);
+          }
+          for (const finding of historicalFindings) {
+            if (!finding || typeof finding !== 'object') continue;
+            const stateLabel = finding.latest_state === 'present_in_latest_run'
+              ? '최신 실행에도 존재'
+              : finding.latest_state === 'reappeared_in_latest_run'
+                ? '최신 실행에서 다시 확인됨 · 중간 비재현은 해결 판정 아님'
+              : finding.latest_state === 'not_reproduced_in_latest_run'
+                ? '최신 실행에서 재현되지 않음 · 해결 판정 아님'
+                : finding.latest_state || '상태 미확인';
+            const note = element('p', 'ai-history-note', `${finding.summary || '발견'} · ${stateLabel}`);
+            historyRoot.append(note);
+          }
+          runs.forEach((run, index) => {
+            if (!run || typeof run !== 'object') return;
+            const details = element('details', 'ai-run-card');
+            const runSummary = run.summary && typeof run.summary === 'object' ? run.summary : {};
+            const runExecution = run.execution && typeof run.execution === 'object' ? run.execution : {};
+            const runLatest = runExecution.latest_run && typeof runExecution.latest_run === 'object' ? runExecution.latest_run : {};
+            const runAttempts = aiNumber(runLatest.attempt_total);
+            const title = [index === 0 ? '최근' : '과거', run.label || run.run_id || 'run', run.created_at].filter(Boolean).join(' · ');
+            const header = element('summary', '', title);
+            details.append(header);
+            const runCounts = runSummary.totals && typeof runSummary.totals === 'object' ? runSummary.totals : {};
+            details.append(element('span', 'meta', `verdict ${aiNumber(runSummary.total)}회 · 이상 없음 ${aiNumber(runCounts.clear ?? runSummary.clear)} · 발견 ${aiNumber(runCounts.finding ?? runSummary.finding)} · 불확실 ${aiNumber(runCounts.uncertain ?? runSummary.uncertain)}${runSummary.disagreement ? ' · 불일치' : ''}`));
+            details.append(element('span', 'meta', `pass ${aiNumber(runLatest.completed_passes)} / ${aiNumber(runLatest.pass_total)} 완료 · attempt ${runAttempts}회`));
+            const full = aiStructuredDetails('이 회차 전체 감사 기록 보기', run);
+            if (full) details.append(full);
+            historyRoot.append(details);
+          });
+        }
+        const passes = Array.isArray(execution.passes) ? execution.passes : [];
+        if (!passes.length) {
+          attemptLog.append(element('li', '', '실행 시도 기록이 없습니다.'));
+        } else {
+          for (const auditPass of passes) {
+            const passLine = element('li');
+            const passLabel = auditPass.pass_number ? `pass ${auditPass.pass_number}` : auditPass.id || 'pass';
+            passLine.append(element('strong', '', `${passLabel} · ${auditPass.state || '상태 미확인'}`));
+            const passMeta = [
+              auditPass.auditor_id, auditPass.model_id, auditPass.perspective,
+              auditPass.prompt_version ? `prompt ${auditPass.prompt_version}` : '',
+              `완료 subject ${aiNumber(auditPass.completed_subject_count)}`,
+              `대기 subject ${aiNumber(auditPass.pending_subject_count)}`,
+              auditPass.retryable ? '재시도 가능' : '', auditPass.created_at,
+            ].filter(Boolean).join(' · ');
+            if (passMeta) passLine.append(element('span', 'meta', passMeta));
+            const passAttempts = Array.isArray(auditPass.attempts) ? auditPass.attempts : [];
+            if (!passAttempts.length) {
+              passLine.append(element('p', 'meta', '아직 기록된 실행 attempt가 없습니다.'));
+            }
+            for (const attempt of passAttempts) {
+              if (!attempt || typeof attempt !== 'object') continue;
+              const attemptNumber = aiNumber(attempt.attempt_number);
+              const status = AI_ATTEMPT_NAMES[attempt.status] || attempt.status || '상태 미확인';
+              const row = element('div', `ai-attempt ${attempt.status || ''}`);
+              row.append(element('strong', '', `시도 ${attemptNumber || '—'} · ${status}${attemptNumber > 1 ? ' · 재시도' : ''}`));
+              if (attempt.error_code || attempt.error_message) {
+                row.append(element('p', '', [attempt.error_code, attempt.error_message].filter(Boolean).join(' · ')));
+              }
+              const meta = [
+                attempt.result_id ? `result ${attempt.result_id}` : '',
+                attempt.response_sha256 ? `response ${attempt.response_sha256}` : '',
+                attempt.created_at,
+              ].filter(Boolean).join(' · ');
+              if (meta) row.append(element('span', 'meta', meta));
+              const evidence = aiStructuredDetails('attempt 근거 전체 보기', attempt.evidence);
+              if (evidence) row.append(evidence);
+              if (attempt.raw_response !== undefined && attempt.raw_response !== null) {
+                const raw = aiStructuredDetails('원시 응답 전체 보기', attempt.raw_response);
+                if (raw) row.append(raw);
+              }
+              passLine.append(row);
+            }
+            attemptLog.append(passLine);
+          }
+        }
+        const entries = Array.isArray(audit.entries) ? audit.entries : [];
+        if (!entries.length) {
+          log.append(element('li', '', '완료된 문항 verdict 기록이 없습니다. 실행 실패·재시도 기록은 위에서 별도로 확인할 수 있습니다.'));
+          return;
+        }
+        for (const item of entries) {
+          const verdict = AI_VERDICT_NAMES[item.verdict] || item.verdict || '결과 미확인';
+          const line = element('li', item.verdict === 'finding' ? 'finding' : item.verdict === 'uncertain' ? 'uncertain' : '');
+          line.append(element('strong', '', verdict));
+          if (item.severity) line.append(element('span', '', ` · ${item.severity}`));
+          if (item.summary) line.append(element('p', '', item.summary));
+          else if (item.rationale) line.append(element('p', '', item.rationale));
+          else if (item.finding) line.append(element('p', '', item.finding));
+          if (Array.isArray(item.findings)) {
+            for (const finding of item.findings) {
+              if (!finding || typeof finding !== 'object') continue;
+              const label = [finding.severity ? String(finding.severity).toUpperCase() : '', finding.category]
+                .filter(Boolean).join(' · ');
+              line.append(element('p', '', `${label ? `[${label}] ` : ''}${finding.summary || '발견 내용 없음'}`));
+              if (finding.detail) line.append(element('p', 'meta', finding.detail));
+              const identity = aiStructuredDetails('finding 식별 근거 전체 보기', finding.identity);
+              if (identity) line.append(identity);
+              const evidence = aiStructuredDetails('finding 증거 전체 보기', finding.evidence);
+              if (evidence) line.append(evidence);
+            }
+          }
+          const confidence = Number(item.confidence);
+          const meta = [
+            item.auditor_id || item.auditor || item.agent,
+            item.model_id,
+            item.perspective,
+            item.prompt_version ? `prompt ${item.prompt_version}` : '',
+            Number.isFinite(confidence) ? `신뢰도 ${Math.round(confidence * 100)}%` : '',
+            item.pass_number ? `pass ${item.pass_number}` : '',
+            item.run_id,
+            item.created_at || item.audited_at,
+          ].filter(Boolean).join(' · ');
+          if (meta) line.append(element('span', 'meta', meta));
+          log.append(line);
+        }
+      }
       async function sendReview(status) {
         if (!state.detail || state.loading || state.saving || state.audio?.saving) return;
         const input = draft();
@@ -856,7 +1194,7 @@
         if (item) selectQuestion(item.id);
       }
       function installHandlers() {
-        ['questionSearch', 'sectionFilter', 'statusFilter', 'imageFilter'].forEach(id => $(id).addEventListener('input', filterItems));
+        ['questionSearch', 'sectionFilter', 'statusFilter', 'imageFilter', 'aiFilter', 'sortOrder'].forEach(id => $(id).addEventListener('input', filterChanged));
         ['stemInput', 'transcriptInput', 'reviewNote', 'choice1', 'choice2', 'choice3', 'choice4'].forEach(id => $(id).addEventListener('input', refreshDirty));
         ['audioStart', 'audioEnd'].forEach(id => $(id).addEventListener('input', audioInputChanged));
         $('audioPreview').addEventListener('click', previewAudio);

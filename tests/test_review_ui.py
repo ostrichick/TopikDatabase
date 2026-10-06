@@ -21,9 +21,11 @@ import threading
 import unittest
 from contextlib import closing, redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 from src import review_ui
+from src import ai_audit_35
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,6 +115,406 @@ class TestReviewStore(unittest.TestCase):
         self.assertTrue(all(isinstance(item, dict) for item in ids))
         self.assertTrue(all(isinstance(item["version"], int) for item in ids))
         self.assertIn(self._answer(self.listening_id), (1, 2, 3, 4))
+
+    def test_review_ui_gracefully_ignores_database_without_ai_audit_tables(self):
+        qid = self.listening_id
+        version_before = self.store.get_question(qid)["version"]
+        history_before = self._history(qid)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            for table in (
+                "ai_audit_finding_occurrences", "ai_audit_findings", "ai_audit_results",
+                "ai_audit_attempts", "ai_audit_checkpoints", "ai_audit_passes", "ai_audit_runs",
+                "ai_audit_source_snapshots",
+            ):
+                conn.execute(f"DROP TABLE IF EXISTS {table}")
+            conn.commit()
+        reopened = review_ui.ReviewStore(self.db_path, root=ROOT)
+        listing = reopened.list_questions()
+        self.assertFalse(listing["ai_audit_available"])
+        self.assertTrue(all("ai_audit" not in item for item in listing["items"]))
+        detail = reopened.get_question(qid)
+        self.assertNotIn("ai_audit", detail)
+        self.assertEqual(detail["version"], version_before)
+        self.assertEqual(self._history(qid), history_before)
+
+    def test_ai_audit_summary_is_read_only_and_separate_from_human_review_version(self):
+        qid = self.listening_id
+        version_before = self.store.get_question(qid)["version"]
+        history_before = self._history(qid)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            for table in review_ui.AI_AUDIT_TABLES:
+                conn.execute(f"CREATE TABLE IF NOT EXISTS {table} (placeholder INTEGER)")
+            conn.commit()
+
+        summary = {
+            "run_id": "run-3",
+            "total": 3, "clear": 1, "finding": 1, "uncertain": 1,
+            "unresolved_findings": 1,
+            "disagreement": True,
+            "risk_score": 86, "risk_level": "high",
+            "convergence": "changed",
+            "findings": [{"fingerprint": "f" * 64, "severity": "high",
+                          "summary": "정답 연결 확인 필요"}],
+            "latest_run": {"id": "run-3", "label": "third audit",
+                           "created_at": "2026-10-05T02:03:00Z",
+                           "pass_total": 3, "completed_passes": 3,
+                           "summary": "3/3 passes completed"},
+            "entries": [
+                {"pass_id": "pass-a", "auditor": "auditor-a", "verdict": "finding",
+                 "rationale": "정답 연결 확인 필요", "created_at": "2026-10-05T02:03:00Z"}
+            ],
+        }
+        fake_module = SimpleNamespace(
+            summarize_all_questions=MagicMock(return_value={qid: summary}),
+            summarize_question=MagicMock(return_value=summary),
+        )
+        with patch.dict(sys.modules, {"src.ai_audit_35": fake_module}):
+            listing = self.store.list_questions()
+            detail = self.store.get_question(qid)
+
+        self.assertTrue(listing["ai_audit_available"])
+        listed = next(item for item in listing["items"] if item["id"] == qid)
+        self.assertEqual(listed["ai_audit"]["total"], 3)
+        self.assertEqual(listed["ai_audit"]["clear"], 1)
+        self.assertEqual(listed["ai_audit"]["finding"], 1)
+        self.assertEqual(listed["ai_audit"]["uncertain"], 1)
+        self.assertEqual(listed["ai_audit"]["unresolved_findings"], 1)
+        self.assertEqual(listed["ai_audit"]["risk_score"], 86)
+        self.assertEqual(detail["ai_audit"]["entries"][0]["auditor"], "auditor-a")
+        self.assertEqual(detail["ai_audit"]["latest_run"]["id"], "run-3")
+        self.assertNotIn("execution", detail["ai_audit"])
+        self.assertNotIn("attempt_total", listed["ai_audit"])
+        self.assertEqual(detail["version"], version_before)
+        self.assertEqual(self._history(qid), history_before)
+        fake_module.summarize_all_questions.assert_called_once()
+        fake_module.summarize_question.assert_called_once()
+        self.assertEqual(fake_module.summarize_question.call_args.args[1], qid)
+
+    def test_real_ai_audit_helper_flows_into_list_and_detail_without_human_state_change(self):
+        qid = self.listening_id
+        version_before = self.store.get_question(qid)["version"]
+        history_before = self._history(qid)
+        status_before = self._row(qid)[1]
+
+        run = ai_audit_35.create_run(
+            self.db_path,
+            auditors=["ui-integration-auditor"],
+            model_id="ui-integration-model",
+            prompt_version="ui-integration-v1",
+            perspective="independent",
+            label="review-ui-integration",
+        )
+        audit_pass = run["passes"][0]
+        exported = ai_audit_35.export_pass(self.db_path, pass_id=audit_pass["id"])
+        subject_ids = [item["id"] for item in exported["source"]["questions"]]
+        verdicts = [
+            {
+                "subject_id": subject_id,
+                "verdict": "finding" if subject_id == qid else "clear",
+                "confidence": 0.9,
+                "rationale": "UI integration fixture",
+            }
+            for subject_id in subject_ids
+        ]
+        result_payload = {
+            "schema_version": ai_audit_35.RESULT_SCHEMA_VERSION,
+            "kind": "final",
+            "pass_id": audit_pass["id"],
+            "input_sha256": exported["input_sha256"],
+            "snapshot_sha256": exported["snapshot_sha256"],
+            "completed_subject_ids": subject_ids,
+            "verdicts": verdicts,
+            "findings": [{
+                "subject_id": qid,
+                "category": "ui.integration",
+                "severity": "high",
+                "summary": "사람 검수에서 다시 확인할 항목",
+                "detail": "실제 AI summary helper와 ReviewStore 연결 검증",
+                "evidence": {"field": "answer.choice_number", "fixture": True},
+            }],
+            "notes": ["review UI integration fixture"],
+            "state": {},
+        }
+        ai_audit_35.record_attempt_outcome(
+            self.db_path, audit_pass["id"], "failed",
+            error_code="provider_error", error_message="provider returned 503",
+            evidence={"http_status": 503}, response={"provider": "unavailable"},
+        )
+        ai_audit_35.record_attempt_outcome(
+            self.db_path, audit_pass["id"], "timed_out",
+            error_code="deadline_exceeded", error_message="response exceeded 120 seconds",
+            evidence={"timeout_seconds": 120},
+        )
+        invalid_payload = dict(result_payload)
+        invalid_payload["verdicts"] = []
+        invalid = ai_audit_35.ingest_response(
+            self.db_path, audit_pass["id"], invalid_payload,
+            evidence={"transport": "ui-integration-invalid"},
+        )
+        self.assertEqual(invalid["status"], "invalid")
+        succeeded = ai_audit_35.ingest_response(
+            self.db_path, audit_pass["id"], result_payload,
+            evidence={"transport": "ui-integration-success"},
+        )
+        self.assertEqual(succeeded["status"], "succeeded")
+
+        listing = self.store.list_questions()
+        listed = next(item for item in listing["items"] if item["id"] == qid)
+        detail = self.store.get_question(qid)
+        backend_summary = ai_audit_35.summarize_question(self.db_path, qid)
+        self.assertTrue(listing["ai_audit_available"])
+        self.assertEqual(listed["ai_audit"]["total"], 1)
+        self.assertEqual(listed["ai_audit"]["finding"], 1)
+        self.assertEqual(listed["ai_audit"]["unresolved_findings"], 1)
+        self.assertEqual(listed["ai_audit"]["risk_score"], backend_summary["risk_score"])
+        self.assertEqual(listed["ai_audit"]["risk_level"], backend_summary["risk_level"])
+        self.assertEqual(listed["ai_audit"]["convergence"], backend_summary["convergence"])
+        self.assertNotIn("entries", listed["ai_audit"])
+        self.assertNotIn("execution", listed["ai_audit"])
+        self.assertEqual(listed["ai_audit"]["attempt_total"], 4)
+        self.assertEqual(listed["ai_audit"]["attempt_status_counts"], {
+            "succeeded": 1, "failed": 1, "timed_out": 1, "invalid": 1,
+        })
+        self.assertEqual(listed["ai_audit"]["retry_count"], 3)
+        self.assertTrue(listed["ai_audit"]["has_partial_failures"])
+        self.assertEqual(detail["ai_audit"]["entries"][0]["auditor_id"], "ui-integration-auditor")
+        self.assertEqual(detail["ai_audit"]["entries"][0]["model_id"], "ui-integration-model")
+        self.assertEqual(detail["ai_audit"]["entries"][0]["prompt_version"], "ui-integration-v1")
+        finding = detail["ai_audit"]["entries"][0]["findings"][0]
+        self.assertEqual(finding["evidence"], {"field": "answer.choice_number", "fixture": True})
+        self.assertEqual(finding["identity"], {"field": "answer.choice_number", "fixture": True})
+        execution = detail["ai_audit"]["execution"]
+        self.assertEqual(execution["attempt_total"], 4)
+        self.assertEqual(execution["retry_count"], 3)
+        self.assertEqual(execution["incomplete_passes"], 0)
+        attempts = execution["passes"][0]["attempts"]
+        self.assertEqual(
+            [(item["attempt_number"], item["status"]) for item in attempts],
+            [(1, "failed"), (2, "timed_out"), (3, "invalid"), (4, "succeeded")],
+        )
+        self.assertEqual(attempts[0]["error_code"], "provider_error")
+        self.assertEqual(attempts[0]["evidence"], {"http_status": 503})
+        self.assertEqual(attempts[0]["raw_response"], {"provider": "unavailable"})
+        self.assertEqual(attempts[1]["evidence"], {"timeout_seconds": 120})
+        self.assertEqual(attempts[2]["evidence"], {"transport": "ui-integration-invalid"})
+        self.assertEqual(attempts[3]["evidence"], {"transport": "ui-integration-success"})
+        self.assertEqual(detail["version"], version_before)
+        self.assertEqual(self._row(qid)[1], status_before)
+        self.assertEqual(self._history(qid), history_before)
+
+    def test_ai_attempt_execution_is_scoped_to_questions_present_in_the_pass(self):
+        listening_id = self.listening_id
+        reading_id = self.reading_id
+        listening_version = self.store.get_question(listening_id)["version"]
+        reading_version = self.store.get_question(reading_id)["version"]
+        listening_history = self._history(listening_id)
+        reading_history = self._history(reading_id)
+        listening_status = self._row(listening_id)[1]
+        reading_status = self._row(reading_id)[1]
+
+        run = ai_audit_35.create_run(
+            self.db_path,
+            auditors=["ui-transcript-only-auditor"],
+            model_id="ui-transcript-only-model",
+            prompt_version="ui-transcript-only-v1",
+            perspective="transcript_alignment",
+            label="review-ui-subject-scope",
+        )
+        audit_pass = run["passes"][0]
+        exported = ai_audit_35.export_pass(self.db_path, pass_id=audit_pass["id"])
+        self.assertTrue(exported["subjects"])
+        self.assertTrue(all(item["section"] == "listening" for item in exported["subjects"]))
+        self.assertNotIn(reading_id, {item["id"] for item in exported["subjects"]})
+        ai_audit_35.record_attempt_outcome(
+            self.db_path, audit_pass["id"], "timed_out",
+            error_code="deadline_exceeded", error_message="transcript-only timeout",
+            evidence={"timeout_seconds": 90, "scope": "listening-only"},
+        )
+
+        listing = self.store.list_questions()
+        listening_item = next(item for item in listing["items"] if item["id"] == listening_id)
+        reading_item = next(item for item in listing["items"] if item["id"] == reading_id)
+        self.assertEqual(listening_item["ai_audit"]["attempt_total"], 1)
+        self.assertEqual(listening_item["ai_audit"]["attempt_status_counts"]["timed_out"], 1)
+        self.assertEqual(listening_item["ai_audit"]["incomplete_passes"], 1)
+        self.assertNotIn("ai_audit", reading_item)
+
+        listening_detail = self.store.get_question(listening_id)
+        reading_detail = self.store.get_question(reading_id)
+        self.assertEqual(listening_detail["ai_audit"]["execution"]["passes"][0]["attempts"][0]["status"], "timed_out")
+        self.assertEqual(
+            listening_detail["ai_audit"]["execution"]["passes"][0]["attempts"][0]["evidence"],
+            {"timeout_seconds": 90, "scope": "listening-only"},
+        )
+        self.assertNotIn("ai_audit", reading_detail)
+        self.assertEqual(self.store.get_question(listening_id)["version"], listening_version)
+        self.assertEqual(self.store.get_question(reading_id)["version"], reading_version)
+        self.assertEqual(self._row(listening_id)[1], listening_status)
+        self.assertEqual(self._row(reading_id)[1], reading_status)
+        self.assertEqual(self._history(listening_id), listening_history)
+        self.assertEqual(self._history(reading_id), reading_history)
+
+    def test_existing_ai_verdicts_remain_visible_without_attempt_table(self):
+        qid = self.reading_id
+        version_before = self.store.get_question(qid)["version"]
+        history_before = self._history(qid)
+        status_before = self._row(qid)[1]
+
+        run = ai_audit_35.create_run(
+            self.db_path,
+            auditors=["legacy-no-attempt-auditor"],
+            model_id="legacy-no-attempt-model",
+            prompt_version="legacy-no-attempt-v1",
+            perspective="independent",
+            label="review-ui-legacy-no-attempt",
+        )
+        audit_pass = run["passes"][0]
+        exported = ai_audit_35.export_pass(self.db_path, pass_id=audit_pass["id"])
+        subject_ids = [item["id"] for item in exported["subjects"]]
+        response = {
+            "schema_version": ai_audit_35.RESULT_SCHEMA_VERSION,
+            "kind": "final",
+            "pass_id": audit_pass["id"],
+            "input_sha256": exported["input_sha256"],
+            "snapshot_sha256": exported["snapshot_sha256"],
+            "completed_subject_ids": subject_ids,
+            "verdicts": [{
+                "subject_id": subject_id,
+                "verdict": "clear",
+                "confidence": 0.9,
+                "rationale": "legacy compatibility fixture",
+            } for subject_id in subject_ids],
+            "findings": [],
+            "notes": ["legacy no-attempt table fixture"],
+            "state": {},
+        }
+        self.assertEqual(
+            ai_audit_35.ingest_response(self.db_path, audit_pass["id"], response)["status"],
+            "succeeded",
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("DROP TABLE ai_audit_attempts")
+            conn.commit()
+
+        listing = self.store.list_questions()
+        listed = next(item for item in listing["items"] if item["id"] == qid)
+        detail = self.store.get_question(qid)
+        self.assertEqual(listed["ai_audit"]["total"], 1)
+        self.assertEqual(listed["ai_audit"]["clear"], 1)
+        self.assertEqual(listed["ai_audit"]["attempt_total"], 0)
+        self.assertEqual(detail["ai_audit"]["total"], 1)
+        self.assertEqual(detail["ai_audit"]["execution"]["attempt_total"], 0)
+        self.assertEqual(detail["ai_audit"]["execution"]["passes"][0]["attempts"], [])
+        self.assertEqual(detail["version"], version_before)
+        self.assertEqual(self._row(qid)[1], status_before)
+        self.assertEqual(self._history(qid), history_before)
+
+    def test_multi_run_ai_history_is_queryable_after_reopen_without_changing_human_state(self):
+        qid = self.reading_id
+        version_before = self.store.get_question(qid)["version"]
+        history_before = self._history(qid)
+        status_before = self._row(qid)[1]
+        baseline_ai = ai_audit_35.question_audit_history(self.db_path, qid)
+
+        def result_for(pass_info, verdict, *, finding=False):
+            exported = ai_audit_35.export_pass(self.db_path, pass_id=pass_info["id"])
+            self.assertEqual([item["id"] for item in exported["subjects"]], [qid])
+            findings = []
+            if finding:
+                findings.append({
+                    "subject_id": qid,
+                    "category": "history.answer",
+                    "severity": "medium",
+                    "summary": "과거 실행에서 확인된 답안 매핑",
+                    "detail": "다음 실행에서는 재현되지 않을 수 있지만 해결 판정은 아님",
+                    "evidence": {"field": "answer.choice_number", "run_fixture": True},
+                })
+            return {
+                "schema_version": ai_audit_35.RESULT_SCHEMA_VERSION,
+                "kind": "final",
+                "pass_id": pass_info["id"],
+                "input_sha256": exported["input_sha256"],
+                "snapshot_sha256": exported["snapshot_sha256"],
+                "completed_subject_ids": [qid],
+                "verdicts": [{
+                    "subject_id": qid,
+                    "verdict": verdict,
+                    "confidence": 0.92,
+                    "rationale": f"history fixture {verdict}",
+                }],
+                "findings": findings,
+                "notes": ["review UI history fixture"],
+                "state": {},
+            }
+
+        first = ai_audit_35.create_run(
+            self.db_path,
+            auditors=["history-first-a", "history-first-b"],
+            model_id="history-model",
+            prompt_version="history-v1",
+            perspective="independent",
+            subject_ids=[qid],
+            label="older completed audit",
+        )
+        ai_audit_35.ingest_response(
+            self.db_path, first["passes"][0]["id"],
+            result_for(first["passes"][0], "finding", finding=True),
+            evidence={"run": 1, "pass": 1},
+        )
+        ai_audit_35.ingest_response(
+            self.db_path, first["passes"][1]["id"],
+            result_for(first["passes"][1], "clear"),
+            evidence={"run": 1, "pass": 2},
+        )
+        second = ai_audit_35.create_run(
+            self.db_path,
+            auditors=["history-second-a"],
+            model_id="history-model",
+            prompt_version="history-v2",
+            perspective="independent",
+            subject_ids=[qid],
+            label="newer completed audit",
+        )
+        ai_audit_35.ingest_response(
+            self.db_path, second["passes"][0]["id"],
+            result_for(second["passes"][0], "clear"),
+            evidence={"run": 2, "pass": 1},
+        )
+
+        detail = self.store.get_question(qid)
+        audit_history = detail["ai_audit"]["history"]
+        self.assertEqual(audit_history["run_count"], baseline_ai.get("run_count", 0) + 2)
+        self.assertEqual(audit_history["audit_count"], baseline_ai.get("audit_count", 0) + 3)
+        baseline_counts = baseline_ai.get("verdict_counts", {})
+        self.assertEqual(audit_history["verdict_counts"]["clear"], baseline_counts.get("clear", 0) + 2)
+        self.assertEqual(audit_history["verdict_counts"]["finding"], baseline_counts.get("finding", 0) + 1)
+        self.assertEqual(audit_history["verdict_counts"]["uncertain"], baseline_counts.get("uncertain", 0))
+        self.assertEqual(
+            audit_history["disagreement_run_count"],
+            baseline_ai.get("disagreement_run_count", 0) + 1,
+        )
+        self.assertEqual([item["label"] for item in audit_history["runs"][:2]], [
+            "newer completed audit", "older completed audit",
+        ])
+        self.assertFalse(audit_history["runs"][0]["summary"]["disagreement"])
+        self.assertTrue(audit_history["runs"][1]["summary"]["disagreement"])
+        self.assertEqual(audit_history["runs"][1]["summary"]["finding"], 1)
+        fixture_finding = next(
+            item for item in audit_history["historical_findings"]
+            if item["summary"] == "과거 실행에서 확인된 답안 매핑"
+        )
+        self.assertEqual(
+            fixture_finding["latest_state"],
+            "not_reproduced_in_latest_run",
+        )
+
+        reopened = review_ui.ReviewStore(self.db_path, root=ROOT)
+        reopened_history = reopened.get_question(qid)["ai_audit"]["history"]
+        self.assertEqual(reopened_history["audit_count"], baseline_ai.get("audit_count", 0) + 3)
+        self.assertEqual(reopened_history["runs"][1]["label"], "older completed audit")
+        self.assertEqual(reopened.get_question(qid)["version"], version_before)
+        self.assertEqual(self._row(qid)[1], status_before)
+        self.assertEqual(self._history(qid), history_before)
 
     def test_verified_pending_rejected_history_is_append_only(self):
         qid = self.listening_id

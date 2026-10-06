@@ -148,3 +148,173 @@ CREATE TABLE IF NOT EXISTS import_metadata (
 CREATE INDEX IF NOT EXISTS idx_questions_section_number
     ON questions(section_id, exam_number);
 CREATE INDEX IF NOT EXISTS idx_review_status ON questions(review_status);
+
+-- Independent AI audit history. These records are deliberately separate from
+-- questions/transcripts/audio human-review state and from review_records.
+CREATE TABLE IF NOT EXISTS ai_audit_source_snapshots (
+    snapshot_sha256 TEXT PRIMARY KEY CHECK (length(snapshot_sha256) = 64),
+    exam_id TEXT NOT NULL REFERENCES exams(id),
+    snapshot_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_audit_runs (
+    id TEXT PRIMARY KEY,
+    exam_id TEXT NOT NULL REFERENCES exams(id),
+    snapshot_sha256 TEXT NOT NULL REFERENCES ai_audit_source_snapshots(snapshot_sha256),
+    contract_version TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_audit_passes (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES ai_audit_runs(id),
+    pass_number INTEGER NOT NULL CHECK (pass_number >= 1),
+    auditor_id TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    perspective TEXT NOT NULL,
+    blind INTEGER NOT NULL DEFAULT 1 CHECK (blind = 1),
+    input_sha256 TEXT NOT NULL CHECK (length(input_sha256) = 64),
+    input_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (run_id, pass_number),
+    UNIQUE (run_id, auditor_id)
+);
+
+CREATE TABLE IF NOT EXISTS ai_audit_checkpoints (
+    id INTEGER PRIMARY KEY,
+    pass_id TEXT NOT NULL REFERENCES ai_audit_passes(id),
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    checkpoint_sha256 TEXT NOT NULL UNIQUE CHECK (length(checkpoint_sha256) = 64),
+    completed_subject_ids_json TEXT NOT NULL,
+    findings_json TEXT NOT NULL,
+    state_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (pass_id, sequence)
+);
+
+CREATE TABLE IF NOT EXISTS ai_audit_results (
+    id INTEGER PRIMARY KEY,
+    pass_id TEXT NOT NULL UNIQUE REFERENCES ai_audit_passes(id),
+    result_sha256 TEXT NOT NULL UNIQUE CHECK (length(result_sha256) = 64),
+    completed_subject_ids_json TEXT NOT NULL,
+    notes_json TEXT NOT NULL,
+    raw_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_audit_attempts (
+    id INTEGER PRIMARY KEY,
+    pass_id TEXT NOT NULL REFERENCES ai_audit_passes(id),
+    attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+    status TEXT NOT NULL CHECK (status IN ('succeeded','failed','timed_out','invalid')),
+    result_id INTEGER REFERENCES ai_audit_results(id),
+    response_sha256 TEXT CHECK (response_sha256 IS NULL OR length(response_sha256) = 64),
+    raw_response_json TEXT,
+    error_code TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    UNIQUE (pass_id, attempt_number),
+    CHECK ((response_sha256 IS NULL AND raw_response_json IS NULL) OR
+           (response_sha256 IS NOT NULL AND raw_response_json IS NOT NULL)),
+    CHECK ((status = 'succeeded' AND result_id IS NOT NULL) OR
+           (status <> 'succeeded' AND result_id IS NULL))
+);
+
+CREATE TABLE IF NOT EXISTS ai_audit_findings (
+    fingerprint TEXT PRIMARY KEY CHECK (length(fingerprint) = 64),
+    subject_id TEXT NOT NULL,
+    category TEXT NOT NULL,
+    identity_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_audit_finding_occurrences (
+    id INTEGER PRIMARY KEY,
+    result_id INTEGER NOT NULL REFERENCES ai_audit_results(id),
+    pass_id TEXT NOT NULL REFERENCES ai_audit_passes(id),
+    fingerprint TEXT NOT NULL REFERENCES ai_audit_findings(fingerprint),
+    severity TEXT NOT NULL CHECK (severity IN ('low','medium','high','critical')),
+    summary TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (pass_id, fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_audit_passes_run
+    ON ai_audit_passes(run_id, pass_number);
+CREATE INDEX IF NOT EXISTS idx_ai_audit_occurrences_fingerprint
+    ON ai_audit_finding_occurrences(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_ai_audit_attempts_pass
+    ON ai_audit_attempts(pass_id, attempt_number);
+
+-- AI audit rows are evidence, not mutable workflow state. Checkpoints model
+-- progress by adding rows, so every audit table can remain append-only.
+CREATE TRIGGER IF NOT EXISTS ai_audit_source_snapshots_no_update
+BEFORE UPDATE ON ai_audit_source_snapshots BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_source_snapshots_no_delete
+BEFORE DELETE ON ai_audit_source_snapshots BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_runs_no_update
+BEFORE UPDATE ON ai_audit_runs BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_runs_no_delete
+BEFORE DELETE ON ai_audit_runs BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_passes_no_update
+BEFORE UPDATE ON ai_audit_passes BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_passes_no_delete
+BEFORE DELETE ON ai_audit_passes BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_checkpoints_no_update
+BEFORE UPDATE ON ai_audit_checkpoints BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_checkpoints_no_delete
+BEFORE DELETE ON ai_audit_checkpoints BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_results_no_update
+BEFORE UPDATE ON ai_audit_results BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_results_no_delete
+BEFORE DELETE ON ai_audit_results BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_attempts_no_update
+BEFORE UPDATE ON ai_audit_attempts BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_attempts_no_delete
+BEFORE DELETE ON ai_audit_attempts BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_findings_no_update
+BEFORE UPDATE ON ai_audit_findings BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_findings_no_delete
+BEFORE DELETE ON ai_audit_findings BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_finding_occurrences_no_update
+BEFORE UPDATE ON ai_audit_finding_occurrences BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS ai_audit_finding_occurrences_no_delete
+BEFORE DELETE ON ai_audit_finding_occurrences BEGIN
+    SELECT RAISE(ABORT, 'ai audit tables are append-only');
+END;
