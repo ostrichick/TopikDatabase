@@ -94,6 +94,13 @@ def run(action: str, runtime: Path) -> dict:
         finally:
             db.close()
 
+    def canonical_sha():
+        db = connect_postgres(url, readonly=True)
+        try:
+            return db.execute("SELECT clip_sha256 FROM audio_segments WHERE question_id=%s", (AUDIO,)).fetchone()["clip_sha256"]
+        finally:
+            db.close()
+
     def append_audit(label):
         created = ai_audit_35.create_run(url, auditors=[label], model_id="stage9-physical-smoke",
                                           label=label, subject_ids=[QID])
@@ -121,19 +128,24 @@ def run(action: str, runtime: Path) -> dict:
             state = {"device": identity, "question": get(QID), "audio": get(AUDIO)["audio_segment"]}
             state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
             result = {"prepared": True, "question_version": state["question"]["version"], "audio_version": state["audio"]["version"]}
-        elif action == "pc-write":
+        elif action in ("pc-write", "pc-finish"):
             require(state.get("device") == identity, "Prepare this physical device first")
-            post(QID, "review", _review_payload(state["question"], "stage9 physical PC write"))
-            audio = state["audio"]
-            post(AUDIO, "audio-segment", {"version": audio["version"], "start_ms": audio["start_ms"], "end_ms": audio["end_ms"], "status": "verified"})
+            if action == "pc-write":
+                post(QID, "review", _review_payload(state["question"], "stage9 physical PC write"))
+                audio = state["audio"]
+                post(AUDIO, "audio-segment", {"version": audio["version"], "start_ms": audio["start_ms"], "end_ms": audio["end_ms"], "status": "verified"})
+                post(AUDIO, "export-clip", {})
+            else:
+                require(get(QID)["version"] == state["question"]["version"] + 1 and export_count() == 2,
+                        "Explicit resume requires exactly the previous PC writes and shared export")
             require(get(PAIR)["audio_segment"]["status"] == "verified", "Shared-pair write missing")
-            post(AUDIO, "export-clip", {})
             clip = get(AUDIO)["audio_segment"]
             require(clip["clip_url"], "First canonical export missing")
+            sha = canonical_sha()
             code, content = request("GET", clip["clip_url"])
-            require(code == 200 and hashlib.sha256(content).hexdigest() == clip["clip_sha256"], "First clip HTTP bytes differ")
+            require(code == 200 and hashlib.sha256(content).hexdigest() == sha, "First clip HTTP bytes differ")
             pid = append_audit("stage9-physical-PC")
-            result = {"human_write": True, "shared_audio_write": True, "clip_sha256": clip["clip_sha256"], "export_history_count": export_count(), "audit_pass": pid}
+            result = {"human_write": True, "shared_audio_write": True, "clip_sha256": sha, "export_history_count": export_count(), "audit_pass": pid}
         elif action == "laptop-check":
             require(state.get("device") == identity, "Prepare this physical device first")
             current = get(QID)
@@ -143,16 +155,17 @@ def run(action: str, runtime: Path) -> dict:
             audio = state["audio"]
             post(PAIR, "audio-segment", {"version": audio["version"], "start_ms": audio["start_ms"], "end_ms": audio["end_ms"], "status": "candidate"}, 409)
             clip = get(AUDIO)["audio_segment"]
-            require(clip["status"] == "verified" and clip["clip_sha256"] and clip["clip_url"] is None, "Laptop must see central metadata without a local clip")
+            sha = canonical_sha()
+            require(clip["status"] == "verified" and sha and clip["clip_url"] is None, "Laptop must see central metadata without a local clip")
             before = export_count()
             post(AUDIO, "export-clip", {})
             local = get(AUDIO)["audio_segment"]
             code, content = request("GET", local["clip_url"])
-            require(code == 200 and hashlib.sha256(content).hexdigest() == clip["clip_sha256"], "Laptop clip HTTP bytes differ from PC")
+            require(code == 200 and hashlib.sha256(content).hexdigest() == sha, "Laptop clip HTTP bytes differ from PC")
             require(export_count() == before, "Rematerialization duplicated central history")
             audit_from_other("stage9-physical-PC")
             append_audit("stage9-physical-Laptop")
-            result = {"pc_write_readback": True, "human_stale_http": 409, "shared_audio_stale_http": 409, "clip_sha256": clip["clip_sha256"], "no_duplicate_export_history": True, "pc_audit_readback": True, "laptop_review_and_audit_write": True}
+            result = {"pc_write_readback": True, "human_stale_http": 409, "shared_audio_stale_http": 409, "clip_sha256": sha, "no_duplicate_export_history": True, "pc_audit_readback": True, "laptop_review_and_audit_write": True}
         else:
             require(state.get("device") == identity, "Prepare this physical device first")
             require(get(QID)["version"] == state["question"]["version"] + 2, "Laptop review is not visible on PC")
@@ -170,7 +183,7 @@ def run(action: str, runtime: Path) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prepare", "pc-write", "laptop-check", "pc-check"))
+    parser.add_argument("action", choices=("prepare", "pc-write", "pc-finish", "laptop-check", "pc-check"))
     parser.add_argument("--runtime", type=Path, required=True)
     args = parser.parse_args()
     print(json.dumps(run(args.action, args.runtime), indent=2))
