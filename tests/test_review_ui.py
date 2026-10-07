@@ -204,10 +204,14 @@ class TestReviewStore(unittest.TestCase):
         fake_module.summarize_question.assert_called_once()
         self.assertEqual(fake_module.summarize_question.call_args.args[1], qid)
 
-    def test_ai_audit_summary_is_cached_in_memory_per_question(self):
+    def test_ai_audit_positive_summary_refreshes_on_each_detail_read(self):
         qid = self.listening_id
         fake_module = MagicMock(
-            summarize_question=MagicMock(return_value={"run_id": "run-1", "verdict": "clear", "total": 1}),
+            summarize_question=MagicMock(side_effect=[
+                {"run_id": "run-1", "verdict": "clear", "total": 1},
+                {"run_id": "run-2", "verdict": "clear", "total": 1},
+                {"run_id": "run-3", "verdict": "clear", "total": 1},
+            ]),
             status_report=MagicMock(return_value={"latest_run": {"attempt_status_counts": {}}}),
             question_audit_history=MagicMock(return_value={"runs": []}),
         )
@@ -220,16 +224,38 @@ class TestReviewStore(unittest.TestCase):
             first = self.store.get_question(qid)
             self.assertEqual(fake_module.summarize_question.call_count, 1)
 
-            # Second call must hit memory cache and not query backend again
+            # Positive append-only audit state can change while the reviewer is
+            # running, so explicit detail reads must refresh rather than reuse a
+            # process-lifetime positive cache entry.
             second = self.store.get_question(qid)
-            self.assertEqual(fake_module.summarize_question.call_count, 1)
-            self.assertEqual(first.get("ai_audit"), second.get("ai_audit"))
-
-            # Cache invalidation forces refresh
-            self.store.clear_ai_audit_cache()
-            third = self.store.get_question(qid)
             self.assertEqual(fake_module.summarize_question.call_count, 2)
-            self.assertEqual(first.get("ai_audit"), third.get("ai_audit"))
+            self.assertNotEqual(first["ai_audit"]["run_id"], second["ai_audit"]["run_id"])
+
+            third = self.store.get_question(qid)
+            self.assertEqual(fake_module.summarize_question.call_count, 3)
+            self.assertEqual(third["ai_audit"]["run_id"], "run-3")
+
+    def test_ai_audit_detail_can_appear_after_initial_no_audit_read(self):
+        qid = self.listening_id
+        fake_module = MagicMock(
+            summarize_question=MagicMock(side_effect=[
+                {},
+                {"run_id": "run-new", "verdict": "finding", "total": 1},
+            ]),
+            status_report=MagicMock(return_value={"latest_run": None, "passes": []}),
+            question_audit_history=MagicMock(return_value={"runs": []}),
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            for table in review_ui.AI_AUDIT_TABLES:
+                conn.execute(f"CREATE TABLE IF NOT EXISTS {table} (placeholder INTEGER)")
+            conn.commit()
+
+        with patch.dict(sys.modules, {"src.ai_audit_35": fake_module}):
+            first = self.store.get_question(qid)
+            second = self.store.get_question(qid)
+        self.assertNotIn("ai_audit", first)
+        self.assertEqual(second["ai_audit"]["run_id"], "run-new")
+        self.assertEqual(fake_module.summarize_question.call_count, 2)
 
     def test_real_ai_audit_helper_flows_into_list_and_detail_without_human_state_change(self):
         qid = self.listening_id

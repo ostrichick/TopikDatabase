@@ -59,8 +59,12 @@ class SQLiteBackedPostgresRead:
         self.db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA query_only=ON")
+        self.statements = []
 
     def execute(self, sql, params=()):
+        self.statements.append((sql, params))
+        if sql.startswith("SET TRANSACTION"):
+            return StaticCursor([])
         if "information_schema.tables" in sql:
             return StaticCursor([{"present": True}])
         return self.db.execute(sql, params)
@@ -150,6 +154,25 @@ class ReviewPostgresReadTests(unittest.TestCase):
         self.assertEqual(reading["section"], "reading")
         self.assertIsNone(reading["transcript"])
         self.assertNotIn("ai_audit", listening)
+
+    def test_bundle_uses_one_repeatable_read_snapshot_and_skips_per_question_audit_details(self):
+        connections = []
+
+        def factory(_url):
+            connection = SQLiteBackedPostgresRead(SOURCE_DB)
+            connections.append(connection)
+            return connection
+
+        with patch.object(review_ui, "PostgresReadConnection", side_effect=factory), \
+                patch.object(self.store, "_get_ai_audit_for_question",
+                             side_effect=AssertionError("N+1 audit detail read")):
+            bundle = self.store.get_questions_bundle()
+        self.assertEqual(bundle["total_questions"], 70)
+        self.assertTrue(connections)
+        self.assertEqual(
+            connections[-1].statements[0][0],
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+        )
 
     def test_local_media_root_and_blob_images_remain_local(self):
         paper = self.store.media_path("035-I-L-001", "paper")

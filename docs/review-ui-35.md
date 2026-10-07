@@ -42,7 +42,10 @@ Stage 10 이후 이 legacy upgrade 도구도 canonical SQLite에는 쓰지 못�
 PostgreSQL 환경에서 문항을 넘길 때 발생하던 2~3초의 네트워크 지연을 없애기 위해,
 화면 진입 시 현재 회차의 70문항 데이터 전체(약 124KB)를 `/api/questions-bundle`로
 백그라운드 일괄 수신하여 브라우저 인메모리에 보관합니다. 문항 이동 시 서버 요청 없이
-즉시 전환되며, 문항 저장/승인 시 해당 캐시가 자동 동기화됩니다. 자세한 내용은
+즉시 전환되며, 문항 저장/승인 시 해당 캐시가 자동 동기화됩니다. 단, AI audit 상세가
+필요한 문항과 강제 새로고침은 최신 상태를 서버에서 다시 읽습니다. 번들은 하나의
+PostgreSQL repeatable-read snapshot으로 생성하고, 공유 음원 pair와 늦게 도착한 번들의
+stale cache가 최신 상태를 덮어쓰지 못하도록 보호합니다. 자세한 내용은
 `docs/session-bundle-optimization-2026-10-07.md`를 참고하세요.
 
 ## 검토 방법

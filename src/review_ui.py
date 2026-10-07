@@ -100,7 +100,7 @@ class ReviewStore:
         else:
             self.media_root = get_media_root()
         self.source_root = (self.media_root / "35th").resolve()
-        self._ai_audit_cache: dict[str, dict | None] = {}
+        self._has_ai_runs_cache: bool | None = None
         self._has_audio_segments_cache: bool | None = None
         self._audio_asset_cache: dict[str, dict] = {}
         if self.backend == "sqlite" and not self.db_path.is_file():
@@ -109,10 +109,6 @@ class ReviewStore:
             exam = db.execute("SELECT session, level, booklet FROM exams").fetchall()
             if len(exam) != 1 or (exam[0]["session"], exam[0]["level"], exam[0]["booklet"]) != (35, "I", "B"):
                 raise ReviewError("This reviewer only accepts the 35th TOPIK I B pilot database")
-
-    def clear_ai_audit_cache(self) -> None:
-        """Clear cached AI audit summaries for human review sessions."""
-        self._ai_audit_cache.clear()
 
     def _connect(self, writable: bool = False):
         if self.backend == "postgres":
@@ -223,8 +219,6 @@ class ReviewStore:
                 for item in items:
                     qid = item["id"]
                     is_scoped = execution_subjects is None or qid in execution_subjects
-                    if not is_scoped:
-                        self._ai_audit_cache[qid] = None
                     summary = ai_summaries.get(qid)
                     audit = self._ai_audit_list_summary(summary) if summary else {}
                     run_id = summary.get("run_id") if summary else None
@@ -917,12 +911,7 @@ class ReviewStore:
         with closing(self._connect()) as db:
             row = self._question(db, question_id)
             question = dict(row)
-            if question_id in self._ai_audit_cache:
-                ai_audit = self._ai_audit_cache[question_id]
-            else:
-                tables_present, ai_audit = self._get_ai_audit_for_question(db, question_id)
-                if tables_present:
-                    self._ai_audit_cache[question_id] = ai_audit
+            _tables_present, ai_audit = self._get_ai_audit_for_question(db, question_id)
             choices = [dict(item) for item in db.execute(
                 "SELECT number, text FROM choices WHERE question_id=? ORDER BY number", (question_id,)
             )]
@@ -987,6 +976,13 @@ class ReviewStore:
 
     def get_questions_bundle(self) -> dict:
         with closing(self._connect()) as db:
+            # Keep every component of the bundle on one database snapshot.
+            # READ COMMITTED would allow old question text to be combined with
+            # a newer review version, defeating optimistic concurrency.
+            if self.backend == "postgres":
+                db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            else:
+                db.execute("BEGIN")
             exam_row = db.execute("SELECT id FROM exams LIMIT 1").fetchone()
             exam_id = exam_row["id"] if exam_row else "035-I-B"
 
@@ -1061,32 +1057,10 @@ class ReviewStore:
                 segment_rows = db.execute("SELECT * FROM audio_segments").fetchall()
                 segments_by_qid = {r["question_id"]: r for r in segment_rows}
 
-            has_ai = self._has_ai_audit_tables(db)
-            if has_ai:
-                audit_target = self.database_url if self.backend == "postgres" else db
-                try:
-                    from src.ai_audit_35 import audit_subject_ids
-                    scoped_ids = set(audit_subject_ids(audit_target))
-                except Exception:
-                    scoped_ids = None
-                for row in rows:
-                    qid = row["id"]
-                    if scoped_ids is not None and qid not in scoped_ids:
-                        self._ai_audit_cache[qid] = None
-
             questions_map = {}
             for row in rows:
                 question = dict(row)
                 qid = question["id"]
-
-                ai_audit = None
-                if has_ai:
-                    if qid in self._ai_audit_cache:
-                        ai_audit = self._ai_audit_cache[qid]
-                    else:
-                        tables_present, ai_audit = self._get_ai_audit_for_question(db, qid)
-                        if tables_present:
-                            self._ai_audit_cache[qid] = ai_audit
 
                 transcript_info = transcript_by_qid.get(qid)
                 image_keys = images_by_qid.get(qid, [])
@@ -1156,8 +1130,6 @@ class ReviewStore:
                     "preview_flags": json.loads(question["preview_flags_json"]),
                     "history": history,
                 }
-                if ai_audit:
-                    q_data["ai_audit"] = ai_audit
                 questions_map[qid] = q_data
 
             return {

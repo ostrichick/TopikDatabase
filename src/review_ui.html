@@ -305,7 +305,7 @@
       const AI_VERDICT_NAMES = { clear: '이상 없음', finding: '결함 발견', uncertain: '불확실' };
       const AI_ATTEMPT_NAMES = { succeeded: '성공', failed: '실패', timed_out: '시간 초과', invalid: '잘못된 응답' };
       const AI_RISK_NAMES = { none: '없음', low: '낮음', medium: '중간', high: '높음', critical: '매우 높음' };
-      const state = { items: [], detail: null, detailsCache: {}, baseline: '', selectedId: null, visible: [], pdfTab: 'question', loading: false, saving: false, requestId: 0, csrfToken: null, aiAuditAvailable: false, readOnly: false,
+      const state = { items: [], detail: null, detailsCache: {}, bundleProtectedIds: new Set(), baseline: '', selectedId: null, visible: [], pdfTab: 'question', loading: false, saving: false, requestId: 0, csrfToken: null, aiAuditAvailable: false, readOnly: false,
         databaseBackend: 'sqlite', capabilities: { reviewWrite: true, audioSegmentWrite: true, clipExport: true, aiAuditWrite: false },
         audio: { available: false, saving: false, preview: null, heardSignature: null, durationMs: null, error: false } };
 
@@ -595,6 +595,17 @@
         for (const pair of [[25, 26], [27, 28], [29, 30]]) if (pair.includes(q.number)) return pair;
         return [];
       }
+      function invalidateSharedAudioCache(updated, currentId) {
+        const shared = updated?.audio_segment?.shared_questions;
+        if (!Array.isArray(shared)) return;
+        for (const number of shared) {
+          const item = state.items.find(candidate =>
+            candidate.section === 'listening' && Number(candidate.number) === Number(number));
+          if (!item?.id || item.id === currentId) continue;
+          delete state.detailsCache[item.id];
+          state.bundleProtectedIds.add(item.id);
+        }
+      }
       function refreshAudioActions() {
         const q = state.detail;
         const segment = audioSegment();
@@ -750,10 +761,12 @@
           // Preserve the question editor's unsaved draft; the audio segment is a separate review.
           state.detail.audio_segment = updated.audio_segment;
           if (Number.isSafeInteger(updated.version)) state.detail.version = updated.version;
+          state.bundleProtectedIds.add(id);
           if (state.detailsCache && state.detailsCache[id]) {
             state.detailsCache[id].audio_segment = updated.audio_segment;
             if (Number.isSafeInteger(updated.version)) state.detailsCache[id].version = updated.version;
           }
+          invalidateSharedAudioCache(updated, id);
           audioFeedback(status === 'verified' ? '청취 확인 후 해당 음원 구간이 검증되었습니다.' : '후보 구간을 저장했습니다. 검증하려면 해당 구간을 끝까지 들어야 합니다.', 'success');
           updateAudioSummary();
         } catch (error) {
@@ -784,10 +797,12 @@
               !sameOriginURL(updated.audio_segment.clip_url)) throw new Error('MP3 추출 응답에 유효한 로컬 파일 주소가 없습니다.');
           state.detail.audio_segment = updated.audio_segment;
           if (Number.isSafeInteger(updated.version)) state.detail.version = updated.version;
+          state.bundleProtectedIds.add(q.id);
           if (state.detailsCache && state.detailsCache[q.id]) {
             state.detailsCache[q.id].audio_segment = updated.audio_segment;
             if (Number.isSafeInteger(updated.version)) state.detailsCache[q.id].version = updated.version;
           }
+          invalidateSharedAudioCache(updated, q.id);
           updateAudioSummary();
           audioFeedback('검증된 구간의 MP3가 이 장치에 준비되었습니다. 아래 링크에서 파일을 확인하세요.', 'success');
         } catch (error) { audioFeedback(error.message, 'error'); notice(error.message, 'error'); }
@@ -820,9 +835,12 @@
         if (!force && !canNavigate()) return;
         if (state.saving || state.audio.saving) return;
 
-        if (!force && state.detailsCache && state.detailsCache[id]) {
+        const cached = state.detailsCache && state.detailsCache[id];
+        const listItem = state.items.find(item => item.id === id);
+        const needsFullAudit = !!aiAudit(listItem) && !aiAudit(cached);
+        if (!force && cached && !needsFullAudit) {
           state.selectedId = id;
-          state.detail = state.detailsCache[id];
+          state.detail = cached;
           state.baseline = '';
           state.audio.preview = null;
           state.audio.heardSignature = null;
@@ -835,6 +853,7 @@
         }
 
         const token = ++state.requestId;
+        state.bundleProtectedIds.add(id);
         state.selectedId = id;
         state.detail = null;
         state.baseline = '';
@@ -1204,6 +1223,7 @@
           });
           if (!updated || updated.id !== id || !Array.isArray(updated.choices)) throw new Error('저장 응답 형식이 올바르지 않습니다. 서버 상태를 확인하세요.');
           state.detail = updated;
+          state.bundleProtectedIds.add(id);
           if (state.detailsCache) state.detailsCache[id] = updated;
           const row = state.items.find(item => item.id === id);
           if (row) { row.status = updated.review_status; row.requires_image = updated.requires_image; }
@@ -1314,7 +1334,11 @@
         try {
           const bundle = await request('/api/questions-bundle');
           if (bundle && bundle.questions && typeof bundle.questions === 'object') {
-            Object.assign(state.detailsCache, bundle.questions);
+            for (const [id, detail] of Object.entries(bundle.questions)) {
+              if (state.bundleProtectedIds.has(id) ||
+                  Object.prototype.hasOwnProperty.call(state.detailsCache, id)) continue;
+              state.detailsCache[id] = detail;
+            }
           }
         } catch (_) {
           // Fallback to on-demand question fetching remains active

@@ -31,6 +31,7 @@ async function scenario(status, { fail = false, last = false } = {}) {
   const state = {
     detail: { id: first.id, number: first.number, version: 0 },
     selectedId: first.id, loading: false, saving: false, items: rows, csrfToken: 'test',
+    detailsCache: {}, bundleProtectedIds: new Set(),
   };
   const events = [];
   const context = {
@@ -418,6 +419,67 @@ const filterChanged = vm.runInNewContext(source, context);
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """
 
+NODE_BUNDLE_CACHE_CHECK = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+
+const html = fs.readFileSync(process.argv[1], 'utf8');
+function extractFunction(name) {
+  let start = html.indexOf('      function ' + name + '(');
+  if (start < 0) start = html.indexOf('      async function ' + name + '(');
+  assert.ok(start >= 0, 'Could not locate ' + name);
+  const brace = html.indexOf('{', start);
+  let depth = 0, quote = null, escaped = false;
+  for (let i = brace; i < html.length; i++) {
+    const ch = html[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch.charCodeAt(0) === 96) { quote = ch; continue; }
+    if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) return html.slice(start, i + 1);
+  }
+  throw new Error('Unterminated function ' + name);
+}
+
+const state = {
+  items: [
+    { id: 'q25', number: 25, section: 'listening' },
+    { id: 'q26', number: 26, section: 'listening' },
+    { id: 'q2', number: 2, section: 'listening' },
+    { id: 'q3', number: 3, section: 'reading' },
+  ],
+  detailsCache: { q25: { version: 5 }, q26: { version: 5 } },
+  bundleProtectedIds: new Set(['q2']),
+};
+const context = {
+  state,
+  request: async () => ({ questions: {
+    q25: { version: 1 }, q2: { version: 1 }, q3: { version: 1 },
+  } }),
+};
+const source = extractFunction('invalidateSharedAudioCache') + '\n' +
+  extractFunction('loadBundle') + '\n({ invalidateSharedAudioCache, loadBundle });';
+const functions = vm.runInNewContext(source, context);
+
+(async () => {
+  await functions.loadBundle();
+  assert.equal(state.detailsCache.q25.version, 5, 'late bundle must not replace a fresher cached detail');
+  assert.equal(state.detailsCache.q2, undefined, 'protected individual fetch must not be reinserted by bundle');
+  assert.equal(state.detailsCache.q3.version, 1, 'missing safe entries should still be prefetched');
+
+  functions.invalidateSharedAudioCache({ audio_segment: { shared_questions: [25, 26] } }, 'q25');
+  assert.equal(state.detailsCache.q25.version, 5, 'current question cache remains authoritative');
+  assert.equal(state.detailsCache.q26, undefined, 'shared-pair sibling cache must be invalidated');
+  assert.equal(state.bundleProtectedIds.has('q26'), true, 'late bundle must not resurrect invalidated sibling');
+  console.log('Bundle cache race and shared-pair invalidation PASS');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+
 
 class TestReviewUIFlow(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
@@ -454,6 +516,16 @@ class TestReviewUIFlow(unittest.TestCase):
     def test_filter_change_keeps_visible_list_and_detail_selection_in_sync(self):
         result = subprocess.run(
             [shutil.which("node"), "-e", NODE_FILTER_SELECTION_CHECK, str(HTML)],
+            capture_output=True, text=True, encoding="utf-8", timeout=15,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_bundle_cache_preserves_fresher_entries_and_invalidates_shared_pairs(self):
+        result = subprocess.run(
+            [shutil.which("node"), "-e", NODE_BUNDLE_CACHE_CHECK, str(HTML)],
             capture_output=True, text=True, encoding="utf-8", timeout=15,
             check=False,
         )

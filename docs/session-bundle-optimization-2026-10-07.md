@@ -2,7 +2,7 @@
 
 - **작성 일자**: 2026-10-07
 - **적용 대상**: `src/review_ui.py`, `src/review_ui.html`, `tests/test_review_ui.py`
-- **목표**: 원격 PostgreSQL SSH 터널 RTT 지연으로 인한 문항 전환 지연(2~3초)을 완전 제거하고, 브라우저 인메모리 전환을 통한 **문항 이동 0.00초(즉각 전환)** 달성
+- **목표**: 원격 PostgreSQL SSH 터널 RTT 지연으로 인한 일반 문항 전환 지연(2~3초)을 제거하고, 브라우저 인메모리 전환을 통한 **캐시된 문항 이동 0.00초(즉각 전환)** 달성. AI audit 상세가 필요한 문항과 강제 새로고침은 정확성을 위해 서버 최신 상태를 다시 읽습니다.
 
 ---
 
@@ -24,7 +24,7 @@
 ## 2. 백엔드 아키텍처 및 구현
 
 ### 2.1 단일 배치 추출 (Batch Bulk Extraction)
-70개 문항을 각각 N번 쿼리(70 × 6 = 420회 쿼리)하지 않고, 단 6개의 일괄 SELECT 쿼리로 데이터를 조립합니다:
+70개 문항을 각각 N번 조회하지 않고 핵심 문항 데이터 6종을 일괄 SELECT로 조립합니다. 테이블 존재 여부와 음원 asset 같은 소수의 메타데이터 조회는 별도로 수행되므로 전체 SQL 문장 수가 정확히 6개라는 의미는 아닙니다:
 
 1. `questions`: 전 문항 기본 메타데이터 및 지문·정답 조인 (1회)
 2. `choices`: 전체 선택지 일괄 조회 후 `question_id`별 그룹화 (1회)
@@ -32,6 +32,10 @@
 4. `question_images`: 전체 문항 이미지 키 매핑 (1회)
 5. `review_records`: 검수 기록 및 버전 카운트 일괄 집계 (1회)
 6. `audio_segments`: 전체 음원 구간 및 에셋 메타데이터 일괄 로드 (1회)
+
+번들 전체는 PostgreSQL에서 **`REPEATABLE READ READ ONLY` 단일 snapshot**으로 읽습니다. 다른 PC나 탭의 저장이 번들 생성 도중 커밋되더라도 오래된 문항 본문과 새로운 review version이 하나의 번들에 섞이지 않으므로 optimistic concurrency를 우회하는 lost-update 위험을 막습니다.
+
+AI audit 상세(history/attempt/evidence)는 번들에 넣지 않습니다. 목록 API의 audit 요약으로 상세 필요 여부를 판단하고, audit 상세가 필요한 문항은 선택할 때 기존 단일 문항 API에서 최신 상태를 읽습니다. 이는 audit 대상 문항 수만큼 원격 연결을 여는 N+1 경로를 번들 시작 과정에서 제거하기 위한 의도적인 예외입니다.
 
 ### 2.2 신규 엔드포인트: `GET /api/questions-bundle`
 - **반환 구조**:
@@ -59,11 +63,12 @@
 ### 3.2 문항 전환 로직
 - `selectQuestion(id, { force = false })`:
   - `state.detailsCache[id]`가 존재하면 네트워크 요청(`fetch`)을 일체 발생시키지 않고 **동기적으로 즉시 렌더링 (소요 시간 0.00ms)**.
-  - 캐시가 아직 도착하지 않은 첫 문항 또는 `force: true`(충돌 후 강제 새로고침) 시에만 개별 API 호출로 폴백.
+  - 캐시가 아직 도착하지 않은 문항, AI audit 상세가 필요한 문항, 또는 `force: true`(충돌 후 강제 새로고침)는 개별 API 호출로 폴백.
+  - 개별 조회/저장이 번들보다 먼저 시작된 문항은 `bundleProtectedIds`로 보호하여 늦게 도착한 오래된 번들이 더 최신 캐시를 덮어쓰지 못합니다.
 
 ### 3.3 정합성 및 캐시 동기화
 - `saveReview`: 검수 승인/반려 시 반환된 최신 문항 상태를 `state.detailsCache[id]`에 즉시 반영.
-- `saveAudioSegment` / `exportAudioClip`: 음원 구간 변경 시에도 `state.detailsCache[id]`의 `audio_segment` 및 `version` 갱신.
+- `saveAudioSegment` / `exportAudioClip`: 현재 문항 캐시를 갱신하고, 25/26·27/28·29/30처럼 서버에서 함께 갱신되는 공유 대화의 상대 문항 캐시는 무효화합니다. 다음 진입 시 상대 문항은 서버의 최신 version/bounds/clip 상태를 다시 읽습니다.
 
 ---
 
@@ -73,13 +78,15 @@
 - 테스트 파일: `tests/test_review_ui.py`
   - `test_questions_bundle_covers_all_seventy_questions`: 번들 70문항 필드 일치성 검증 (OK)
   - `test_get_questions_bundle_endpoint`: HTTP 엔드포인트 응답 및 캐시 헤더 검증 (OK)
+- 추가 회귀는 PostgreSQL bundle의 repeatable-read snapshot, AI audit N+1 상세조회 차단, 늦은 bundle의 최신 캐시 덮어쓰기 방지, 공유 음원 pair cache 무효화를 검증합니다.
 - 전체 스위트 실행:
   ```text
-  Ran 142 tests in 68.457s
-  OK (Exit Code 0)
+  Ran 152 tests in 86.139s
+  OK
   ```
 
 ### 4.2 프로덕션 실측 벤치마크
-- **번들 페이로드 크기**: `126,980 bytes` (**124 KB**)
-- **번들 수신 소요 시간**: **3.50초** (원격 PostgreSQL SSH 터널 왕복)
-- **문항 전환 소요 시간**: **0.00초** (브라우저 인메모리 전환)
+- correctness hardening 적용 후 Laptop에서 현재 중앙 `topik` PostgreSQL을 read-only로 직접 조회해 재측정했습니다.
+- **번들 페이로드 크기**: `120,593 bytes` (약 **118 KB**)
+- **번들 생성·수신 소요 시간**: **3.892초** (원격 PostgreSQL SSH 터널, 70문항)
+- **일반 캐시 문항 전환 소요 시간**: **0.00초** (브라우저 인메모리 전환). AI audit 상세 문항/강제 새로고침은 최신 데이터 정확성을 위해 예외적으로 서버를 조회합니다.
