@@ -70,11 +70,15 @@ INSERT만 수행한다.
 ## 실제 실행 절차
 
 `src/ai_audit_35.py`는 AI 제공자를 직접 호출하지 않는다. 대신 각 감사자에게 전달할
-고정된 blind bundle을 만들고, 에이전트가 반환한 구조화 JSON을 검증해서 로컬 DB에
-append-only로 적재한다. 따라서 ChatGPT 에이전트, 별도 API runner, 수동 전달 등 어떤
+고정된 blind bundle을 만들고, 에이전트가 반환한 구조화 JSON을 검증해서 구성된 DB에
+append-only로 적재한다. `TOPIK_DATABASE_URL`이 있으면 PostgreSQL을 사용하고, 명시적
+`--db <sqlite-path>` 또는 환경변수가 없으면 기존 SQLite 흐름을 그대로 사용할 수 있다.
+따라서 ChatGPT 에이전트, 별도 API runner, 수동 전달 등 어떤
 오케스트레이션을 쓰더라도 동일한 감사 계약을 사용할 수 있다.
 
-먼저 기존 35-I DB에 감사 스키마를 idempotent하게 설치한다.
+SQLite에서는 기존 35-I DB에 감사 스키마를 idempotent하게 설치한다. PostgreSQL에서는
+1~4단계 migration이 이미 설치한 스키마/append-only trigger의 존재를 확인만 하며,
+runtime이 DDL로 trigger를 우회하거나 다시 만들지 않는다.
 
 ```powershell
 py -3 src/ai_audit_35.py init
@@ -138,6 +142,15 @@ attempt는 `succeeded`, `failed`, `timed_out`, `invalid` 중 하나이며 모두
 실패 attempt가 있어도 다른 pass의 결과/consensus는 계속 사용할 수 있다. 성공 result와
 그에 대응하는 `succeeded` attempt는 하나의 트랜잭션으로 저장되어 둘 중 하나만 남는
 부분 저장을 허용하지 않는다.
+
+PostgreSQL에서는 같은 pass에 대한 checkpoint/attempt/result 경쟁을 parent pass row의
+`SELECT ... FOR UPDATE`로 직렬화한다. `attempt_number`와 checkpoint `sequence`는 잠금을
+획득한 뒤 계산하며 DB의 UNIQUE 제약도 최종 안전망으로 유지한다. 새 pass 생성은 parent
+run을 잠근 뒤 `(run_id, pass_number)`와 `(run_id, auditor_id)` uniqueness를 확인한다.
+source snapshot은 한 `REPEATABLE READ` transaction 안에서 만들기 때문에 PC/Laptop의
+사람 검수 write가 동시에 발생해도 서로 다른 시점의 source row가 한 snapshot에 섞이지
+않는다. `40001`, `40P01` 또는 기타 DB 실패는 자동 retry하지 않고 전체 transaction을
+rollback한다.
 
 사람 검수 화면 `py -3 src/review_ui.py --port 0`은 감사 데이터가 있으면 문항별 감사
 횟수, clear/finding/uncertain 수, 미해결 finding, 감사자 불일치, 위험도, 수렴 상태와
@@ -227,6 +240,9 @@ provider 실패·시간 초과·형식 오류는 pass 자체를 삭제하거나 
 - 검수 UI의 필터 목록과 상세 선택이 같은 문항을 가리키며 dirty 상태에서는 자동 이동하지 않음
 - AI 감사 실행 전후 human review 상태/이력/음원 verified 상태 불변
 - AI 테이블이 없는 기존 DB에서도 검수 UI 정상 동작
+- PostgreSQL 동시 attempt/checkpoint가 pass lock 아래 단조 번호를 유지하고 partial write를 남기지 않음
+- PostgreSQL append-only trigger가 UPDATE/DELETE를 SQLSTATE `55000`으로 계속 거부함
+- PostgreSQL `40001`/`40P01`/일반 DB 실패에서 자동 retry 없이 전체 audit transaction rollback
 
 첫 독립성·복원력 검증은 `docs/ai-audit-first-validation-2026-10-05.md`, 다중-run/중단·재개/
 재감사/UI 영속성 검증은 `docs/ai-audit-second-validation-2026-10-05.md`에 기록한다.

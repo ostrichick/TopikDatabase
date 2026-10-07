@@ -47,3 +47,23 @@ Official TOPIK copyright/use enquiry: topik@korea.kr (PBT, per NIIED).
 The collector, local pilot/review code, tests, documentation, and source-page metadata are version-controlled. Downloaded exam PDFs, extracted previews, archives, caches, and local corpora remain local and are excluded by .gitignore. For the verified implementation status and outstanding human checks as of 2026-09-22, see `docs/project-audit-2026-09-22.md`.
 
 The 35th TOPIK I pilot also includes an append-only **multi-agent independent AI audit** layer. It creates frozen blind audit bundles, records checkpoints/results/findings separately from human review state, calculates deterministic consensus/risk/convergence, and exposes those results read-only in the local reviewer. See `docs/ai-audit-system-35.md` and run `py -3 src/ai_audit_35.py --help` for the local workflow. The audit runner does not call an AI provider by itself and can never promote a question, transcript, or audio segment to human `verified` status.
+
+The PostgreSQL migration foundation and central reviewer path are documented in
+`docs/postgres-foundation.md`. Human review and audio-segment state can use
+central PostgreSQL while original PDF/audio stays local. The append-only AI
+audit runtime can also use the same standard PostgreSQL database as of stage 7;
+its evidence remains separate from human review state and is read-only in the
+reviewer. As of stage 8, verified audio clips also use central PostgreSQL only
+for their canonical logical path/checksum; each PC keeps or rematerializes the
+actual MP3 under its own `TOPIK_MEDIA_ROOT`. Stage 9 operational cutover and
+stage 10 SQLite archival remain intentionally deferred.
+
+Canonical clip export does **not** use an arbitrary `ffmpeg.exe` from `PATH`.
+On Windows it is pinned to the exact FFmpeg 7.1 binary shipped by
+`imageio-ffmpeg==0.6.0`, and `src/audio_35.py` verifies that binary's SHA-256
+before use. Prepare each PC/Laptop with `py -3 scripts/setup_media_tools.py`.
+Before stage 9, create one report on each physical device with
+`py -3 scripts/ffmpeg_cross_device_preflight.py --label <PC-or-Laptop> --output <report.json>`
+and compare one device against the other's report using `--compare-report`.
+Only a `comparison.status` of `PASS` proves that source, bounds, FFmpeg build and
+the generated MP3 bytes are identical across those two machines.

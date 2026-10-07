@@ -43,6 +43,16 @@
 - `POST /api/questions/<id>/export-clip`은 빈 JSON 객체 `{}`를 받으며 **수동
   검증된** 구간만 내보낸다. 출처 파일 크기·해시를 다시 확인하고, 기존 클립을
   덮어쓰지 않으며, 같은 공통 대화의 두 문항에는 동일한 클립을 연결한다.
+- PostgreSQL 모드에서는 원본 PDF/MP3와 파생 clip 파일이 계속 장치 로컬에
+  남는다. 중앙 DB의 `clip_relative_path`/`clip_sha256`는 canonical identity만
+  저장한다. 다른 장치에 해당 파일이 없으면 동일 원본·구간으로 다시 인코딩한 뒤
+  생성 SHA-256이 중앙 SHA와 정확히 같을 때만 로컬 `TOPIK_MEDIA_ROOT` 아래에
+  materialize한다. 이 복원은 DB metadata나 `review_records`를 중복 추가하지
+  않는다. SHA가 다르거나 기존 목적지에 다른 bytes가 있으면 덮어쓰지 않고 실패한다.
+- PostgreSQL export는 로컬 원본과 verified/shared-pair 상태를 먼저 확인하고 DB
+  lock 밖에서 임시 MP3를 만든 뒤, Stage 6과 같은 deterministic question/audio
+  `FOR UPDATE` 잠금으로 상태를 다시 확인한다. 그 사이 구간이나 source metadata가
+  바뀌면 `409 Conflict`로 중단하며 clip link/history는 남기지 않는다.
 
 ## 수동 검증과 회귀 테스트
 
