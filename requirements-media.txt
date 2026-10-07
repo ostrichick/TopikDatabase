@@ -1,0 +1,4 @@
+# Canonical Stage-8 audio clips must use the same FFmpeg build on PC and Laptop.
+# The wheel for imageio-ffmpeg 0.6.0 on Windows x86_64 contains FFmpeg 7.1
+# essentials_build-www.gyan.dev; src/audio_35.py also verifies the binary SHA.
+imageio-ffmpeg==0.6.0

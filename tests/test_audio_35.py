@@ -24,6 +24,23 @@ def synthetic_long_pauses():
 
 
 class Audio35Tests(unittest.TestCase):
+    def test_default_ffmpeg_uses_exact_project_pinned_binary_not_path(self):
+        audio_35.pinned_ffmpeg_identity.cache_clear()
+        if not audio_35.PINNED_FFMPEG.is_file():
+            self.skipTest("Pinned local FFmpeg has not been installed on this device")
+        with patch.object(audio_35.shutil, "which", return_value=r"C:\other\ffmpeg.exe") as which:
+            resolved = Path(audio_35._ffmpeg()).resolve()
+        self.assertEqual(resolved, audio_35.PINNED_FFMPEG.resolve())
+        which.assert_not_called()
+        identity = audio_35.pinned_ffmpeg_identity()
+        self.assertEqual(identity["sha256"], audio_35.PINNED_FFMPEG_SHA256)
+        self.assertEqual(identity["version"], audio_35.PINNED_FFMPEG_VERSION)
+
+    def test_explicit_ffmpeg_override_remains_explicit_only(self):
+        with patch.object(audio_35.shutil, "which", return_value=r"C:\custom\ffmpeg.exe") as which:
+            self.assertEqual(audio_35._ffmpeg("custom-ffmpeg"), r"C:\custom\ffmpeg.exe")
+        which.assert_called_once_with("custom-ffmpeg")
+
     def test_31_pauses_form_27_unverified_candidates_and_shared_groups(self):
         pauses = synthetic_long_pauses()
         data = audio_35._propose(pauses, pauses[-1][1] + 5000, "a" * 64)

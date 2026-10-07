@@ -15,6 +15,7 @@ and refuses to write into the original 35th-session source directory.
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -29,6 +30,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIR = ROOT / "topik-past-papers" / "35th"
 DEFAULT_SOURCE = SOURCE_DIR / "35-TOPIK-I-Listening-Audio-File.mp3"
+PINNED_FFMPEG = (
+    ROOT / "topik-past-papers" / ".verification_deps" / "imageio_ffmpeg" /
+    "binaries" / "ffmpeg-win-x86_64-v7.1.exe"
+)
+PINNED_FFMPEG_SHA256 = "2ce797a0f88d7f067180338fb227f7b1928ea727bd9a4d7a1d022f7c52af71a3"
+PINNED_FFMPEG_VERSION = "7.1-essentials_build-www.gyan.dev"
 SHARED_PAIRS = ((25, 26), (27, 28), (29, 30))
 _THRESHOLDS = (-30, -35, -40, -45)
 _LONG_SILENCE_SECONDS = 8.0
@@ -59,25 +66,39 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+@functools.lru_cache(maxsize=1)
+def pinned_ffmpeg_identity() -> dict[str, str]:
+    """Return the exact project-pinned FFmpeg identity used for canonical clips."""
+    path = PINNED_FFMPEG.resolve()
+    if not path.is_file():
+        raise AudioError(
+            "Pinned FFmpeg is missing. Run `py -3 scripts/setup_media_tools.py` on this device."
+        )
+    digest = _sha256(path)
+    if digest != PINNED_FFMPEG_SHA256:
+        raise AudioError(
+            "Pinned FFmpeg binary checksum differs from the approved build; "
+            "run `py -3 scripts/setup_media_tools.py --repair`."
+        )
+    response = _run([str(path), "-version"])
+    first_line = response.stdout.splitlines()[0].strip() if response.stdout else ""
+    expected = f"ffmpeg version {PINNED_FFMPEG_VERSION}"
+    if response.returncode or not first_line.startswith(expected):
+        raise AudioError("Pinned FFmpeg version/build does not match the approved contract")
+    return {
+        "path": str(path),
+        "sha256": digest,
+        "version": PINNED_FFMPEG_VERSION,
+    }
+
+
 def _ffmpeg(explicit: str | Path | None = None) -> str:
     if explicit is not None:
         path = shutil.which(str(explicit))
         if path is None:
             raise AudioError(f"ffmpeg executable not found: {explicit}")
         return path
-    located = shutil.which("ffmpeg")
-    if located:
-        return located
-    # The local corpus already has imageio_ffmpeg in its ignored verification deps.
-    try:
-        import imageio_ffmpeg
-    except ImportError:
-        sys.path.insert(0, str(ROOT / "topik-past-papers" / ".verification_deps"))
-        try:
-            import imageio_ffmpeg
-        except ImportError as exc:
-            raise AudioError("Install ffmpeg or imageio_ffmpeg locally, or pass --ffmpeg") from exc
-    return imageio_ffmpeg.get_ffmpeg_exe()
+    return pinned_ffmpeg_identity()["path"]
 
 
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
