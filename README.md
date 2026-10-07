@@ -55,8 +55,17 @@ audit runtime can also use the same standard PostgreSQL database as of stage 7;
 its evidence remains separate from human review state and is read-only in the
 reviewer. As of stage 8, verified audio clips also use central PostgreSQL only
 for their canonical logical path/checksum; each PC keeps or rematerializes the
-actual MP3 under its own `TOPIK_MEDIA_ROOT`. Stage 9 operational cutover and
-stage 10 SQLite archival remain intentionally deferred.
+actual MP3 under its own `TOPIK_MEDIA_ROOT`. Stage 9 operational cutover was
+completed on both physical devices on 2026-10-07 against the central
+`wordpress-blog` PostgreSQL server. See `docs/stage9-cutover-2026-10-07.md` for
+current verification and recovery evidence. Stage 10 SQLite archival remains
+deferred; the preserved source has not been modified.
+
+Start the central reviewer on either device with
+`powershell -NoProfile -File scripts/start_postgres_review.ps1`. The launcher
+loads device-local external configuration, starts the SSH forward if needed,
+and prints an available loopback URL. It never silently selects SQLite after
+a PostgreSQL connection failure.
 
 Canonical clip export does **not** use an arbitrary `ffmpeg.exe` from `PATH`.
 On Windows it is pinned to the exact FFmpeg 7.1 binary shipped by

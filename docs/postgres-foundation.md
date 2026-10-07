@@ -1,5 +1,10 @@
 # PostgreSQL migration and central-state foundation (stages 1-7)
 
+**2026-10-07 update:** Stage 9 physical PC/Laptop cutover is now complete.
+See `stage9-cutover-2026-10-07.md` for current execution evidence, runtime entry
+point and backup boundaries. The blocked-gate notes below describe the earlier
+handoff and are retained as history. Stage 10 is still deferred.
+
 This foundation prepares the existing 35-I review data for a central standard
 PostgreSQL database while leaving original PDF/audio files local on each PC.
 Stages 5-7 add the reviewer read/write path and append-only AI audit runtime;
