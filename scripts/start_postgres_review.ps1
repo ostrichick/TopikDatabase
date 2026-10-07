@@ -1,6 +1,6 @@
 param(
     [string]$Runtime = (Join-Path (Split-Path $PSScriptRoot -Parent) '..\TopikDatabase-runtime'),
-    [int]$Port = 8765
+    [int]$Port = 0
 )
 $ErrorActionPreference = 'Stop'
 $runtimePath = (Resolve-Path -LiteralPath $Runtime).Path
@@ -27,7 +27,7 @@ $env:TOPIK_DATABASE_URL = $config.database_url
 $env:TOPIK_MEDIA_ROOT = $config.media_root
 Push-Location (Split-Path $PSScriptRoot -Parent)
 try {
-    & py -3 -B src/review_ui.py --port $Port
+    & py -3 -B -u src/review_ui.py --port $Port
     if ($LASTEXITCODE -ne 0) { throw 'The PostgreSQL reviewer stopped with an error' }
 } finally {
     Pop-Location

@@ -17,6 +17,8 @@ __pycache__/
 
 # Downloaded exam papers and generated previews stay local.
 topik-past-papers/
+.stage9-runtime/
+*.dump
 *.pem
 *.key
 *.p8
