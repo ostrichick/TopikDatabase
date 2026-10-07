@@ -305,7 +305,8 @@
       const AI_VERDICT_NAMES = { clear: '이상 없음', finding: '결함 발견', uncertain: '불확실' };
       const AI_ATTEMPT_NAMES = { succeeded: '성공', failed: '실패', timed_out: '시간 초과', invalid: '잘못된 응답' };
       const AI_RISK_NAMES = { none: '없음', low: '낮음', medium: '중간', high: '높음', critical: '매우 높음' };
-      const state = { items: [], detail: null, baseline: '', selectedId: null, visible: [], pdfTab: 'question', loading: false, saving: false, requestId: 0, csrfToken: null, aiAuditAvailable: false,
+      const state = { items: [], detail: null, baseline: '', selectedId: null, visible: [], pdfTab: 'question', loading: false, saving: false, requestId: 0, csrfToken: null, aiAuditAvailable: false, readOnly: false,
+        databaseBackend: 'sqlite', capabilities: { reviewWrite: true, audioSegmentWrite: true, clipExport: true, aiAuditWrite: false },
         audio: { available: false, saving: false, preview: null, heardSignature: null, durationMs: null, error: false } };
 
       function notice(message, type = 'info', conflict = false) {
@@ -512,6 +513,15 @@
         if (!data || !Array.isArray(data.items)) throw new Error('문항 목록 응답 형식이 올바르지 않습니다.');
         if (typeof data.csrf_token !== 'string' || !data.csrf_token) throw new Error('검수 보안 토큰이 없습니다. 서버를 새로고침하세요.');
         state.csrfToken = data.csrf_token;
+        state.readOnly = data.read_only === true;
+        state.databaseBackend = data.database_backend === 'postgres' ? 'postgres' : 'sqlite';
+        const caps = data.capabilities && typeof data.capabilities === 'object' ? data.capabilities : {};
+        state.capabilities = {
+          reviewWrite: caps.review_write === true,
+          audioSegmentWrite: caps.audio_segment_write === true,
+          clipExport: caps.clip_export === true,
+          aiAuditWrite: caps.ai_audit_write === true,
+        };
         state.aiAuditAvailable = data.ai_audit_available === true;
         $('aiFilterWrap').hidden = !state.aiAuditAvailable;
         $('sortOrderWrap').hidden = !state.aiAuditAvailable;
@@ -522,7 +532,9 @@
         state.items = [...data.items].sort((a, b) => Number(a.number) - Number(b.number));
         counts();
         filterItems();
-        $('connectionState').textContent = '로컬 서버 연결됨';
+        $('connectionState').textContent = state.databaseBackend === 'postgres'
+          ? '중앙 PostgreSQL · 검수/로컬 클립 활성'
+          : '로컬 SQLite · 편집 가능';
       }
       function draft() {
         if (!state.detail) return null;
@@ -596,11 +608,11 @@
         const heard = !!interval && state.audio.heardSignature === audioSignature(interval);
         $('audioPreview').disabled = !enabled || !interval;
         $('audioPreview').textContent = state.audio.preview ? '구간 듣기 중단' : '설정 구간 듣기';
-        $('audioSaveCandidate').disabled = !enabled || !interval || (same && segment.status === 'candidate');
+        $('audioSaveCandidate').disabled = state.capabilities?.audioSegmentWrite === false || !enabled || !interval || (same && segment.status === 'candidate');
         if (same && segment?.status === 'verified') $('audioSaveCandidate').disabled = true;
-        $('audioVerify').disabled = !enabled || !interval || !same || segment.status !== 'candidate' || !heard || !!state.audio.preview;
-        $('audioExport').disabled = !enabled || !segment || segment.status !== 'verified' || !!segment.clip_url || audioDirty();
-        ['audioStart', 'audioEnd'].forEach(id => { $(id).disabled = state.audio.saving || state.saving || state.loading || !state.audio.available; });
+        $('audioVerify').disabled = state.capabilities?.audioSegmentWrite === false || !enabled || !interval || !same || segment.status !== 'candidate' || !heard || !!state.audio.preview;
+        $('audioExport').disabled = state.capabilities?.clipExport === false || !enabled || !segment || segment.status !== 'verified' || !!segment.clip_url || audioDirty();
+        ['audioStart', 'audioEnd'].forEach(id => { $(id).disabled = state.capabilities?.audioSegmentWrite === false || state.audio.saving || state.saving || state.loading || !state.audio.available; });
       }
       function updateAudioSummary() {
         const q = state.detail;
@@ -705,6 +717,7 @@
         refreshDirty();
       }
       async function saveAudioSegment(status) {
+        if (state.capabilities?.audioSegmentWrite === false) { audioFeedback('현재 서버는 음원 구간 저장을 허용하지 않습니다.', 'error'); return; }
         if (!state.audio.available || !state.detail || state.audio.saving || state.saving || state.loading) return;
         let interval;
         try { interval = audioInterval(); }
@@ -751,6 +764,7 @@
         }
       }
       async function exportAudioClip() {
+        if (state.capabilities?.clipExport === false) { audioFeedback('현재 서버는 검증된 MP3 클립 추출을 허용하지 않습니다.', 'error'); return; }
         const q = state.detail;
         const segment = audioSegment();
         if (!q || !state.audio.available || state.audio.saving || state.saving || state.loading ||
@@ -767,7 +781,7 @@
           state.detail.audio_segment = updated.audio_segment;
           if (Number.isSafeInteger(updated.version)) state.detail.version = updated.version;
           updateAudioSummary();
-          audioFeedback('검증된 구간의 MP3 추출이 완료되었습니다. 아래 링크에서 파일을 확인하세요.', 'success');
+          audioFeedback('검증된 구간의 MP3가 이 장치에 준비되었습니다. 아래 링크에서 파일을 확인하세요.', 'success');
         } catch (error) { audioFeedback(error.message, 'error'); notice(error.message, 'error'); }
         finally { state.audio.saving = false; refreshAudioActions(); updateNavigation(); }
       }
@@ -787,9 +801,9 @@
       }
       function setLoading(value) {
         state.loading = value;
-        $('saveDraft').disabled = value || state.saving || !state.detail;
-        $('approveQuestion').disabled = value || state.saving || !state.detail;
-        $('rejectQuestion').disabled = value || state.saving || !state.detail;
+        $('saveDraft').disabled = state.capabilities?.reviewWrite === false || value || state.saving || !state.detail;
+        $('approveQuestion').disabled = state.capabilities?.reviewWrite === false || value || state.saving || !state.detail;
+        $('rejectQuestion').disabled = state.capabilities?.reviewWrite === false || value || state.saving || !state.detail;
         updateNavigation();
         refreshAudioActions();
       }
@@ -849,16 +863,20 @@
         textBox('groupPassage', q.group?.passage_text, '공통 지문 없음');
         textBox('rawQuestion', q.raw_question_text, '추출 원문 없음');
         $('stemInput').value = typeof q.stem === 'string' ? q.stem : '';
+        $('stemInput').disabled = state.capabilities?.reviewWrite === false;
         for (let n = 1; n <= 4; n++) {
           const choice = q.choices.find(item => Number(item.number) === n);
           $(`choice${n}`).value = choice && typeof choice.text === 'string' ? choice.text : '';
+          $(`choice${n}`).disabled = state.capabilities?.reviewWrite === false;
           $(`choiceRow${n}`).classList.toggle('correct', Number(q.answer?.choice_number) === n);
         }
         $('answerNote').textContent = `정답 ${CHOICE_SYMBOLS[Number(q.answer?.choice_number) - 1] || '미확인'} · 정답표 ${q.answer_key_number ?? '—'}번 · 정답표 PDF ${q.answer?.source_pdf_page ?? '—'}쪽 · ${q.points}점`;
         $('transcriptEditorSection').hidden = q.section !== 'listening';
         $('transcriptInput').value = typeof q.transcript?.text === 'string' ? q.transcript.text : '';
+        $('transcriptInput').disabled = state.capabilities?.reviewWrite === false;
         $('transcriptHint').textContent = `대본 검수 상태: ${statusName(q.transcript?.review_status)} · 원본 PDF ${q.transcript?.source_pdf_page || '—'}쪽 · 오른쪽에서 음원 구간을 별도로 듣고 검증할 수 있습니다. 대본 승인과 구간 검증은 별개입니다.`;
         $('reviewNote').value = '';
+        $('reviewNote').disabled = state.capabilities?.reviewWrite === false;
         state.baseline = JSON.stringify(draft());
         refreshDirty();
         renderReferences();
@@ -1140,6 +1158,7 @@
         }
       }
       async function sendReview(status) {
+        if (state.capabilities?.reviewWrite === false) { notice('현재 서버는 문항 검수 저장을 허용하지 않습니다.', 'info'); return; }
         if (!state.detail || state.loading || state.saving || state.audio?.saving) return;
         const input = draft();
         if (status === 'rejected' && !input.note.trim()) {

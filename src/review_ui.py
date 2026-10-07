@@ -1,8 +1,12 @@
-"""Local-only review screen for the 35th TOPIK I pilot database.
+"""Local review screen for the 35th TOPIK I pilot database.
 
 Run from the project root: py -3 src/review_ui.py
 Open the local URL printed in the terminal (port 8765 or an available fallback).
-No third-party web services are used.
+SQLite remains the writable default. When TOPIK_DATABASE_URL is configured the
+reviewer can read and write human-review state in central PostgreSQL using
+optimistic version checks plus PostgreSQL row locks. AI audit writes remain
+disabled; stage 8 keeps clip files device-local while PostgreSQL stores only
+their canonical logical path and checksum.
 """
 
 from __future__ import annotations
@@ -18,14 +22,27 @@ import secrets
 import sqlite3
 import sys
 import tempfile
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-ROOT = Path(__file__).resolve().parents[1]
+from src.database import (
+    DatabaseConfigError,
+    DatabaseOperationError,
+    PostgresReadConnection,
+    PostgresWriteConnection,
+    get_database_url,
+    get_media_root,
+)
+
+
+ROOT = PROJECT_ROOT
 DB_PATH = ROOT / "topik-past-papers" / "derived" / "035-I-B.sqlite"
 HTML_PATH = Path(__file__).with_name("review_ui.html")
 QUESTION_ID = re.compile(r"^035-I-[LR]-\d{3}$")
@@ -52,23 +69,97 @@ class Conflict(ReviewError):
 
 
 class ReviewStore:
-    def __init__(self, db_path: Path = DB_PATH, root: Path = ROOT):
-        self.db_path = Path(db_path).resolve()
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        root: Path = ROOT,
+        *,
+        database_url: str | None = None,
+        media_root: Path | None = None,
+    ):
         self.root = Path(root).resolve()
-        self.source_root = (self.root / "topik-past-papers" / "35th").resolve()
-        if not self.db_path.is_file():
+        explicit_sqlite = db_path is not None
+        resolved_url = database_url.strip() if isinstance(database_url, str) and database_url.strip() else None
+        if not explicit_sqlite and resolved_url is None:
+            resolved_url = get_database_url()
+        self.backend = "postgres" if resolved_url else "sqlite"
+        self.database_url = resolved_url
+        self.db_path = Path(db_path or DB_PATH).resolve()
+        if media_root is not None:
+            self.media_root = Path(media_root).expanduser().resolve()
+        elif explicit_sqlite:
+            self.media_root = (self.root / "topik-past-papers").resolve()
+        else:
+            self.media_root = get_media_root()
+        self.source_root = (self.media_root / "35th").resolve()
+        if self.backend == "sqlite" and not self.db_path.is_file():
             raise FileNotFoundError(f"Pilot database not found: {self.db_path}. Run py -3 src/pilot_35.py first.")
         with closing(self._connect()) as db:
             exam = db.execute("SELECT session, level, booklet FROM exams").fetchall()
-            if len(exam) != 1 or tuple(exam[0]) != (35, "I", "B"):
+            if len(exam) != 1 or (exam[0]["session"], exam[0]["level"], exam[0]["booklet"]) != (35, "I", "B"):
                 raise ReviewError("This reviewer only accepts the 35th TOPIK I B pilot database")
 
-    def _connect(self, writable: bool = False) -> sqlite3.Connection:
+    def _connect(self, writable: bool = False):
+        if self.backend == "postgres":
+            if not self.database_url:
+                raise DatabaseConfigError("TOPIK_DATABASE_URL is not configured")
+            return PostgresWriteConnection(self.database_url) if writable else PostgresReadConnection(self.database_url)
         connection = sqlite3.connect(self.db_path.as_uri() + ("?mode=rw" if writable else "?mode=ro"),
                                      uri=True, timeout=5)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
+
+    @contextmanager
+    def _write_transaction(self, *, before_rollback=None):
+        db = self._connect(writable=True)
+        try:
+            if self.backend == "sqlite":
+                db.execute("BEGIN IMMEDIATE")
+            yield db
+            db.commit()
+        except BaseException:
+            if before_rollback is not None:
+                try:
+                    before_rollback()
+                except BaseException:
+                    # Cleanup is best-effort and must not hide the database
+                    # failure that caused the rollback.
+                    pass
+            try:
+                db.rollback()
+            except BaseException:
+                # Preserve the original failure; the connection is closed below
+                # and no automatic retry is attempted.
+                pass
+            raise
+        finally:
+            db.close()
+
+    def _lock_question(self, db, question_id: str):
+        if self.backend == "postgres":
+            locked = db.execute("SELECT id FROM questions WHERE id=? FOR UPDATE", (question_id,)).fetchone()
+            if locked is None:
+                raise NotFound("Unknown question")
+        return self._question(db, question_id)
+
+    def _locked_audio_rows(self, db, qids: list[str]) -> dict[str, object]:
+        ordered = sorted(qids)
+        placeholders = ",".join("?" for _ in ordered)
+        if self.backend == "postgres":
+            locked = db.execute(
+                f"SELECT id FROM questions WHERE id IN ({placeholders}) ORDER BY id FOR UPDATE",
+                ordered,
+            ).fetchall()
+            if len(locked) != len(ordered):
+                raise NotFound("Unknown shared audio question")
+            sql = (
+                f"SELECT * FROM audio_segments WHERE question_id IN ({placeholders}) "
+                "ORDER BY question_id FOR UPDATE"
+            )
+        else:
+            sql = f"SELECT * FROM audio_segments WHERE question_id IN ({placeholders}) ORDER BY question_id"
+        return {item["question_id"]: item for item in db.execute(sql, ordered)}
 
     @staticmethod
     def _question(db: sqlite3.Connection, question_id: str) -> sqlite3.Row:
@@ -87,12 +178,13 @@ class ReviewStore:
         return row
 
     @staticmethod
-    def _version(db: sqlite3.Connection, question_id: str) -> int:
-        return db.execute(
-            "SELECT COUNT(*) FROM review_records WHERE subject_type='question' "
+    def _version(db, question_id: str) -> int:
+        row = db.execute(
+            "SELECT COUNT(*) AS review_count FROM review_records WHERE subject_type='question' "
             "AND subject_id=?",
             (question_id,)
-        ).fetchone()[0]
+        ).fetchone()
+        return row["review_count"]
 
     def list_questions(self) -> dict:
         with closing(self._connect()) as db:
@@ -102,13 +194,14 @@ class ReviewStore:
                 "FROM questions q JOIN sections s ON s.id=q.section_id ORDER BY q.exam_number"
             ).fetchall()
             items = [dict(row) for row in rows]
-            ai_available, ai_summaries = self._ai_audit_summaries(db)
+            audit_target = self.database_url if self.backend == "postgres" else db
+            ai_available, ai_summaries = self._ai_audit_summaries(audit_target)
             if ai_available:
                 for item in items:
                     summary = ai_summaries.get(item["id"])
                     audit = self._ai_audit_list_summary(summary) if summary else {}
                     run_id = summary.get("run_id") if summary else None
-                    execution = self._ai_audit_execution(db, subject_id=item["id"], run_id=run_id)
+                    execution = self._ai_audit_execution(audit_target, subject_id=item["id"], run_id=run_id)
                     execution_summary = self._ai_audit_execution_list_summary(execution)
                     if execution_summary:
                         audit.update(execution_summary)
@@ -116,10 +209,31 @@ class ReviewStore:
                         item["ai_audit"] = audit
             counts = {status: sum(item["status"] == status for item in items) for status in STATUSES}
             counts["total"] = len(items)
-            return {"items": items, "counts": counts, "ai_audit_available": ai_available}
+            return {
+                "items": items,
+                "counts": counts,
+                "ai_audit_available": ai_available,
+                "read_only": False,
+                "database_backend": self.backend,
+                "capabilities": {
+                    "review_write": True,
+                    "audio_segment_write": True,
+                    "clip_export": True,
+                    "ai_audit_write": False,
+                },
+            }
 
     @staticmethod
-    def _has_ai_audit_tables(db: sqlite3.Connection) -> bool:
+    def _has_ai_audit_tables(db) -> bool:
+        if isinstance(db, str) and db.strip().lower().startswith(("postgresql://", "postgres://")):
+            try:
+                from src.ai_audit_35 import audit_tables_available
+            except ImportError:
+                return False
+            try:
+                return audit_tables_available(db)
+            except (DatabaseConfigError, DatabaseOperationError):
+                return False
         existing = {
             row[0] for row in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'ai_audit_%'"
@@ -128,7 +242,7 @@ class ReviewStore:
         return AI_AUDIT_TABLES.issubset(existing)
 
     @classmethod
-    def _ai_audit_summaries(cls, db: sqlite3.Connection) -> tuple[bool, dict]:
+    def _ai_audit_summaries(cls, db) -> tuple[bool, dict]:
         if not cls._has_ai_audit_tables(db):
             return False, {}
         try:
@@ -154,7 +268,7 @@ class ReviewStore:
         return True, normalized
 
     @classmethod
-    def _ai_audit_summary(cls, db: sqlite3.Connection, question_id: str) -> dict | None:
+    def _ai_audit_summary(cls, db, question_id: str) -> dict | None:
         if not cls._has_ai_audit_tables(db):
             return None
         try:
@@ -190,7 +304,7 @@ class ReviewStore:
         return normalized
 
     @staticmethod
-    def _ai_audit_history(db: sqlite3.Connection, question_id: str) -> dict | None:
+    def _ai_audit_history(db, question_id: str) -> dict | None:
         """Transport backend-owned multi-run history for one frozen subject."""
         try:
             from src.ai_audit_35 import question_audit_history
@@ -205,7 +319,10 @@ class ReviewStore:
         return history
 
     @staticmethod
-    def _ai_audit_table_names(db: sqlite3.Connection) -> set[str]:
+    def _ai_audit_table_names(db) -> set[str]:
+        if isinstance(db, str) and db.strip().lower().startswith(("postgresql://", "postgres://")):
+            return set(AI_AUDIT_TABLES) | {"ai_audit_checkpoints", "ai_audit_attempts"} \
+                if ReviewStore._has_ai_audit_tables(db) else set()
         return {
             row[0] for row in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'ai_audit_%'"
@@ -215,7 +332,7 @@ class ReviewStore:
     @classmethod
     def _ai_audit_execution(
         cls,
-        db: sqlite3.Connection,
+        db,
         *,
         subject_id: str,
         run_id: str | None = None,
@@ -357,8 +474,13 @@ class ReviewStore:
         )
         return {key: execution[key] for key in keys if key in execution}
 
-    @staticmethod
-    def _has_audio_segments(db: sqlite3.Connection) -> bool:
+    def _has_audio_segments(self, db) -> bool:
+        if self.backend == "postgres":
+            row = db.execute(
+                "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema=current_schema() AND table_name='audio_segments') AS present"
+            ).fetchone()
+            return bool(row["present"])
         return db.execute("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' "
                           "AND name='audio_segments')").fetchone()[0] == 1
 
@@ -390,15 +512,89 @@ class ReviewStore:
                 "source_duration_ms": round(asset["duration_seconds"] * 1000),
                 "shared_questions": pair, "clip_url": clip_url}
 
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    def _clip_output_dir(self, *, create: bool = False) -> Path:
+        """Return the device-local derived clip directory without following it outside media root."""
+        clip_base = self.media_root if self.backend == "postgres" else (self.root / "topik-past-papers")
+        clip_base = clip_base.resolve()
+        if not clip_base.exists():
+            if self.backend == "postgres":
+                raise ReviewError("Device-local media root is unavailable")
+            # SQLite tests and explicit local roots may redirect `root` to an
+            # empty sandbox. Create only this known child of the resolved root;
+            # never synthesize a missing PostgreSQL media root.
+            expected_parent = self.root.resolve()
+            if clip_base.parent != expected_parent:
+                raise ReviewError("Unsafe audio clip output directory")
+            clip_base.mkdir(exist_ok=True)
+        derived = clip_base / "derived"
+        candidate = derived / "audio-clips"
+
+        # Refuse an already-present symlink/junction escape before mkdir can
+        # create anything through it. Recheck after each creation as defense
+        # against local filesystem races.
+        for existing in (derived, candidate):
+            if not existing.exists():
+                continue
+            try:
+                existing.resolve().relative_to(clip_base)
+            except ValueError as exc:
+                raise ReviewError("Unsafe audio clip output directory") from exc
+        if create:
+            derived.mkdir(exist_ok=True)
+            try:
+                derived.resolve().relative_to(clip_base)
+            except ValueError as exc:
+                raise ReviewError("Unsafe audio clip output directory") from exc
+            candidate.mkdir(exist_ok=True)
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(clip_base)
+        except ValueError as exc:
+            raise ReviewError("Unsafe audio clip output directory") from exc
+        return resolved
+
+    def _clip_path_from_relative(self, relative: str) -> Path:
+        if not isinstance(relative, str) or not relative or "\\" in relative or Path(relative).is_absolute():
+            raise ReviewError("Unsafe exported clip path")
+        if self.backend == "postgres":
+            path = self._local_media_path(relative)
+        else:
+            path = (self.root / relative).resolve()
+        expected_root = self._clip_output_dir()
+        if path.parent != expected_root or path.suffix.lower() != ".mp3":
+            raise ReviewError("Unsafe exported clip path")
+        return path
+
+    def _clip_identity(self, rows: list) -> tuple[str, str, Path] | None:
+        identities = {(row["clip_relative_path"], row["clip_sha256"]) for row in rows}
+        if len(identities) != 1:
+            raise Conflict("Shared dialogue clip metadata differs; reload and reconcile")
+        relative, sha = identities.pop()
+        if relative is None and sha is None:
+            return None
+        if not isinstance(relative, str) or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", sha):
+            raise ReviewError("Stored clip metadata is invalid")
+        return relative, sha.lower(), self._clip_path_from_relative(relative)
+
     def _clip_file(self, segment: sqlite3.Row) -> Path:
         relative = segment["clip_relative_path"]
-        expected_root = (self.root / "topik-past-papers" / "derived" / "audio-clips").resolve()
-        if not relative or not isinstance(relative, str) or "\\" in relative:
+        if not relative:
             raise NotFound("No exported clip")
-        path = (self.root / relative).resolve()
-        if path.parent != expected_root or path.suffix.lower() != ".mp3" or not path.is_file():
+        try:
+            path = self._clip_path_from_relative(relative)
+        except ReviewError as exc:
+            raise NotFound("Exported clip unavailable") from exc
+        if not path.is_file():
             raise NotFound("Exported clip unavailable")
-        if hashlib.sha256(path.read_bytes()).hexdigest() != segment["clip_sha256"]:
+        if self._file_sha256(path) != segment["clip_sha256"]:
             raise NotFound("Exported clip checksum mismatch")
         return path
 
@@ -425,12 +621,13 @@ class ReviewStore:
             raise ReviewError("Audio boundaries and version must be integer milliseconds")
         if status not in ("candidate", "verified") or not 0 <= start < end or end - start < 500:
             raise ReviewError("Audio segment must have a valid status and be at least 0.5 seconds long")
-        with closing(self._connect(writable=True)) as db:
-            db.execute("BEGIN IMMEDIATE")
-            question = self._question(db, question_id)
-            if question["section"] != "listening" or not self._has_audio_segments(db):
+
+        # Verify immutable local media before taking central row locks.
+        with closing(self._connect()) as preflight:
+            question = self._question(preflight, question_id)
+            if question["section"] != "listening" or not self._has_audio_segments(preflight):
                 raise ReviewError("Audio segmentation is available only after setup for listening questions")
-            asset = db.execute(
+            asset = preflight.execute(
                 "SELECT a.id,a.duration_seconds,s.sha256,s.byte_size FROM audio_assets a "
                 "JOIN source_files s ON s.id=a.source_file_id WHERE a.section_id=?",
                 (question["section_id"],),
@@ -443,10 +640,22 @@ class ReviewStore:
             if source.stat().st_size != asset["byte_size"] or hashlib.sha256(source.read_bytes()).hexdigest() != asset["sha256"]:
                 raise ReviewError("Audio source has changed; segment cannot be saved")
             pair = SHARED_AUDIO.get(question["exam_number"], (question["exam_number"],))
-            qids = [f"035-I-L-{number:03d}" for number in pair]
-            rows = {item["question_id"]: item for item in db.execute(
-                f"SELECT * FROM audio_segments WHERE question_id IN ({','.join('?' for _ in qids)})", qids,
-            )}
+            qids = sorted(f"035-I-L-{number:03d}" for number in pair)
+            asset_snapshot = (asset["id"], asset["duration_seconds"], asset["sha256"], asset["byte_size"])
+
+        with self._write_transaction() as db:
+            rows = self._locked_audio_rows(db, qids)
+            locked_question = self._question(db, question_id)
+            current_asset = db.execute(
+                "SELECT a.id,a.duration_seconds,s.sha256,s.byte_size FROM audio_assets a "
+                "JOIN source_files s ON s.id=a.source_file_id WHERE a.section_id=?",
+                (locked_question["section_id"],),
+            ).fetchone()
+            if current_asset is None or (
+                current_asset["id"], current_asset["duration_seconds"],
+                current_asset["sha256"], current_asset["byte_size"]
+            ) != asset_snapshot:
+                raise Conflict("Audio source metadata changed while saving; reload before editing")
             if any((rows[qid]["version"] if qid in rows else 0) != version for qid in qids):
                 raise Conflict("Audio interval was changed in another tab; reload before saving")
             if status == "verified" and any(qid not in rows for qid in qids):
@@ -465,94 +674,161 @@ class ReviewStore:
                     "start_ms=excluded.start_ms,end_ms=excluded.end_ms,status=excluded.status,"
                     "version=audio_segments.version+1,updated_at=excluded.updated_at,"
                     "clip_relative_path=NULL,clip_sha256=NULL",
-                    (qid, asset["id"], start, end, status, 1, asset["sha256"], now),
+                    (qid, current_asset["id"], start, end, status, 1, current_asset["sha256"], now),
                 )
                 db.execute("INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
                            "VALUES(?,?,?,?,?,?,?)",
                            ("audio_segment", qid, status, "local_reviewer", "manual_audio_boundary_35",
-                            json.dumps({"before": prior, "after": after, "source_sha256": asset["sha256"]},
+                            json.dumps({"before": prior, "after": after, "source_sha256": current_asset["sha256"]},
                                        ensure_ascii=False), now))
-            db.commit()
         return self.get_question(question_id)
 
     def export_audio_clip(self, question_id: str) -> dict:
-        """Export only a manually verified interval, preserving MP3 source unchanged."""
-        from src.audio_35 import export_segment
+        """Export/rematerialize a verified interval while keeping the source MP3 immutable."""
+        from src.audio_35 import AudioError, export_segment
 
+        # Preflight immutable local media and the complete shared-pair state before
+        # invoking the encoder or taking PostgreSQL row locks.
         with closing(self._connect()) as db:
             question = self._question(db, question_id)
             if question["section"] != "listening" or not self._has_audio_segments(db):
                 raise ReviewError("Only reviewed listening intervals can be exported")
             pair = SHARED_AUDIO.get(question["exam_number"], (question["exam_number"],))
-            qids = [f"035-I-L-{number:03d}" for number in pair]
+            qids = sorted(f"035-I-L-{number:03d}" for number in pair)
             rows = [db.execute("SELECT * FROM audio_segments WHERE question_id=?", (qid,)).fetchone()
                     for qid in qids]
             if any(row is None or row["status"] != "verified" for row in rows):
                 raise ReviewError("Verify every linked interval before exporting an MP3")
-            expected = (rows[0]["start_ms"], rows[0]["end_ms"], rows[0]["version"], rows[0]["source_sha256"])
-            if any((row["start_ms"], row["end_ms"], row["version"], row["source_sha256"]) != expected
-                   for row in rows):
-                raise Conflict("Shared dialogue bounds differ; reload and reconcile")
-            if rows[0]["clip_relative_path"]:
-                return self.get_question(question_id)
-            start, end, version, expected_sha = expected
+            expected = (
+                rows[0]["start_ms"], rows[0]["end_ms"], rows[0]["version"],
+                rows[0]["source_sha256"], rows[0]["audio_asset_id"],
+            )
+            if any((row["start_ms"], row["end_ms"], row["version"], row["source_sha256"],
+                    row["audio_asset_id"]) != expected for row in rows):
+                raise Conflict("Shared dialogue bounds or source differ; reload and reconcile")
+            canonical_before = self._clip_identity(rows)
+            start, end, version, expected_sha, audio_asset_id = expected
             audio_source = db.execute(
-                "SELECT s.sha256,s.byte_size FROM audio_assets a JOIN source_files s "
-                "ON s.id=a.source_file_id WHERE a.id=?", (rows[0]["audio_asset_id"],)
+                "SELECT s.id AS source_file_id,s.relative_path,s.sha256,s.byte_size FROM audio_assets a "
+                "JOIN source_files s ON s.id=a.source_file_id WHERE a.id=?", (audio_asset_id,)
             ).fetchone()
             if audio_source is None or audio_source["sha256"] != expected_sha:
                 raise ReviewError("The segment's original audio checksum no longer matches")
+            source_snapshot = (
+                audio_source["source_file_id"], audio_source["relative_path"],
+                audio_source["sha256"], audio_source["byte_size"],
+            )
 
         source = self.media_path(question_id, "audio")
-        if source.stat().st_size != audio_source["byte_size"] or hashlib.sha256(source.read_bytes()).hexdigest() != expected_sha:
+        if (not source.is_file() or source.stat().st_size != audio_source["byte_size"] or
+                self._file_sha256(source) != expected_sha):
             raise ReviewError("The original recording changed; export stopped")
-        output_dir = self.root / "topik-past-papers" / "derived" / "audio-clips"
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = self._clip_output_dir(create=True)
+
+        # A canonical DB identity plus an intact local file is already complete.
+        # Do not encode and do not append duplicate export history.
+        if canonical_before is not None:
+            _, canonical_sha, canonical_path = canonical_before
+            if canonical_path.exists():
+                if not canonical_path.is_file() or self._file_sha256(canonical_path) != canonical_sha:
+                    raise Conflict("Local canonical clip differs from the central checksum")
+                return self.get_question(question_id)
+
         descriptor, temp_name = tempfile.mkstemp(prefix=".audio-export-", suffix=".mp3", dir=output_dir)
         os.close(descriptor)
         temporary = Path(temp_name)
-        # export_segment deliberately refuses to overwrite ANY existing file.
-        # Reserve a unique name above, then remove only our own empty placeholder.
+        # export_segment refuses any existing destination; remove only our own
+        # reserved zero-byte placeholder and let it create this unique temp path.
         temporary.unlink()
-        published: Path | None = None
         try:
-            export_segment(source, temporary, start, end)
-            if not temporary.is_file() or temporary.stat().st_size < 1000:
+            try:
+                export_segment(
+                    source, temporary, start, end,
+                    expected_source_sha256=expected_sha,
+                )
+            except AudioError as exc:
+                raise ReviewError(f"Audio clip export failed: {exc}") from exc
+            if (not temporary.is_file() or temporary.parent.resolve() != output_dir or
+                    temporary.stat().st_size < 1000):
                 raise ReviewError("FFmpeg produced an empty or invalid clip")
-            sha = hashlib.sha256(temporary.read_bytes()).hexdigest()
-            name = f"035-I-L-{'-'.join(f'{n:03d}' for n in pair)}-v{version}-{sha[:12]}.mp3"
-            destination = (output_dir / name).resolve()
-            if destination.parent != output_dir.resolve():
-                raise ReviewError("Unsafe export destination")
-            relative = destination.relative_to(self.root).as_posix()
-            with closing(self._connect(writable=True)) as db:
-                db.execute("BEGIN IMMEDIATE")
-                current = [db.execute("SELECT * FROM audio_segments WHERE question_id=?", (qid,)).fetchone()
-                           for qid in qids]
-                if any(row is None or row["status"] != "verified" or
-                       (row["start_ms"], row["end_ms"], row["version"], row["source_sha256"]) != expected or
-                       row["clip_relative_path"] for row in current):
+            generated_sha = self._file_sha256(temporary)
+            if (not source.is_file() or source.stat().st_size != source_snapshot[3] or
+                    self._file_sha256(source) != expected_sha):
+                raise Conflict("The original recording changed while exporting; no clip was linked")
+
+            owned_publication: dict[str, object | None] = {"path": None, "sha": None}
+
+            def cleanup_owned_publication():
+                path = owned_publication["path"]
+                sha = owned_publication["sha"]
+                if not isinstance(path, Path) or not isinstance(sha, str) or not path.is_file():
+                    return
+                if self._file_sha256(path) == sha:
+                    path.unlink(missing_ok=True)
+
+            with self._write_transaction(before_rollback=cleanup_owned_publication) as db:
+                locked = self._locked_audio_rows(db, qids)
+                if any(qid not in locked for qid in qids):
                     raise Conflict("Audio interval changed while exporting; no clip was linked")
+                current = [locked[qid] for qid in qids]
+                if any(row["status"] != "verified" or
+                       (row["start_ms"], row["end_ms"], row["version"], row["source_sha256"],
+                        row["audio_asset_id"]) != expected for row in current):
+                    raise Conflict("Audio interval changed while exporting; no clip was linked")
+                current_source = db.execute(
+                    "SELECT s.id AS source_file_id,s.relative_path,s.sha256,s.byte_size FROM audio_assets a "
+                    "JOIN source_files s ON s.id=a.source_file_id WHERE a.id=?", (audio_asset_id,)
+                ).fetchone()
+                if current_source is None or (
+                    current_source["source_file_id"], current_source["relative_path"],
+                    current_source["sha256"], current_source["byte_size"],
+                ) != source_snapshot:
+                    raise Conflict("Audio source metadata changed while exporting; no clip was linked")
+
+                canonical_now = self._clip_identity(current)
+                if canonical_now is None:
+                    name = f"035-I-L-{'-'.join(f'{n:03d}' for n in pair)}-v{version}-{generated_sha[:12]}.mp3"
+                    relative = f"topik-past-papers/derived/audio-clips/{name}"
+                    destination = self._clip_path_from_relative(relative)
+                    canonical_sha = generated_sha
+                else:
+                    relative, canonical_sha, destination = canonical_now
+                    if generated_sha != canonical_sha:
+                        raise Conflict("Generated clip checksum differs from the central canonical clip")
+
+                # Atomic no-overwrite publication. If another local process won
+                # the filesystem race, reuse only byte-identical content.
                 if destination.exists():
-                    if hashlib.sha256(destination.read_bytes()).hexdigest() != sha:
+                    if not destination.is_file() or self._file_sha256(destination) != canonical_sha:
                         raise Conflict("Export destination already contains different audio")
                 else:
-                    os.replace(temporary, destination)
-                    published = destination
-                now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                for qid in qids:
-                    db.execute("UPDATE audio_segments SET clip_relative_path=?,clip_sha256=? WHERE question_id=?",
-                               (relative, sha, qid))
-                    db.execute("INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
-                               "VALUES(?,?,?,?,?,?,?)", ("audio_segment", qid, "verified", "local_reviewer",
-                               "audio_export_35", json.dumps({"clip": relative, "sha256": sha,
-                                                              "source_sha256": expected_sha, "start_ms": start,
-                                                              "end_ms": end}), now))
-                db.commit()
-        except BaseException:
-            if published is not None:
-                published.unlink(missing_ok=True)
-            raise
+                    try:
+                        os.link(temporary, destination)
+                        owned_publication["path"] = destination
+                        owned_publication["sha"] = canonical_sha
+                    except FileExistsError:
+                        if (not destination.is_file() or
+                                self._file_sha256(destination) != canonical_sha):
+                            raise Conflict("Export destination appeared with different audio")
+
+                # A pre-existing canonical identity means this device merely
+                # materialized the local artifact. Do not duplicate DB metadata
+                # or review history.
+                if canonical_now is None:
+                    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                    for qid in qids:
+                        db.execute(
+                            "UPDATE audio_segments SET clip_relative_path=?,clip_sha256=? WHERE question_id=?",
+                            (relative, canonical_sha, qid),
+                        )
+                        db.execute(
+                            "INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
+                            "VALUES(?,?,?,?,?,?,?)",
+                            ("audio_segment", qid, "verified", "local_reviewer", "audio_export_35",
+                             json.dumps({"clip": relative, "sha256": canonical_sha,
+                                         "source_sha256": expected_sha, "start_ms": start,
+                                         "end_ms": end}, ensure_ascii=False), now),
+                        )
         finally:
             temporary.unlink(missing_ok=True)
         return self.get_question(question_id)
@@ -561,7 +837,8 @@ class ReviewStore:
         with closing(self._connect()) as db:
             row = self._question(db, question_id)
             question = dict(row)
-            ai_audit = self._ai_audit_summary(db, question_id)
+            audit_target = self.database_url if self.backend == "postgres" else db
+            ai_audit = self._ai_audit_summary(audit_target, question_id)
             choices = [dict(item) for item in db.execute(
                 "SELECT number, text FROM choices WHERE question_id=? ORDER BY number", (question_id,)
             )]
@@ -572,7 +849,7 @@ class ReviewStore:
             transcript_info = dict(transcript) if transcript else None
             if transcript_info:
                 transcript_info["warnings"] = json.loads(transcript_info.pop("warnings_json"))
-            image_keys = [item[0] for item in db.execute(
+            image_keys = [item["image_key"] for item in db.execute(
                 "SELECT image_key FROM question_images WHERE question_id=? ORDER BY image_key", (question_id,)
             )]
             history = []
@@ -654,21 +931,22 @@ class ReviewStore:
         return payload
 
     def save_review(self, question_id: str, payload: dict) -> dict:
-        with closing(self._connect(writable=True)) as db:
-            db.execute("BEGIN IMMEDIATE")
-            question = self._question(db, question_id)
-            # A reviewer must be comparing the same originals whose hashes
-            # were recorded during import, including the independent answer key.
-            for kind in (("paper", "answer", "transcript") if question["section"] == "listening"
-                         else ("paper", "answer")):
-                self.media_path(question_id, kind)
-            old_choices = [row[0] for row in db.execute(
+        # Validate the immutable local evidence before acquiring a central row lock.
+        with closing(self._connect()) as preflight:
+            preflight_question = self._question(preflight, question_id)
+        for kind in (("paper", "answer", "transcript") if preflight_question["section"] == "listening"
+                     else ("paper", "answer")):
+            self.media_path(question_id, kind)
+
+        with self._write_transaction() as db:
+            question = self._lock_question(db, question_id)
+            old_choices = [row["text"] for row in db.execute(
                 "SELECT text FROM choices WHERE question_id=? ORDER BY number", (question_id,)
             )]
             transcript_row = db.execute(
                 "SELECT dialogue_text FROM transcripts WHERE question_id=?", (question_id,)
             ).fetchone()
-            old_transcript = transcript_row[0] if transcript_row else None
+            old_transcript = transcript_row["dialogue_text"] if transcript_row else None
             existing = {"transcript": transcript_row is not None}
             payload = self._validate_payload(payload, question, existing)
             version = self._version(db, question_id)
@@ -693,7 +971,6 @@ class ReviewStore:
                      json.dumps({"before": old, "after": new, "note": payload["note"]}, ensure_ascii=False),
                      datetime.now(timezone.utc).isoformat(timespec="seconds")),
                 )
-            db.commit()
         return self.get_question(question_id)
 
     def media_path(self, question_id: str, kind: str) -> Path:
@@ -708,11 +985,11 @@ class ReviewStore:
             elif kind == "transcript":
                 record = db.execute("SELECT source_file_id FROM transcripts WHERE question_id=?",
                                     (question_id,)).fetchone()
-                source_id = record[0] if record else None
+                source_id = record["source_file_id"] if record else None
             else:
                 record = db.execute("SELECT source_file_id FROM audio_assets WHERE section_id=?",
                                     (question["section_id"],)).fetchone()
-                source_id = record[0] if record else None
+                source_id = record["source_file_id"] if record else None
             if source_id is None:
                 raise NotFound("This question has no such source")
             record = db.execute("SELECT relative_path,sha256,byte_size FROM source_files WHERE id=?",
@@ -722,7 +999,7 @@ class ReviewStore:
             relative = record["relative_path"]
             if not relative or "\\" in relative or Path(relative).is_absolute():
                 raise ReviewError("Unsafe stored source path")
-            source = (self.root / relative).resolve()
+            source = self._local_media_path(relative)
             try:
                 source.relative_to(self.source_root)
             except ValueError as exc:
@@ -739,6 +1016,14 @@ class ReviewStore:
                 raise Conflict("Original source file checksum changed; review is blocked")
             return source
 
+    def _local_media_path(self, relative: str) -> Path:
+        """Resolve DB logical paths against the device-local TOPIK_MEDIA_ROOT."""
+        logical = Path(relative)
+        parts = logical.parts
+        if parts and parts[0] == "topik-past-papers":
+            logical = Path(*parts[1:])
+        return (self.media_root / logical).resolve()
+
     def get_image(self, question_id: str, index: int) -> tuple[bytes, str]:
         if type(index) is not int or not 0 <= index < 100:
             raise NotFound("Image index is invalid")
@@ -748,9 +1033,12 @@ class ReviewStore:
                 "SELECT i.bytes, i.mime_type FROM question_images qi JOIN images i ON i.key=qi.image_key "
                 "WHERE qi.question_id=? ORDER BY qi.image_key LIMIT 1 OFFSET ?", (question_id, index),
             ).fetchone()
-            if result is None or result[1] != "image/png" or not result[0].startswith(b"\x89PNG\r\n\x1a\n"):
+            if result is None:
                 raise NotFound("Image unavailable")
-            return bytes(result[0]), result[1]
+            payload = bytes(result["bytes"])
+            if result["mime_type"] != "image/png" or not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise NotFound("Image unavailable")
+            return payload, result["mime_type"]
 
 
 def make_handler(store: ReviewStore):
@@ -861,7 +1149,7 @@ def make_handler(store: ReviewStore):
                 raise NotFound("Unknown page")
             except ReviewError as exc:
                 return self._error(exc)
-            except (OSError, sqlite3.Error):
+            except (OSError, sqlite3.Error, DatabaseConfigError, DatabaseOperationError):
                 return self._json(500, {"error": "Local file or database unavailable"})
 
         def do_POST(self):
@@ -893,7 +1181,7 @@ def make_handler(store: ReviewStore):
                 return self._error(exc)
             except (ValueError, UnicodeError) as exc:
                 return self._json(400, {"error": str(exc)})
-            except sqlite3.Error:
+            except (sqlite3.Error, DatabaseConfigError, DatabaseOperationError):
                 return self._json(500, {"error": "Local database unavailable"})
 
         def log_message(self, fmt, *args):
@@ -929,7 +1217,10 @@ def main():
             raise SystemExit(f"Cannot bind a local review server: {fallback_error}") from fallback_error
     with server:
         print(f"TOPIK 35 I review: http://127.0.0.1:{server.server_port}/")
-        print("Press Ctrl+C to stop. Source PDFs and audio are read-only; only the local SQLite DB is edited.")
+        if getattr(store, "backend", "sqlite") == "postgres":
+            print("Central PostgreSQL review mode. Source PDFs/audio and exported clips stay device-local; review/audio/clip workflows are enabled.")
+        else:
+            print("Press Ctrl+C to stop. Source PDFs and audio are read-only; only the local SQLite DB is edited.")
         try:
             server.serve_forever()
         except KeyboardInterrupt:

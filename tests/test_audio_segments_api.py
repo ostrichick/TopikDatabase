@@ -167,6 +167,10 @@ class TestAudioSegmentsAPI(unittest.TestCase):
         self.assertIn(code, (400, 409))
         self.assertIsNone(self._detail(1)["audio_segment"]["clip_url"])
 
+        code, _, _ = self._post(1, {"unexpected": True}, endpoint="export-clip")
+        self.assertEqual(code, 400)
+        self.assertIsNone(self._detail(1)["audio_segment"]["clip_url"])
+
     def test_strict_time_type_order_range_and_payload_validation(self):
         code, _, data = self._post(1, self._payload())
         self.assertEqual(code, 200, data)
@@ -278,9 +282,10 @@ class TestAudioSegmentsAPI(unittest.TestCase):
 
         fake_mp3 = b"ID3" + b"\x00" * 2048
 
-        def fake_encoder(source, destination, start_ms, end_ms):
+        def fake_encoder(source, destination, start_ms, end_ms, *, expected_source_sha256=None):
             self.assertEqual(Path(source).resolve(), SOURCE_AUDIO.resolve())
             self.assertEqual((start_ms, end_ms), (20000, 27000))
+            self.assertEqual(expected_source_sha256, review_ui.ReviewStore._file_sha256(SOURCE_AUDIO))
             # The real audio_35.export_segment refuses to overwrite an
             # existing destination; mkstemp leaves a file and would fail.
             self.assertFalse(Path(destination).exists(),

@@ -34,6 +34,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+if __package__:
+    from .database import (
+        DatabaseConfigError,
+        DatabaseOperationError,
+        PostgresAuditConnection,
+        get_database_url,
+    )
+else:  # pragma: no cover - exercised by direct CLI execution.
+    from database import (  # type: ignore
+        DatabaseConfigError,
+        DatabaseOperationError,
+        PostgresAuditConnection,
+        get_database_url,
+    )
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "db" / "schema.sql"
@@ -47,6 +62,11 @@ DEFAULT_PROMPT_VERSION = "audit35-v1"
 VERDICTS = frozenset({"clear", "finding", "uncertain"})
 SEVERITIES = frozenset({"low", "medium", "high", "critical"})
 ATTEMPT_STATUSES = frozenset({"succeeded", "failed", "timed_out", "invalid"})
+AI_AUDIT_TABLES = frozenset({
+    "ai_audit_source_snapshots", "ai_audit_runs", "ai_audit_passes",
+    "ai_audit_checkpoints", "ai_audit_results", "ai_audit_attempts",
+    "ai_audit_findings", "ai_audit_finding_occurrences",
+})
 PERSPECTIVES = {
     "transcription": (
         "Compare the stored question, choices, numbering, points, shared instruction/passage, "
@@ -87,6 +107,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _created_at(db: Any) -> str:
+    """Use the central PostgreSQL clock; preserve historical SQLite timestamps."""
+    if _is_postgres(db):
+        return db.execute(
+            "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', "
+            "'YYYY-MM-DD\"T\"HH24:MI:SS.US\"+00:00\"')"
+        ).fetchone()[0]
+    return _now()
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -113,10 +143,32 @@ def _normalize_identity(value: Any) -> Any:
     return value
 
 
+def _is_postgres(db: Any) -> bool:
+    return getattr(db, "backend", None) == "postgres"
+
+
+def _resolve_target(db_or_path: Any = None) -> Any:
+    if db_or_path is not None:
+        return db_or_path
+    return get_database_url() or DB_PATH
+
+
 @contextmanager
-def _connection(db_or_path: sqlite3.Connection | str | Path, *, writable: bool = False) -> Iterator[sqlite3.Connection]:
-    if isinstance(db_or_path, sqlite3.Connection):
+def _connection(db_or_path: Any = None, *, writable: bool = False) -> Iterator[Any]:
+    db_or_path = _resolve_target(db_or_path)
+    if isinstance(db_or_path, sqlite3.Connection) or getattr(db_or_path, "ai_audit_tuple_rows", False):
         yield db_or_path
+        return
+    if _is_postgres(db_or_path):
+        raise AuditError(
+            "AI audit requires the tuple-row PostgreSQL audit adapter, not a reviewer connection"
+        )
+    if isinstance(db_or_path, str) and db_or_path.strip().lower().startswith(("postgresql://", "postgres://")):
+        db = PostgresAuditConnection(db_or_path, readonly=not writable)
+        try:
+            yield db
+        finally:
+            db.close()
         return
     path = Path(db_or_path).resolve()
     if not path.is_file():
@@ -130,16 +182,93 @@ def _connection(db_or_path: sqlite3.Connection | str | Path, *, writable: bool =
         db.close()
 
 
-def _table_names(db: sqlite3.Connection) -> set[str]:
+@contextmanager
+def _write_transaction(db: Any, *, repeatable_read: bool = False) -> Iterator[Any]:
+    """One fail-closed write transaction; PostgreSQL errors are never retried."""
+    try:
+        if _is_postgres(db):
+            if repeatable_read:
+                db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        else:
+            db.execute("BEGIN IMMEDIATE")
+        yield db
+        db.commit()
+    except BaseException:
+        try:
+            db.rollback()
+        except BaseException:
+            pass
+        raise
+
+
+@contextmanager
+def _consistent_read(db: Any) -> Iterator[Any]:
+    """Pin multi-query PostgreSQL reads to one repeatable snapshot."""
+    if not _is_postgres(db):
+        yield db
+        return
+    try:
+        db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        yield db
+    finally:
+        try:
+            db.rollback()
+        except BaseException:
+            pass
+
+
+def _table_names(db: Any) -> set[str]:
+    if _is_postgres(db):
+        return {
+            row[0] for row in db.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema=current_schema()"
+            )
+        }
     return {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
 
-def ensure_schema(db_path: str | Path = DB_PATH) -> None:
-    """Install idempotent AI audit tables/triggers without changing human rows."""
+def audit_tables_available(db_or_path: Any = None) -> bool:
+    with _connection(db_or_path) as db:
+        return AI_AUDIT_TABLES.issubset(_table_names(db))
+
+
+def _lock_run(db: Any, run_id: str) -> None:
+    if not _is_postgres(db):
+        return
+    if db.execute("SELECT id FROM ai_audit_runs WHERE id=? FOR UPDATE", (run_id,)).fetchone() is None:
+        raise AuditError("Unknown audit run")
+
+
+def _lock_pass(db: Any, pass_id: str) -> None:
+    if not _is_postgres(db):
+        return
+    if db.execute("SELECT id FROM ai_audit_passes WHERE id=? FOR UPDATE", (pass_id,)).fetchone() is None:
+        raise AuditError("Unknown audit pass")
+
+
+def _run_order(db: Any, alias: str = "r") -> str:
+    if _is_postgres(db):
+        return f"{alias}.created_at DESC,{alias}.id DESC"
+    return f"{alias}.created_at DESC,{alias}.rowid DESC"
+
+
+def ensure_schema(db_path: Any = None) -> None:
+    """Ensure the backend has the AI audit contract without mutating human rows.
+
+    SQLite keeps its historical idempotent schema installer. PostgreSQL schema
+    creation belongs to stages 1-4/migration; the stage-7 runtime only validates
+    that the already-migrated append-only tables are present.
+    """
     with _connection(db_path, writable=True) as db:
         exam = db.execute("SELECT session,level,booklet FROM exams WHERE id=?", (EXAM_ID,)).fetchone()
         if exam is None or tuple(exam) != (35, "I", "B"):
             raise AuditError("AI auditor accepts only the 35th TOPIK I B pilot database")
+        if _is_postgres(db):
+            missing = sorted(AI_AUDIT_TABLES - _table_names(db))
+            if missing:
+                raise AuditError("PostgreSQL AI audit schema is incomplete: " + ", ".join(missing))
+            return
         db.executescript(SCHEMA.read_text(encoding="utf-8"))
         db.commit()
 
@@ -245,15 +374,16 @@ def _source_snapshot_payload(db: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
-def create_source_snapshot(db_or_path: sqlite3.Connection | str | Path = DB_PATH) -> dict[str, Any]:
+def create_source_snapshot(db_or_path: Any = None) -> dict[str, Any]:
     """Return a canonical, content/provenance snapshot without AI or human audit history."""
     with _connection(db_or_path) as db:
-        payload = _source_snapshot_payload(db)
+        with _consistent_read(db):
+            payload = _source_snapshot_payload(db)
     return {"snapshot_sha256": _sha(payload), "snapshot": payload}
 
 
 def create_run(
-    db_path: str | Path = DB_PATH,
+    db_path: Any = None,
     *,
     auditors: list[str] | tuple[str, ...] | None = None,
     model_id: str | None = None,
@@ -289,42 +419,55 @@ def create_run(
         if len(set(subject_ids)) != len(subject_ids):
             raise AuditError("subject_ids must not contain duplicates")
     with _connection(db_path, writable=True) as db:
-        payload = _source_snapshot_payload(db)
-        if subject_ids is not None:
-            requested = set(subject_ids)
-            available = {item["id"] for item in payload["questions"]}
-            unknown = sorted(requested - available)
-            if unknown:
-                raise AuditError(f"Unknown audit subject_ids: {', '.join(unknown)}")
-            payload = dict(
-                payload,
-                questions=[item for item in payload["questions"] if item["id"] in requested],
-            )
-        snapshot_json = _canonical(payload)
-        snapshot_sha = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
-        existing = db.execute(
-            "SELECT snapshot_json FROM ai_audit_source_snapshots WHERE snapshot_sha256=?", (snapshot_sha,)
-        ).fetchone()
-        if existing is None:
+        with _write_transaction(db, repeatable_read=True):
+            payload = _source_snapshot_payload(db)
+            if subject_ids is not None:
+                requested = set(subject_ids)
+                available = {item["id"] for item in payload["questions"]}
+                unknown = sorted(requested - available)
+                if unknown:
+                    raise AuditError(f"Unknown audit subject_ids: {', '.join(unknown)}")
+                payload = dict(
+                    payload,
+                    questions=[item for item in payload["questions"] if item["id"] in requested],
+                )
+            snapshot_json = _canonical(payload)
+            snapshot_sha = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+            if _is_postgres(db):
+                db.execute(
+                    "INSERT INTO ai_audit_source_snapshots(snapshot_sha256,exam_id,snapshot_json,created_at) "
+                    "VALUES(?,?,?,?) ON CONFLICT (snapshot_sha256) DO NOTHING",
+                    (snapshot_sha, EXAM_ID, snapshot_json, _created_at(db)),
+                )
+                existing = db.execute(
+                    "SELECT snapshot_json FROM ai_audit_source_snapshots WHERE snapshot_sha256=?",
+                    (snapshot_sha,),
+                ).fetchone()
+            else:
+                existing = db.execute(
+                    "SELECT snapshot_json FROM ai_audit_source_snapshots WHERE snapshot_sha256=?",
+                    (snapshot_sha,),
+                ).fetchone()
+                if existing is None:
+                    db.execute(
+                        "INSERT INTO ai_audit_source_snapshots(snapshot_sha256,exam_id,snapshot_json,created_at) "
+                        "VALUES(?,?,?,?)", (snapshot_sha, EXAM_ID, snapshot_json, _created_at(db)),
+                    )
+                    existing = (snapshot_json,)
+            if existing is None or existing[0] != snapshot_json:
+                raise AuditConflict("Snapshot hash collision or inconsistent stored snapshot")
+            run_id = f"audit35-{uuid.uuid4().hex[:16]}"
             db.execute(
-                "INSERT INTO ai_audit_source_snapshots(snapshot_sha256,exam_id,snapshot_json,created_at) "
-                "VALUES(?,?,?,?)", (snapshot_sha, EXAM_ID, snapshot_json, _now()),
+                "INSERT INTO ai_audit_runs(id,exam_id,snapshot_sha256,contract_version,label,created_at) "
+                "VALUES(?,?,?,?,?,?)", (run_id, EXAM_ID, snapshot_sha, CONTRACT_VERSION, label, _created_at(db)),
             )
-        elif existing[0] != snapshot_json:
-            raise AuditConflict("Snapshot hash collision or inconsistent stored snapshot")
-        run_id = f"audit35-{uuid.uuid4().hex[:16]}"
-        db.execute(
-            "INSERT INTO ai_audit_runs(id,exam_id,snapshot_sha256,contract_version,label,created_at) "
-            "VALUES(?,?,?,?,?,?)", (run_id, EXAM_ID, snapshot_sha, CONTRACT_VERSION, label, _now()),
-        )
-        passes = []
-        for index, auditor in enumerate(auditors or (), 1):
-            passes.append(_insert_pass(
-                db, run_id=run_id, snapshot_sha=snapshot_sha, snapshot=payload,
-                pass_number=index, auditor_id=auditor, perspective=perspective,
-                model_id=model_id or "unspecified", prompt_version=prompt_version,
-            ))
-        db.commit()
+            passes = []
+            for index, auditor in enumerate(auditors or (), 1):
+                passes.append(_insert_pass(
+                    db, run_id=run_id, snapshot_sha=snapshot_sha, snapshot=payload,
+                    pass_number=index, auditor_id=auditor, perspective=perspective,
+                    model_id=model_id or "unspecified", prompt_version=prompt_version,
+                ))
     return {
         "run_id": run_id, "snapshot_sha256": snapshot_sha, "contract_version": CONTRACT_VERSION,
         "label": label, "passes": passes,
@@ -341,7 +484,7 @@ def _perspective_subjects(snapshot: dict[str, Any], perspective: str) -> list[di
 
 
 def _insert_pass(
-    db: sqlite3.Connection,
+    db: Any,
     *,
     run_id: str,
     snapshot_sha: str,
@@ -358,6 +501,15 @@ def _insert_pass(
     perspective = _safe_text(perspective, "perspective", maximum=120)
     model_id = _safe_text(model_id, "model_id", maximum=120)
     prompt_version = _safe_text(prompt_version, "prompt_version", maximum=120)
+    existing = db.execute(
+        "SELECT pass_number,auditor_id FROM ai_audit_passes "
+        "WHERE run_id=? AND (pass_number=? OR auditor_id=?)",
+        (run_id, pass_number, auditor_id),
+    ).fetchone()
+    if existing is not None:
+        raise AuditConflict(
+            "Audit run already contains this pass number or auditor id"
+        )
     subjects = _perspective_subjects(snapshot, perspective)
     pass_id = f"{run_id}-p{pass_number}-{uuid.uuid4().hex[:8]}"
     role = PERSPECTIVES.get(
@@ -431,7 +583,7 @@ def _insert_pass(
         "INSERT INTO ai_audit_passes(id,run_id,pass_number,auditor_id,model_id,prompt_version,perspective,"
         "blind,input_sha256,input_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (pass_id, run_id, pass_number, auditor_id, model_id, prompt_version, perspective, 1,
-         input_sha, _canonical(stored_bundle), _now()),
+         input_sha, _canonical(stored_bundle), _created_at(db)),
     )
     return {
         "id": pass_id, "pass_number": pass_number, "auditor_id": auditor_id,
@@ -441,7 +593,7 @@ def _insert_pass(
 
 
 def export_pass(
-    db_path: str | Path = DB_PATH,
+    db_path: Any = None,
     *,
     pass_id: str | None = None,
     resume: bool = False,
@@ -454,8 +606,8 @@ def export_pass(
 ) -> dict[str, Any]:
     """Return a stored blind pass, or create one for an existing run."""
     ensure_schema(db_path)
-    with _connection(db_path, writable=True) as db:
-        if pass_id is not None:
+    if pass_id is not None:
+        with _connection(db_path) as db:
             _, stored = _load_pass(db, pass_id)
             bundle = json.loads(_canonical(stored))
             if resume:
@@ -491,32 +643,34 @@ def export_pass(
                         "resume_sequence and resume_checkpoint_sha256."
                     )
             return bundle
-        if None in (run_id, pass_number, auditor_id, perspective, model_id):
-            raise AuditError("Creating a pass requires run_id, pass_number, auditor_id, perspective and model_id")
-        run = db.execute(
-            "SELECT snapshot_sha256,contract_version FROM ai_audit_runs WHERE id=?", (run_id,)
-        ).fetchone()
-        if run is None:
-            raise AuditError("Unknown audit run")
-        if run[1] != CONTRACT_VERSION:
-            raise AuditConflict("Run contract version is not supported by this code")
-        snapshot_row = db.execute(
-            "SELECT snapshot_json FROM ai_audit_source_snapshots WHERE snapshot_sha256=?", (run[0],)
-        ).fetchone()
-        if snapshot_row is None:
-            raise AuditConflict("Run snapshot is missing")
-        snapshot = json.loads(snapshot_row[0])
-        info = _insert_pass(
-            db, run_id=run_id, snapshot_sha=run[0], snapshot=snapshot, pass_number=pass_number,
-            auditor_id=auditor_id, perspective=perspective, model_id=model_id,
-            prompt_version=prompt_version,
-        )
-        db.commit()
-        _, bundle = _load_pass(db, info["id"])
-        return bundle
+    if None in (run_id, pass_number, auditor_id, perspective, model_id):
+        raise AuditError("Creating a pass requires run_id, pass_number, auditor_id, perspective and model_id")
+    with _connection(db_path, writable=True) as db:
+        with _write_transaction(db):
+            _lock_run(db, run_id)
+            run = db.execute(
+                "SELECT snapshot_sha256,contract_version FROM ai_audit_runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if run is None:
+                raise AuditError("Unknown audit run")
+            if run[1] != CONTRACT_VERSION:
+                raise AuditConflict("Run contract version is not supported by this code")
+            snapshot_row = db.execute(
+                "SELECT snapshot_json FROM ai_audit_source_snapshots WHERE snapshot_sha256=?", (run[0],)
+            ).fetchone()
+            if snapshot_row is None:
+                raise AuditConflict("Run snapshot is missing")
+            snapshot = json.loads(snapshot_row[0])
+            info = _insert_pass(
+                db, run_id=run_id, snapshot_sha=run[0], snapshot=snapshot, pass_number=pass_number,
+                auditor_id=auditor_id, perspective=perspective, model_id=model_id,
+                prompt_version=prompt_version,
+            )
+            _, bundle = _load_pass(db, info["id"])
+            return bundle
 
 
-def _load_pass(db: sqlite3.Connection, pass_id: str) -> tuple[sqlite3.Row | tuple, dict[str, Any]]:
+def _load_pass(db: Any, pass_id: str) -> tuple[Any, dict[str, Any]]:
     row = db.execute(
         "SELECT p.id,p.run_id,p.input_sha256,p.input_json,p.perspective,p.auditor_id,p.model_id,p.prompt_version "
         "FROM ai_audit_passes p WHERE p.id=?", (pass_id,)
@@ -656,47 +810,48 @@ def _normalize_result_payload(payload: Any, bundle: dict[str, Any], *, complete:
     }
 
 
-def save_checkpoint(db_path: str | Path, pass_id: str, payload: dict[str, Any], *, state: dict[str, Any] | None = None) -> dict[str, Any]:
+def save_checkpoint(db_path: Any, pass_id: str, payload: dict[str, Any], *, state: dict[str, Any] | None = None) -> dict[str, Any]:
     """Append a monotonic partial checkpoint. It never modifies a prior checkpoint."""
     ensure_schema(db_path)
     with _connection(db_path, writable=True) as db:
-        if db.execute("SELECT 1 FROM ai_audit_results WHERE pass_id=?", (pass_id,)).fetchone() is not None:
-            raise AuditConflict("Cannot checkpoint a pass after its final result")
-        _, bundle = _load_pass(db, pass_id)
-        normalized = _normalize_result_payload(payload, bundle, complete=False)
-        previous = db.execute(
-            "SELECT sequence,completed_subject_ids_json FROM ai_audit_checkpoints WHERE pass_id=? "
-            "ORDER BY sequence DESC LIMIT 1", (pass_id,)
-        ).fetchone()
-        sequence = 1 if previous is None else previous[0] + 1
-        previous_completed = set(json.loads(previous[1])) if previous else set()
-        current_completed = set(normalized["completed_subject_ids"])
-        if not previous_completed <= current_completed:
-            raise AuditConflict("Checkpoint cannot forget previously completed subjects")
-        if state is None:
-            state = {}
-        if not isinstance(state, dict) or len(_canonical(state)) > 20000:
-            raise AuditError("Checkpoint state must be a small JSON object")
-        state_payload = {"verdicts": normalized["verdicts"], "notes": normalized["notes"], "state": state}
-        checkpoint_material = {
-            "pass_id": pass_id, "sequence": sequence,
-            "completed_subject_ids": normalized["completed_subject_ids"],
-            "findings": normalized["findings"], "state": state_payload,
-        }
-        checkpoint_sha = _sha(checkpoint_material)
-        db.execute(
-            "INSERT INTO ai_audit_checkpoints(pass_id,sequence,checkpoint_sha256,completed_subject_ids_json,"
-            "findings_json,state_json,created_at) VALUES(?,?,?,?,?,?,?)",
-            (pass_id, sequence, checkpoint_sha, _canonical(normalized["completed_subject_ids"]),
-             _canonical(normalized["findings"]), _canonical(state_payload), _now()),
-        )
-        db.commit()
+        with _write_transaction(db):
+            _lock_pass(db, pass_id)
+            if db.execute("SELECT 1 FROM ai_audit_results WHERE pass_id=?", (pass_id,)).fetchone() is not None:
+                raise AuditConflict("Cannot checkpoint a pass after its final result")
+            _, bundle = _load_pass(db, pass_id)
+            normalized = _normalize_result_payload(payload, bundle, complete=False)
+            previous = db.execute(
+                "SELECT sequence,completed_subject_ids_json FROM ai_audit_checkpoints WHERE pass_id=? "
+                "ORDER BY sequence DESC LIMIT 1", (pass_id,)
+            ).fetchone()
+            sequence = 1 if previous is None else previous[0] + 1
+            previous_completed = set(json.loads(previous[1])) if previous else set()
+            current_completed = set(normalized["completed_subject_ids"])
+            if not previous_completed <= current_completed:
+                raise AuditConflict("Checkpoint cannot forget previously completed subjects")
+            if state is None:
+                state = {}
+            if not isinstance(state, dict) or len(_canonical(state)) > 20000:
+                raise AuditError("Checkpoint state must be a small JSON object")
+            state_payload = {"verdicts": normalized["verdicts"], "notes": normalized["notes"], "state": state}
+            checkpoint_material = {
+                "pass_id": pass_id, "sequence": sequence,
+                "completed_subject_ids": normalized["completed_subject_ids"],
+                "findings": normalized["findings"], "state": state_payload,
+            }
+            checkpoint_sha = _sha(checkpoint_material)
+            db.execute(
+                "INSERT INTO ai_audit_checkpoints(pass_id,sequence,checkpoint_sha256,completed_subject_ids_json,"
+                "findings_json,state_json,created_at) VALUES(?,?,?,?,?,?,?)",
+                (pass_id, sequence, checkpoint_sha, _canonical(normalized["completed_subject_ids"]),
+                 _canonical(normalized["findings"]), _canonical(state_payload), _created_at(db)),
+            )
     return {"pass_id": pass_id, "sequence": sequence, "checkpoint_sha256": checkpoint_sha,
             "completed": len(normalized["completed_subject_ids"])}
 
 
 def _insert_normalized_result(
-    db: sqlite3.Connection,
+    db: Any,
     pass_id: str,
     normalized: dict[str, Any],
 ) -> dict[str, Any]:
@@ -713,31 +868,54 @@ def _insert_normalized_result(
                 "already_imported": True, "finding_count": len(normalized["findings"]),
             }
         raise AuditConflict("This pass already has a different immutable result")
-    cursor = db.execute(
-        "INSERT INTO ai_audit_results(pass_id,result_sha256,completed_subject_ids_json,notes_json,raw_json,created_at) "
-        "VALUES(?,?,?,?,?,?)",
-        (pass_id, result_sha, _canonical(normalized["completed_subject_ids"]),
-         _canonical(normalized["notes"]), raw_json, _now()),
-    )
-    result_id = cursor.lastrowid
+    _lock_pass(db, pass_id)
+    if _is_postgres(db):
+        result_id = db.execute(
+            "INSERT INTO ai_audit_results(pass_id,result_sha256,completed_subject_ids_json,notes_json,raw_json,created_at) "
+            "VALUES(?,?,?,?,?,?) RETURNING id",
+            (pass_id, result_sha, _canonical(normalized["completed_subject_ids"]),
+             _canonical(normalized["notes"]), raw_json, _created_at(db)),
+        ).fetchone()[0]
+    else:
+        cursor = db.execute(
+            "INSERT INTO ai_audit_results(pass_id,result_sha256,completed_subject_ids_json,notes_json,raw_json,created_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (pass_id, result_sha, _canonical(normalized["completed_subject_ids"]),
+             _canonical(normalized["notes"]), raw_json, _created_at(db)),
+        )
+        result_id = cursor.lastrowid
     _, bundle = _load_pass(db, pass_id)
     finding_contract = bundle.get("result_contract", {}).get("findings", {})
     fingerprint_version = finding_contract.get(
         "fingerprint_version", LEGACY_FINDING_FINGERPRINT_VERSION
     ) if isinstance(finding_contract, dict) else LEGACY_FINDING_FINGERPRINT_VERSION
-    for finding in normalized["findings"]:
+    for finding in sorted(normalized["findings"], key=lambda item: item["fingerprint"]):
         identity_json = _canonical(finding["identity"])
-        stored = db.execute(
-            "SELECT subject_id,category,identity_json FROM ai_audit_findings WHERE fingerprint=?",
-            (finding["fingerprint"],),
-        ).fetchone()
-        if stored is None:
+        if _is_postgres(db):
             db.execute(
                 "INSERT INTO ai_audit_findings(fingerprint,subject_id,category,identity_json,created_at) "
-                "VALUES(?,?,?,?,?)",
-                (finding["fingerprint"], finding["subject_id"], finding["category"], identity_json, _now()),
+                "VALUES(?,?,?,?,?) ON CONFLICT (fingerprint) DO NOTHING",
+                (finding["fingerprint"], finding["subject_id"], finding["category"], identity_json, _created_at(db)),
             )
-        elif fingerprint_version == FINDING_FINGERPRINT_VERSION:
+            stored = db.execute(
+                "SELECT subject_id,category,identity_json FROM ai_audit_findings WHERE fingerprint=?",
+                (finding["fingerprint"],),
+            ).fetchone()
+        else:
+            stored = db.execute(
+                "SELECT subject_id,category,identity_json FROM ai_audit_findings WHERE fingerprint=?",
+                (finding["fingerprint"],),
+            ).fetchone()
+            if stored is None:
+                db.execute(
+                    "INSERT INTO ai_audit_findings(fingerprint,subject_id,category,identity_json,created_at) "
+                    "VALUES(?,?,?,?,?)",
+                    (finding["fingerprint"], finding["subject_id"], finding["category"], identity_json, _created_at(db)),
+                )
+                stored = (finding["subject_id"], finding["category"], identity_json)
+        if stored is None:
+            raise AuditConflict("Finding insert did not produce a readable immutable row")
+        if fingerprint_version == FINDING_FINGERPRINT_VERSION:
             if (stored[0], stored[2]) != (finding["subject_id"], identity_json):
                 raise AuditConflict("Finding fingerprint collision")
         elif tuple(stored) != (finding["subject_id"], finding["category"], identity_json):
@@ -746,7 +924,7 @@ def _insert_normalized_result(
             "INSERT INTO ai_audit_finding_occurrences(result_id,pass_id,fingerprint,severity,summary,detail,"
             "evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
             (result_id, pass_id, finding["fingerprint"], finding["severity"], finding["summary"],
-             finding["detail"], _canonical(finding["evidence"]), _now()),
+             finding["detail"], _canonical(finding["evidence"]), _created_at(db)),
         )
     return {
         "pass_id": pass_id, "result_id": result_id, "result_sha256": result_sha,
@@ -754,7 +932,7 @@ def _insert_normalized_result(
     }
 
 
-def import_result(db_path: str | Path = DB_PATH, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def import_result(db_path: Any = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """Validate and append one completed independent pass result."""
     if payload is None:
         raise AuditError("Result payload is required")
@@ -763,10 +941,10 @@ def import_result(db_path: str | Path = DB_PATH, payload: dict[str, Any] | None 
     if not isinstance(pass_id, str):
         raise AuditError("Result pass_id is required")
     with _connection(db_path, writable=True) as db:
-        _, bundle = _load_pass(db, pass_id)
-        normalized = _normalize_result_payload(payload, bundle, complete=True)
-        try:
-            db.execute("BEGIN IMMEDIATE")
+        with _write_transaction(db):
+            _lock_pass(db, pass_id)
+            _, bundle = _load_pass(db, pass_id)
+            normalized = _normalize_result_payload(payload, bundle, complete=True)
             result = _insert_normalized_result(db, pass_id, normalized)
             attempt = None
             if not result["already_imported"]:
@@ -774,10 +952,6 @@ def import_result(db_path: str | Path = DB_PATH, payload: dict[str, Any] | None 
                     db, pass_id, "succeeded", result_id=result["result_id"],
                     response=payload, evidence={"ingestion": "import_result"},
                 )
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
     result["attempt"] = attempt
     return result
 
@@ -843,7 +1017,7 @@ def ingest_result(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any
 
 
 def _normalize_final_response_db(
-    db: sqlite3.Connection,
+    db: Any,
     pass_id: str,
     response: Any,
 ) -> dict[str, Any]:
@@ -944,7 +1118,7 @@ def _attempt_response_material(response: Any | None) -> tuple[str | None, str | 
 
 
 def _insert_attempt(
-    db: sqlite3.Connection,
+    db: Any,
     pass_id: str,
     status: str,
     *,
@@ -977,18 +1151,28 @@ def _insert_attempt(
         error_code = _safe_text(error_code, "error_code", maximum=120)
         error_message = _safe_text(error_message, "error_message", maximum=8000)
     response_sha, raw_response = _attempt_response_material(response)
+    _lock_pass(db, pass_id)
     attempt_number = db.execute(
         "SELECT COALESCE(MAX(attempt_number),0)+1 FROM ai_audit_attempts WHERE pass_id=?",
         (pass_id,),
     ).fetchone()[0]
-    cursor = db.execute(
-        "INSERT INTO ai_audit_attempts(pass_id,attempt_number,status,result_id,response_sha256,raw_response_json,"
-        "error_code,error_message,evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (pass_id, attempt_number, status, result_id, response_sha, raw_response,
-         error_code, error_message, evidence_json, _now()),
-    )
+    if _is_postgres(db):
+        attempt_id = db.execute(
+            "INSERT INTO ai_audit_attempts(pass_id,attempt_number,status,result_id,response_sha256,raw_response_json,"
+            "error_code,error_message,evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING id",
+            (pass_id, attempt_number, status, result_id, response_sha, raw_response,
+             error_code, error_message, evidence_json, _created_at(db)),
+        ).fetchone()[0]
+    else:
+        cursor = db.execute(
+            "INSERT INTO ai_audit_attempts(pass_id,attempt_number,status,result_id,response_sha256,raw_response_json,"
+            "error_code,error_message,evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (pass_id, attempt_number, status, result_id, response_sha, raw_response,
+             error_code, error_message, evidence_json, _created_at(db)),
+        )
+        attempt_id = cursor.lastrowid
     return {
-        "id": cursor.lastrowid,
+        "id": attempt_id,
         "pass_id": pass_id,
         "attempt_number": attempt_number,
         "status": status,
@@ -1001,7 +1185,7 @@ def _insert_attempt(
 
 
 def list_attempts(
-    db_or_path: sqlite3.Connection | str | Path = DB_PATH,
+    db_or_path: Any = None,
     *,
     pass_id: str | None = None,
     run_id: str | None = None,
@@ -1036,7 +1220,7 @@ def list_attempts(
 
 
 def record_attempt_outcome(
-    db_path: str | Path,
+    db_path: Any,
     pass_id: str,
     status: str,
     *,
@@ -1050,8 +1234,8 @@ def record_attempt_outcome(
         raise AuditError("Use ingest_response for succeeded attempts")
     ensure_schema(db_path)
     with _connection(db_path, writable=True) as db:
-        try:
-            db.execute("BEGIN IMMEDIATE")
+        with _write_transaction(db):
+            _lock_pass(db, pass_id)
             _load_pass(db, pass_id)
             if db.execute("SELECT 1 FROM ai_audit_results WHERE pass_id=?", (pass_id,)).fetchone() is not None:
                 raise AuditConflict("Cannot append a failed attempt after the pass has succeeded")
@@ -1059,15 +1243,11 @@ def record_attempt_outcome(
                 db, pass_id, status, response=response, error_code=error_code,
                 error_message=error_message, evidence=evidence,
             )
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
     return attempt
 
 
 def ingest_response(
-    db_path: str | Path,
+    db_path: Any,
     pass_id: str,
     response: Any,
     *,
@@ -1094,31 +1274,27 @@ def ingest_response(
         return {"status": "invalid", "attempt": attempt, "validation_error": str(exc), "result": None}
 
     with _connection(db_path, writable=True) as db:
-        try:
-            db.execute("BEGIN IMMEDIATE")
+        with _write_transaction(db):
+            _lock_pass(db, pass_id)
             normalized = _normalize_final_response_db(db, pass_id, response)
             result = _insert_normalized_result(db, pass_id, normalized)
             attempt = _insert_attempt(
                 db, pass_id, "succeeded", result_id=result["result_id"],
                 response=response, evidence=evidence,
             )
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
     return {"status": "succeeded", "attempt": attempt, "result": result}
 
 
-def _latest_run_id(db: sqlite3.Connection) -> str | None:
+def _latest_run_id(db: Any) -> str | None:
     row = db.execute(
         "SELECT r.id FROM ai_audit_runs r WHERE r.exam_id=? "
-        "ORDER BY r.created_at DESC,r.rowid DESC LIMIT 1", (EXAM_ID,)
+        f"ORDER BY {_run_order(db)} LIMIT 1", (EXAM_ID,)
     ).fetchone()
     return row[0] if row else None
 
 
 def _latest_run_id_for_question(
-    db: sqlite3.Connection,
+    db: Any,
     qid: str,
     *,
     require_result: bool,
@@ -1133,7 +1309,7 @@ def _latest_run_id_for_question(
         "SELECT r.id,p.input_json,ar.raw_json FROM ai_audit_runs r "
         "JOIN ai_audit_passes p ON p.run_id=r.id "
         "LEFT JOIN ai_audit_results ar ON ar.pass_id=p.id "
-        "WHERE r.exam_id=? ORDER BY r.created_at DESC,r.rowid DESC,p.pass_number,p.id",
+        f"WHERE r.exam_id=? ORDER BY {_run_order(db)},p.pass_number,p.id",
         (EXAM_ID,),
     ).fetchall()
     for run_id, input_json, raw_json in rows:
@@ -1152,7 +1328,7 @@ def _latest_run_id_for_question(
     return None
 
 
-def _result_entries_for_question(db: sqlite3.Connection, run_id: str, qid: str) -> list[dict[str, Any]]:
+def _result_entries_for_question(db: Any, run_id: str, qid: str) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     rows = db.execute(
         "SELECT p.id,p.pass_number,p.auditor_id,p.perspective,p.model_id,p.prompt_version,r.raw_json,r.created_at "
@@ -1179,7 +1355,7 @@ def _result_entries_for_question(db: sqlite3.Connection, run_id: str, qid: str) 
     return entries
 
 
-def _question_execution_counts(db: sqlite3.Connection, run_id: str, qid: str) -> tuple[int, int]:
+def _question_execution_counts(db: Any, run_id: str, qid: str) -> tuple[int, int]:
     """Return (eligible pass count, completed eligible pass count) for one subject."""
     total = 0
     completed = 0
@@ -1203,7 +1379,7 @@ def _question_execution_counts(db: sqlite3.Connection, run_id: str, qid: str) ->
     return total, completed
 
 
-def _run_finding_fingerprints(db: sqlite3.Connection, run_id: str, qid: str) -> set[str]:
+def _run_finding_fingerprints(db: Any, run_id: str, qid: str) -> set[str]:
     return {
         row[0] for row in db.execute(
             "SELECT DISTINCT o.fingerprint FROM ai_audit_finding_occurrences o "
@@ -1213,14 +1389,21 @@ def _run_finding_fingerprints(db: sqlite3.Connection, run_id: str, qid: str) -> 
     }
 
 
-def _convergence_for_question(db: sqlite3.Connection, qid: str) -> str:
-    run_ids = [
-        row[0] for row in db.execute(
+def _convergence_for_question(db: Any, qid: str) -> str:
+    if _is_postgres(db):
+        run_rows = db.execute(
+            "SELECT r.id,r.created_at FROM ai_audit_runs r JOIN ai_audit_passes p ON p.run_id=r.id "
+            "JOIN ai_audit_results ar ON ar.pass_id=p.id WHERE r.exam_id=? "
+            "GROUP BY r.id,r.created_at ORDER BY r.created_at DESC,r.id DESC",
+            (EXAM_ID,),
+        )
+    else:
+        run_rows = db.execute(
             "SELECT DISTINCT r.id FROM ai_audit_runs r JOIN ai_audit_passes p ON p.run_id=r.id "
             "JOIN ai_audit_results ar ON ar.pass_id=p.id WHERE r.exam_id=? "
-            "ORDER BY r.created_at DESC,r.rowid DESC", (EXAM_ID,)
+            "ORDER BY r.created_at DESC,r.rowid DESC", (EXAM_ID,),
         )
-    ]
+    run_ids = [row[0] for row in run_rows]
     signatures = []
     for run_id in run_ids:
         pass_total, completed_passes = _question_execution_counts(db, run_id, qid)
@@ -1242,7 +1425,7 @@ def _convergence_for_question(db: sqlite3.Connection, qid: str) -> str:
 
 
 def _within_run_convergence(
-    db: sqlite3.Connection,
+    db: Any,
     run_id: str,
     qid: str | None = None,
 ) -> dict[str, Any]:
@@ -1299,7 +1482,7 @@ def _within_run_convergence(
 
 
 def consensus_report(
-    db_or_path: sqlite3.Connection | str | Path,
+    db_or_path: Any,
     run_id: str,
 ) -> dict[str, Any]:
     """Read-only cross-pass finding consensus and novelty report."""
@@ -1362,7 +1545,7 @@ def consensus_report(
 
 
 def summarize_question(
-    db_or_path: sqlite3.Connection | str | Path,
+    db_or_path: Any,
     qid: str,
     run_id: str | None = None,
 ) -> dict[str, Any]:
@@ -1464,7 +1647,7 @@ def summarize_question(
 
 
 def summarize_all_questions(
-    db_or_path: sqlite3.Connection | str | Path,
+    db_or_path: Any,
     run_id: str | None = None,
 ) -> dict[str, Any]:
     with _connection(db_or_path) as db:
@@ -1532,7 +1715,7 @@ def summarize_all_questions(
 
 
 def question_audit_history(
-    db_or_path: sqlite3.Connection | str | Path,
+    db_or_path: Any,
     qid: str,
 ) -> dict[str, Any]:
     """Return persisted multi-run history for one question, newest run first.
@@ -1555,7 +1738,7 @@ def question_audit_history(
             raise AuditError("Unknown question")
         run_rows = db.execute(
             "SELECT id,label,created_at,snapshot_sha256 FROM ai_audit_runs WHERE exam_id=? "
-            "ORDER BY created_at DESC,rowid DESC", (EXAM_ID,),
+            f"ORDER BY {_run_order(db, alias='ai_audit_runs')}", (EXAM_ID,),
         ).fetchall()
         runs: list[dict[str, Any]] = []
         all_finding_meta: dict[str, dict[str, Any]] = {}
@@ -1694,7 +1877,7 @@ def question_audit_history(
 
 
 def status_report(
-    db_or_path: sqlite3.Connection | str | Path = DB_PATH,
+    db_or_path: Any = None,
     run_id: str | None = None,
     subject_id: str | None = None,
 ) -> dict[str, Any]:
@@ -1791,7 +1974,7 @@ def status_report(
         }
 
 
-def audit_status(db_or_path: sqlite3.Connection | str | Path = DB_PATH, run_id: str | None = None) -> dict[str, Any]:
+def audit_status(db_or_path: Any = None, run_id: str | None = None) -> dict[str, Any]:
     with _connection(db_or_path) as db:
         selected_run = run_id or (_latest_run_id(db) if "ai_audit_runs" in _table_names(db) else None)
         if selected_run is None:
@@ -1852,9 +2035,22 @@ def _json_for_stream(value: Any, stream: Any) -> str:
     return text
 
 
+def _target_label(db_or_path: Any = None) -> str:
+    target = _resolve_target(db_or_path)
+    if isinstance(target, str) and target.strip().lower().startswith(("postgresql://", "postgres://")):
+        return "postgresql"
+    if isinstance(target, sqlite3.Connection) or _is_postgres(target):
+        return getattr(target, "backend", "sqlite")
+    return str(Path(target))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", type=Path, default=DB_PATH, help="35-I pilot SQLite path")
+    parser.add_argument(
+        "--db",
+        default=None,
+        help="Explicit SQLite path or PostgreSQL URL; defaults to TOPIK_DATABASE_URL, then local SQLite",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     create = sub.add_parser("create-run")
@@ -1903,7 +2099,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "init":
             ensure_schema(args.db)
-            output: Any = {"database": str(args.db), "contract_version": CONTRACT_VERSION, "initialized": True}
+            output: Any = {
+                "database": _target_label(args.db),
+                "contract_version": CONTRACT_VERSION,
+                "initialized": True,
+            }
         elif args.command == "create-run":
             output = create_run(
                 args.db, auditors=args.auditors, model_id=args.model_id,
@@ -1961,7 +2161,10 @@ def main(argv: list[str] | None = None) -> int:
                 output = audit_status(args.db, args.run)
         print(_json_for_stream(output, sys.stdout))
         return 0
-    except (AuditError, sqlite3.Error, OSError, ValueError) as exc:
+    except (
+        AuditError, DatabaseConfigError, DatabaseOperationError,
+        sqlite3.Error, OSError, ValueError,
+    ) as exc:
         print(f"AI audit error: {exc}", file=sys.stderr)
         return 2
 
