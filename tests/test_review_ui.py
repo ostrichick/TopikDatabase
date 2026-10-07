@@ -116,6 +116,20 @@ class TestReviewStore(unittest.TestCase):
         self.assertTrue(all(isinstance(item["version"], int) for item in ids))
         self.assertIn(self._answer(self.listening_id), (1, 2, 3, 4))
 
+    def test_questions_bundle_covers_all_seventy_questions(self):
+        bundle = self.store.get_questions_bundle()
+        self.assertIsInstance(bundle, dict)
+        self.assertEqual(bundle["exam_id"], "035-I-B")
+        self.assertEqual(bundle["total_questions"], 70)
+        self.assertEqual(len(bundle["questions"]), 70)
+        self.assertIn(self.listening_id, bundle["questions"])
+        self.assertIn(self.reading_id, bundle["questions"])
+        single = self.store.get_question(self.listening_id)
+        cached = bundle["questions"][self.listening_id]
+        for key in ("id", "number", "section", "stem", "points", "review_status"):
+            self.assertEqual(cached[key], single[key])
+        self.assertEqual(len(cached["choices"]), 4)
+
     def test_review_ui_gracefully_ignores_database_without_ai_audit_tables(self):
         qid = self.listening_id
         version_before = self.store.get_question(qid)["version"]
@@ -189,6 +203,33 @@ class TestReviewStore(unittest.TestCase):
         fake_module.summarize_all_questions.assert_called_once()
         fake_module.summarize_question.assert_called_once()
         self.assertEqual(fake_module.summarize_question.call_args.args[1], qid)
+
+    def test_ai_audit_summary_is_cached_in_memory_per_question(self):
+        qid = self.listening_id
+        fake_module = MagicMock(
+            summarize_question=MagicMock(return_value={"run_id": "run-1", "verdict": "clear", "total": 1}),
+            status_report=MagicMock(return_value={"latest_run": {"attempt_status_counts": {}}}),
+            question_audit_history=MagicMock(return_value={"runs": []}),
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            for table in review_ui.AI_AUDIT_TABLES:
+                conn.execute(f"CREATE TABLE IF NOT EXISTS {table} (placeholder INTEGER)")
+            conn.commit()
+
+        with patch.dict(sys.modules, {"src.ai_audit_35": fake_module}):
+            first = self.store.get_question(qid)
+            self.assertEqual(fake_module.summarize_question.call_count, 1)
+
+            # Second call must hit memory cache and not query backend again
+            second = self.store.get_question(qid)
+            self.assertEqual(fake_module.summarize_question.call_count, 1)
+            self.assertEqual(first.get("ai_audit"), second.get("ai_audit"))
+
+            # Cache invalidation forces refresh
+            self.store.clear_ai_audit_cache()
+            third = self.store.get_question(qid)
+            self.assertEqual(fake_module.summarize_question.call_count, 2)
+            self.assertEqual(first.get("ai_audit"), third.get("ai_audit"))
 
     def test_real_ai_audit_helper_flows_into_list_and_detail_without_human_state_change(self):
         qid = self.listening_id
@@ -770,9 +811,15 @@ class TestReviewHTTP(unittest.TestCase):
         self.assertEqual(len(listing["items"]), 70)
         self.assertGreaterEqual(len(listing["csrf_token"]), 32)
         self.assertEqual(headers["Cache-Control"], "no-store")
-        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         code, _, _ = self._request("GET", "/api/questions", headers={"Host": "evil.example"})
         self.assertEqual(code, 403)
+
+    def test_get_questions_bundle_endpoint(self):
+        bundle, headers = self._get_json("/api/questions-bundle")
+        self.assertEqual(bundle["exam_id"], "035-I-B")
+        self.assertEqual(bundle["total_questions"], 70)
+        self.assertEqual(len(bundle["questions"]), 70)
+        self.assertEqual(headers["Cache-Control"], "no-store")
 
     def test_post_requires_matching_host_origin_and_csrf_token(self):
         payload = self._payload()

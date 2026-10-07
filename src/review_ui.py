@@ -12,6 +12,7 @@ their canonical logical path and checksum.
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import errno
 import hashlib
 import inspect
@@ -92,12 +93,19 @@ class ReviewStore:
         else:
             self.media_root = get_media_root()
         self.source_root = (self.media_root / "35th").resolve()
+        self._ai_audit_cache: dict[str, dict | None] = {}
+        self._has_audio_segments_cache: bool | None = None
+        self._audio_asset_cache: dict[str, dict] = {}
         if self.backend == "sqlite" and not self.db_path.is_file():
             raise FileNotFoundError(f"Pilot database not found: {self.db_path}. Run py -3 src/pilot_35.py first.")
         with closing(self._connect()) as db:
             exam = db.execute("SELECT session, level, booklet FROM exams").fetchall()
             if len(exam) != 1 or (exam[0]["session"], exam[0]["level"], exam[0]["booklet"]) != (35, "I", "B"):
                 raise ReviewError("This reviewer only accepts the 35th TOPIK I B pilot database")
+
+    def clear_ai_audit_cache(self) -> None:
+        """Clear cached AI audit summaries for human review sessions."""
+        self._ai_audit_cache.clear()
 
     def _connect(self, writable: bool = False):
         if self.backend == "postgres":
@@ -204,11 +212,15 @@ class ReviewStore:
                 else:
                     execution_subjects = audit_subject_ids(audit_target)
                 for item in items:
-                    summary = ai_summaries.get(item["id"])
+                    qid = item["id"]
+                    is_scoped = execution_subjects is None or qid in execution_subjects
+                    if not is_scoped:
+                        self._ai_audit_cache[qid] = None
+                    summary = ai_summaries.get(qid)
                     audit = self._ai_audit_list_summary(summary) if summary else {}
                     run_id = summary.get("run_id") if summary else None
-                    execution = self._ai_audit_execution(audit_target, subject_id=item["id"], run_id=run_id) \
-                        if execution_subjects is None or item["id"] in execution_subjects else None
+                    execution = self._ai_audit_execution(audit_target, subject_id=qid, run_id=run_id) \
+                        if is_scoped else None
                     execution_summary = self._ai_audit_execution_list_summary(execution)
                     if execution_summary:
                         audit.update(execution_summary)
@@ -240,6 +252,16 @@ class ReviewStore:
             try:
                 return audit_tables_available(db)
             except (DatabaseConfigError, DatabaseOperationError):
+                return False
+        if getattr(db, "backend", None) == "postgres":
+            try:
+                rows = db.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema=current_schema() AND table_name LIKE 'ai_audit_%'"
+                ).fetchall()
+                existing = {row[0] if isinstance(row, tuple) else row["table_name"] for row in rows}
+                return AI_AUDIT_TABLES.issubset(existing)
+            except Exception:
                 return False
         existing = {
             row[0] for row in db.execute(
@@ -482,23 +504,51 @@ class ReviewStore:
         return {key: execution[key] for key in keys if key in execution}
 
     def _has_audio_segments(self, db) -> bool:
+        if self._has_audio_segments_cache is not None:
+            return self._has_audio_segments_cache
         if self.backend == "postgres":
             row = db.execute(
                 "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
                 "WHERE table_schema=current_schema() AND table_name='audio_segments') AS present"
             ).fetchone()
-            return bool(row["present"])
-        return db.execute("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' "
-                          "AND name='audio_segments')").fetchone()[0] == 1
+            present = bool(row["present"])
+        else:
+            present = db.execute("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' "
+                              "AND name='audio_segments')").fetchone()[0] == 1
+        self._has_audio_segments_cache = present
+        return present
+
+    def _has_ai_audit_runs(self, db) -> bool:
+        if self._has_ai_runs_cache is not None:
+            return self._has_ai_runs_cache
+        try:
+            if self.backend == "postgres":
+                row = db.execute("SELECT EXISTS(SELECT 1 FROM ai_audit_runs) AS present").fetchone()
+                has_runs = bool(row["present"])
+            else:
+                row = db.execute("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_audit_runs')").fetchone()
+                if not row[0]:
+                    return False
+                has_runs = bool(db.execute("SELECT EXISTS(SELECT 1 FROM ai_audit_runs)").fetchone()[0])
+            self._has_ai_runs_cache = has_runs
+            return has_runs
+        except Exception:
+            return False
 
     def _audio_info(self, db: sqlite3.Connection, question: sqlite3.Row) -> dict | None:
         if question["section"] != "listening" or not self._has_audio_segments(db):
             return None
-        asset = db.execute(
-            "SELECT a.id,a.duration_seconds,s.sha256 FROM audio_assets a "
-            "JOIN source_files s ON s.id=a.source_file_id WHERE a.section_id=?",
-            (question["section_id"],),
-        ).fetchone()
+        sec_id = question["section_id"]
+        if sec_id in self._audio_asset_cache:
+            asset = self._audio_asset_cache[sec_id]
+        else:
+            asset = db.execute(
+                "SELECT a.id,a.duration_seconds,s.sha256 FROM audio_assets a "
+                "JOIN source_files s ON s.id=a.source_file_id WHERE a.section_id=?",
+                (sec_id,),
+            ).fetchone()
+            if asset:
+                self._audio_asset_cache[sec_id] = asset
         if not asset or asset["duration_seconds"] is None:
             return None
         segment = db.execute("SELECT * FROM audio_segments WHERE question_id=?",
@@ -840,12 +890,30 @@ class ReviewStore:
             temporary.unlink(missing_ok=True)
         return self.get_question(question_id)
 
+    def _get_ai_audit_for_question(self, db, question_id: str) -> tuple[bool, dict | None]:
+        if not self._has_ai_audit_tables(db):
+            return False, None
+        if self.backend == "postgres":
+            if not self.database_url:
+                return False, None
+            try:
+                from src.database import PostgresAuditConnection
+                with closing(PostgresAuditConnection(self.database_url, readonly=True)) as audit_conn:
+                    return True, self._ai_audit_summary(audit_conn, question_id)
+            except Exception:
+                return True, self._ai_audit_summary(self.database_url, question_id)
+        return True, self._ai_audit_summary(db, question_id)
+
     def get_question(self, question_id: str) -> dict:
         with closing(self._connect()) as db:
             row = self._question(db, question_id)
             question = dict(row)
-            audit_target = self.database_url if self.backend == "postgres" else db
-            ai_audit = self._ai_audit_summary(audit_target, question_id)
+            if question_id in self._ai_audit_cache:
+                ai_audit = self._ai_audit_cache[question_id]
+            else:
+                tables_present, ai_audit = self._get_ai_audit_for_question(db, question_id)
+                if tables_present:
+                    self._ai_audit_cache[question_id] = ai_audit
             choices = [dict(item) for item in db.execute(
                 "SELECT number, text FROM choices WHERE question_id=? ORDER BY number", (question_id,)
             )]
@@ -860,10 +928,11 @@ class ReviewStore:
                 "SELECT image_key FROM question_images WHERE question_id=? ORDER BY image_key", (question_id,)
             )]
             history = []
-            for record in db.execute(
+            records = db.execute(
                 "SELECT status, scope, evidence, reviewed_at FROM review_records "
                 "WHERE subject_type='question' AND subject_id=? ORDER BY id DESC LIMIT 30", (question_id,)
-            ):
+            ).fetchall()
+            for record in records:
                 item = dict(record)
                 try:
                     item["note"] = json.loads(item["evidence"]).get("note", "")
@@ -871,12 +940,13 @@ class ReviewStore:
                     item["note"] = ""
                 item.pop("evidence")
                 history.append(item)
+            version = len(records) if len(records) < 30 else self._version(db, question_id)
             result = {
                 "id": question_id,
                 "number": question["exam_number"],
                 "section": question["section"],
                 "review_status": question["review_status"],
-                "version": self._version(db, question_id),
+                "version": version,
                 "stem": question["stem"],
                 "raw_question_text": question["raw_question_text"],
                 "group": {"instruction": question["instruction"] or "",
@@ -905,6 +975,187 @@ class ReviewStore:
             if ai_audit:
                 result["ai_audit"] = ai_audit
             return result
+
+    def get_questions_bundle(self) -> dict:
+        with closing(self._connect()) as db:
+            exam_row = db.execute("SELECT id FROM exams LIMIT 1").fetchone()
+            exam_id = exam_row["id"] if exam_row else "035-I-B"
+
+            rows = db.execute(
+                "SELECT q.*, s.name AS section, g.instruction, g.passage_text, "
+                "g.first_exam_number, g.last_exam_number, a.choice_number, "
+                "a.source_file_id AS answer_file_id, a.source_pdf_page AS answer_pdf_page "
+                "FROM questions q JOIN sections s ON s.id=q.section_id "
+                "LEFT JOIN question_groups g ON g.id=q.group_id "
+                "JOIN answers a ON a.question_id=q.id ORDER BY q.exam_number"
+            ).fetchall()
+
+            choice_rows = db.execute(
+                "SELECT question_id, number, text FROM choices ORDER BY question_id, number"
+            ).fetchall()
+            choices_by_qid: dict[str, list[dict]] = defaultdict(list)
+            for c in choice_rows:
+                choices_by_qid[c["question_id"]].append({"number": c["number"], "text": c["text"]})
+
+            transcript_rows = db.execute(
+                "SELECT question_id, dialogue_text AS text, source_pdf_page, review_status, warnings_json "
+                "FROM transcripts"
+            ).fetchall()
+            transcript_by_qid = {}
+            for t in transcript_rows:
+                item = dict(t)
+                qid = item.pop("question_id")
+                try:
+                    item["warnings"] = json.loads(item.pop("warnings_json"))
+                except (ValueError, TypeError):
+                    item["warnings"] = []
+                transcript_by_qid[qid] = item
+
+            image_rows = db.execute(
+                "SELECT question_id, image_key FROM question_images ORDER BY question_id, image_key"
+            ).fetchall()
+            images_by_qid: dict[str, list[str]] = defaultdict(list)
+            for img in image_rows:
+                images_by_qid[img["question_id"]].append(img["image_key"])
+
+            record_rows = db.execute(
+                "SELECT subject_id, status, scope, evidence, reviewed_at FROM review_records "
+                "WHERE subject_type='question' ORDER BY id DESC"
+            ).fetchall()
+            records_by_qid: dict[str, list[dict]] = defaultdict(list)
+            count_by_qid: dict[str, int] = defaultdict(int)
+            for r in record_rows:
+                qid = r["subject_id"]
+                count_by_qid[qid] += 1
+                if len(records_by_qid[qid]) < 30:
+                    item = dict(r)
+                    try:
+                        item["note"] = json.loads(item["evidence"]).get("note", "")
+                    except (ValueError, TypeError):
+                        item["note"] = ""
+                    item.pop("evidence", None)
+                    item.pop("subject_id", None)
+                    records_by_qid[qid].append(item)
+
+            has_audio = self._has_audio_segments(db)
+            assets_by_sec = {}
+            segments_by_qid = {}
+            if has_audio:
+                asset_rows = db.execute(
+                    "SELECT a.id, a.section_id, a.duration_seconds, s.sha256 FROM audio_assets a "
+                    "JOIN source_files s ON s.id=a.source_file_id"
+                ).fetchall()
+                assets_by_sec = {r["section_id"]: r for r in asset_rows}
+                for sec_id, asset in assets_by_sec.items():
+                    self._audio_asset_cache[sec_id] = asset
+
+                segment_rows = db.execute("SELECT * FROM audio_segments").fetchall()
+                segments_by_qid = {r["question_id"]: r for r in segment_rows}
+
+            has_ai = self._has_ai_audit_tables(db)
+            if has_ai:
+                audit_target = self.database_url if self.backend == "postgres" else db
+                try:
+                    from src.ai_audit_35 import audit_subject_ids
+                    scoped_ids = set(audit_subject_ids(audit_target))
+                except Exception:
+                    scoped_ids = None
+                for row in rows:
+                    qid = row["id"]
+                    if scoped_ids is not None and qid not in scoped_ids:
+                        self._ai_audit_cache[qid] = None
+
+            questions_map = {}
+            for row in rows:
+                question = dict(row)
+                qid = question["id"]
+
+                ai_audit = None
+                if has_ai:
+                    if qid in self._ai_audit_cache:
+                        ai_audit = self._ai_audit_cache[qid]
+                    else:
+                        tables_present, ai_audit = self._get_ai_audit_for_question(db, qid)
+                        if tables_present:
+                            self._ai_audit_cache[qid] = ai_audit
+
+                transcript_info = transcript_by_qid.get(qid)
+                image_keys = images_by_qid.get(qid, [])
+                history = records_by_qid.get(qid, [])
+                version = count_by_qid.get(qid, 0)
+
+                audio_segment = None
+                if question["section"] == "listening" and has_audio:
+                    asset = assets_by_sec.get(question["section_id"])
+                    if asset and asset["duration_seconds"] is not None:
+                        segment = segments_by_qid.get(qid)
+                        if segment is not None:
+                            pair = list(SHARED_AUDIO.get(question["exam_number"], (question["exam_number"],)))
+                            clip_url = None
+                            if segment["status"] == "verified" and segment["clip_relative_path"]:
+                                try:
+                                    self._clip_file(segment)
+                                    clip_url = f"/media/{qid}/clip"
+                                except ReviewError:
+                                    pass
+                            audio_segment = {
+                                "start_ms": segment["start_ms"],
+                                "end_ms": segment["end_ms"],
+                                "status": segment["status"],
+                                "version": segment["version"],
+                                "source_duration_ms": round(asset["duration_seconds"] * 1000),
+                                "shared_questions": pair,
+                                "clip_url": clip_url,
+                            }
+
+                q_data = {
+                    "id": qid,
+                    "number": question["exam_number"],
+                    "section": question["section"],
+                    "review_status": question["review_status"],
+                    "version": version,
+                    "stem": question["stem"],
+                    "raw_question_text": question["raw_question_text"],
+                    "group": {
+                        "instruction": question["instruction"] or "",
+                        "passage_text": question["passage_text"] or "",
+                        "start": question["first_exam_number"],
+                        "end": question["last_exam_number"],
+                    },
+                    "choices": choices_by_qid.get(qid, []),
+                    "answer": {
+                        "choice_number": question["choice_number"],
+                        "source_pdf_page": question["answer_pdf_page"],
+                    },
+                    "points": question["points"],
+                    "source_pdf_page": question["source_pdf_page"],
+                    "answer_key_number": question["answer_key_number"],
+                    "source_pdf_url": f"/media/{qid}/paper#page={question['source_pdf_page']}",
+                    "answer_pdf_url": f"/media/{qid}/answer#page={question['answer_pdf_page']}",
+                    "transcript": transcript_info,
+                    "transcript_pdf_url": (
+                        f"/media/{qid}/transcript#page={transcript_info['source_pdf_page']}"
+                        if transcript_info else None
+                    ),
+                    "audio_url": f"/media/{qid}/audio" if transcript_info else None,
+                    "audio_segment": audio_segment,
+                    "images": [
+                        {"url": f"/media/{qid}/image/{index}", "key": key}
+                        for index, key in enumerate(image_keys)
+                    ],
+                    "requires_image": bool(question["requires_image"]),
+                    "preview_flags": json.loads(question["preview_flags_json"]),
+                    "history": history,
+                }
+                if ai_audit:
+                    q_data["ai_audit"] = ai_audit
+                questions_map[qid] = q_data
+
+            return {
+                "exam_id": exam_id,
+                "total_questions": len(questions_map),
+                "questions": questions_map,
+            }
 
     @staticmethod
     def _validate_payload(payload: dict, question: sqlite3.Row, existing: dict) -> dict:
@@ -1143,6 +1394,8 @@ def make_handler(store: ReviewStore):
                     return self.wfile.write(contents)
                 if parts == ["api", "questions"]:
                     return self._json(200, {**store.list_questions(), "csrf_token": csrf_token})
+                if parts == ["api", "questions-bundle"]:
+                    return self._json(200, store.get_questions_bundle())
                 if len(parts) == 3 and parts[:2] == ["api", "questions"]:
                     return self._json(200, store.get_question(parts[2]))
                 if len(parts) == 3 and parts[0] == "media":

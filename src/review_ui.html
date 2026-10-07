@@ -305,7 +305,7 @@
       const AI_VERDICT_NAMES = { clear: '이상 없음', finding: '결함 발견', uncertain: '불확실' };
       const AI_ATTEMPT_NAMES = { succeeded: '성공', failed: '실패', timed_out: '시간 초과', invalid: '잘못된 응답' };
       const AI_RISK_NAMES = { none: '없음', low: '낮음', medium: '중간', high: '높음', critical: '매우 높음' };
-      const state = { items: [], detail: null, baseline: '', selectedId: null, visible: [], pdfTab: 'question', loading: false, saving: false, requestId: 0, csrfToken: null, aiAuditAvailable: false, readOnly: false,
+      const state = { items: [], detail: null, detailsCache: {}, baseline: '', selectedId: null, visible: [], pdfTab: 'question', loading: false, saving: false, requestId: 0, csrfToken: null, aiAuditAvailable: false, readOnly: false,
         databaseBackend: 'sqlite', capabilities: { reviewWrite: true, audioSegmentWrite: true, clipExport: true, aiAuditWrite: false },
         audio: { available: false, saving: false, preview: null, heardSignature: null, durationMs: null, error: false } };
 
@@ -750,6 +750,10 @@
           // Preserve the question editor's unsaved draft; the audio segment is a separate review.
           state.detail.audio_segment = updated.audio_segment;
           if (Number.isSafeInteger(updated.version)) state.detail.version = updated.version;
+          if (state.detailsCache && state.detailsCache[id]) {
+            state.detailsCache[id].audio_segment = updated.audio_segment;
+            if (Number.isSafeInteger(updated.version)) state.detailsCache[id].version = updated.version;
+          }
           audioFeedback(status === 'verified' ? '청취 확인 후 해당 음원 구간이 검증되었습니다.' : '후보 구간을 저장했습니다. 검증하려면 해당 구간을 끝까지 들어야 합니다.', 'success');
           updateAudioSummary();
         } catch (error) {
@@ -780,6 +784,10 @@
               !sameOriginURL(updated.audio_segment.clip_url)) throw new Error('MP3 추출 응답에 유효한 로컬 파일 주소가 없습니다.');
           state.detail.audio_segment = updated.audio_segment;
           if (Number.isSafeInteger(updated.version)) state.detail.version = updated.version;
+          if (state.detailsCache && state.detailsCache[q.id]) {
+            state.detailsCache[q.id].audio_segment = updated.audio_segment;
+            if (Number.isSafeInteger(updated.version)) state.detailsCache[q.id].version = updated.version;
+          }
           updateAudioSummary();
           audioFeedback('검증된 구간의 MP3가 이 장치에 준비되었습니다. 아래 링크에서 파일을 확인하세요.', 'success');
         } catch (error) { audioFeedback(error.message, 'error'); notice(error.message, 'error'); }
@@ -811,6 +819,21 @@
         if (!force && id === state.selectedId && state.detail) return;
         if (!force && !canNavigate()) return;
         if (state.saving || state.audio.saving) return;
+
+        if (!force && state.detailsCache && state.detailsCache[id]) {
+          state.selectedId = id;
+          state.detail = state.detailsCache[id];
+          state.baseline = '';
+          state.audio.preview = null;
+          state.audio.heardSignature = null;
+          $('audioPlayer').pause();
+          clearNotice();
+          setLoading(false);
+          state.pdfTab = 'question';
+          renderDetail();
+          return;
+        }
+
         const token = ++state.requestId;
         state.selectedId = id;
         state.detail = null;
@@ -828,6 +851,7 @@
           const detail = await request(`/api/questions/${encodeURIComponent(id)}`);
           if (token !== state.requestId) return;
           if (!detail || detail.id !== id || !Array.isArray(detail.choices)) throw new Error('문항 상세 응답 형식이 올바르지 않습니다.');
+          if (state.detailsCache) state.detailsCache[id] = detail;
           state.detail = detail;
           state.pdfTab = 'question';
           renderDetail();
@@ -1180,6 +1204,7 @@
           });
           if (!updated || updated.id !== id || !Array.isArray(updated.choices)) throw new Error('저장 응답 형식이 올바르지 않습니다. 서버 상태를 확인하세요.');
           state.detail = updated;
+          if (state.detailsCache) state.detailsCache[id] = updated;
           const row = state.items.find(item => item.id === id);
           if (row) { row.status = updated.review_status; row.requires_image = updated.requires_image; }
           renderDetail();
@@ -1285,6 +1310,16 @@
           }
         });
       }
+      async function loadBundle() {
+        try {
+          const bundle = await request('/api/questions-bundle');
+          if (bundle && bundle.questions && typeof bundle.questions === 'object') {
+            Object.assign(state.detailsCache, bundle.questions);
+          }
+        } catch (_) {
+          // Fallback to on-demand question fetching remains active
+        }
+      }
       async function init() {
         installHandlers();
         const host = location.hostname.toLowerCase();
@@ -1297,6 +1332,7 @@
         }
         try {
           await loadList();
+          loadBundle();
           if (state.items.length) await selectQuestion(state.items[0].id);
           else $('editorEmpty').textContent = '검수할 문항이 없습니다.';
         } catch (error) {
