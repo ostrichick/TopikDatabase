@@ -197,11 +197,18 @@ class ReviewStore:
             audit_target = self.database_url if self.backend == "postgres" else db
             ai_available, ai_summaries = self._ai_audit_summaries(audit_target)
             if ai_available:
+                try:
+                    from src.ai_audit_35 import audit_subject_ids
+                except ImportError:
+                    execution_subjects = None
+                else:
+                    execution_subjects = audit_subject_ids(audit_target)
                 for item in items:
                     summary = ai_summaries.get(item["id"])
                     audit = self._ai_audit_list_summary(summary) if summary else {}
                     run_id = summary.get("run_id") if summary else None
-                    execution = self._ai_audit_execution(audit_target, subject_id=item["id"], run_id=run_id)
+                    execution = self._ai_audit_execution(audit_target, subject_id=item["id"], run_id=run_id) \
+                        if execution_subjects is None or item["id"] in execution_subjects else None
                     execution_summary = self._ai_audit_execution_list_summary(execution)
                     if execution_summary:
                         audit.update(execution_summary)

@@ -1646,6 +1646,23 @@ def summarize_question(
         }
 
 
+def audit_subject_ids(db_or_path: Any, run_id: str | None = None) -> set[str]:
+    """Read the frozen pass scope once, including pending/failed passes."""
+    with _connection(db_or_path) as db:
+        if "ai_audit_passes" not in _table_names(db):
+            return set()
+        sql = "SELECT p.input_json FROM ai_audit_passes p JOIN ai_audit_runs r ON r.id=p.run_id WHERE r.exam_id=?"
+        params = [EXAM_ID]
+        if run_id is not None:
+            sql += " AND r.id=?"
+            params.append(run_id)
+        return {
+            item["id"] for row in db.execute(sql, params).fetchall()
+            for item in json.loads(row[0]).get("subjects", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+
+
 def summarize_all_questions(
     db_or_path: Any,
     run_id: str | None = None,
@@ -1656,8 +1673,10 @@ def summarize_all_questions(
             "SELECT q.id FROM questions q JOIN sections s ON s.id=q.section_id "
             "WHERE s.exam_id=? ORDER BY q.exam_number", (EXAM_ID,)
         )]
+        scoped_ids = audit_subject_ids(db, run_id)
         question_map = {
             qid: summary for qid in qids
+            if qid in scoped_ids
             if (summary := summarize_question(db, qid, run_id if run_id is not None else None))
         }
         questions = list(question_map.values())
