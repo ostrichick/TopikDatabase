@@ -407,78 +407,97 @@ its own operational cutover gates; this preflight does not perform cutover.
 
 ## Stage 9 operational PostgreSQL cutover preparation
 
-Stage 9 provisions a persistent PostgreSQL 17.11 cluster outside the repository
-under the current Windows user's local application-data directory. The cluster
-listens on port `55432`; application access uses a non-superuser `topik_app`
-role with SCRAM authentication. Passwords are stored only in local, untracked
-credential files and are never embedded in repository configuration or printed
-by the Stage 9 helpers. Source PDF/MP3 files remain device-local.
+The current persistent Stage 9 target is PostgreSQL 17.11 on the remote
+`wordpress-blog` host, not a Windows-local PostgreSQL process. The earlier
+Windows-local provisioning attempt was abandoned after Windows Application
+Control consistently blocked PostgreSQL's unsigned `dict_snowball.dll` during
+`initdb`; no Windows data cluster from that failed path is used operationally.
 
-The cutover tooling added for this stage is intentionally fail-closed:
+The central PostgreSQL configuration is deliberately narrow:
+
+- the only persistent cluster is PostgreSQL `17/main`, listening on
+  `127.0.0.1:5432` with SSL enabled;
+- application access uses the `topik_app` login role with `NOSUPERUSER`,
+  `NOCREATEDB`, `NOCREATEROLE`, and `NOINHERIT`;
+- `pg_hba.conf` requires `hostssl ... cert clientcert=verify-full` for
+  `topik_app` on loopback;
+- device access uses an SSH local forward to the server loopback socket plus
+  TLS `verify-full`. The server certificate identity is `wordpress-blog`, and
+  client certificates/keys remain outside the repository under the local Stage
+  9 secrets directory;
+- source PDF/MP3 files remain device-local. PostgreSQL stores only the existing
+  logical media paths/checksums and canonical clip identity.
+
+The cutover tooling remains fail-closed:
 
 - `scripts/stage9_operational.py verify-source` rechecks the approved immutable
   SQLite SHA and every recorded source-media size/SHA before operational work;
-- provisioning/reset helpers keep credentials out of shell arguments and only
-  permit the approved Stage 9 database names;
-- `scripts/stage9_smoke.py` mutates only an explicitly supplied PostgreSQL
-  target and uses temporary hard-link media roots. It exercises human review,
-  stale conflicts, shared audio, append-only AI audit, clip export and local
-  rematerialization without writing the original SQLite or source media;
-- application environment variables are not persisted until all physical
-  PC/Laptop gates have passed. In particular, Stage 9 does not fall back to a
-  dual-write scheme and does not write new operational state to SQLite.
+- no dual write, automatic retry, or operational SQLite fallback was added;
+- `scripts/stage9_smoke.py` mutates only an explicitly supplied disposable
+  PostgreSQL target and uses temporary hard-link media roots;
+- `TOPIK_DATABASE_URL`, `TOPIK_MEDIA_ROOT`, and any credential-helper setting
+  are not persisted until the real physical PC/Laptop gate passes.
 
-### Migration and disaster-recovery evidence
+### Migration, parity, backup and disaster-recovery evidence (2026-10-07)
 
-On 2026-10-06 the immutable SQLite source was migrated into a fresh persistent
-Stage 9 candidate database. Deep validation reported `diff_count: 0` and
-`postgres_structure_diff_count: 0`, including all source row/BLOB digests and
-the append-only PostgreSQL schema contract.
+The clean central `topik` database was revalidated directly against the
+immutable SQLite source. Deep parity returned `status: ok`, `diff_count: 0`,
+and `postgres_structure_diff_count: 0`. The semantic baseline remained 70
+questions, 124 review records, and 30 candidate audio segments.
 
-Before any application cutover, a custom-format logical backup was created:
+Immediately before the pending physical cutover, a fresh custom-format logical
+backup was created and copied off the database host:
 
-- file: `topik-stage9-precutover-20261006-205501.dump`
-- size: `1,897,584` bytes
+- file: `topik-stage9-precutover-20261007-155851.dump`
+- size: `1,897,580` bytes
 - SHA-256:
-  `1d606994572fedb37ff0fea8c3394d3fb4fe27f76956e0b963f7058dbbebec59`
+  `fe822cc66a33b18dac279ec14494548e1ffa12097ef28a64d95a211f4309fdf0`
 
-That backup was restored into an entirely separate PostgreSQL 17.11 cluster on
-port `55433`. The independent restore again passed deep parity with zero data or
-structure differences. A disposable write smoke on the restored copy then
-confirmed:
+Recoverability was then proven with an independent PostgreSQL instance, not
+merely by creating a dump. A separate PostgreSQL 17 cluster named
+`topikrestore` was created with its own data directory and port `55433`, the
+backup was restored into `topik_restore`, and deep parity again returned zero
+data and structure differences. The disposable restored database then passed
+the Stage 9 mutating smoke:
 
-- a human-review write is readable and a stale second-client write conflicts;
-- shared audio updates remain atomic and stale shared-pair writes conflict;
-- Stage-7 AI audit evidence can be appended and read back through its public
-  append-only API;
-- a verified clip can be exported in one temporary media root and
-  rematerialized in another root with the same canonical SHA without adding
-  duplicate export history.
+- human review write/read succeeded and a stale second write conflicted;
+- shared-audio update/read succeeded and a stale shared-pair write conflicted;
+- Stage-7 AI audit attempt evidence appended and read back successfully;
+- first-root clip export established canonical SHA
+  `ad7c5fe7178d66315c57220af9e641d02fc789cf4aa13f81da415608644820fa`;
+- second-root rematerialization reproduced the canonical clip without adding a
+  duplicate `audio_export_35` history record.
 
-The independent restore cluster and temporary validation media were removed
-after the checks. The pre-cutover backup and its checksum file are retained as
-the Stage 9 rollback/recovery artifact.
+After those checks, the temporary restore cluster, its data/configuration
+directories, the temporary remote dump, and restore SSH tunnel were removed.
+The persistent `17/main` cluster and clean `topik` database remain. The fresh
+pre-cutover backup and checksum file are retained as the rollback/recovery
+artifact.
 
-### Current cutover gate: physical PC unavailable
+### Current cutover gate: physical PC execution path unavailable
 
-The persistent host and clean `topik` database are prepared, and the same
-disposable smoke also passed against the persistent candidate database. The
-candidate and final `topik` databases were then rebuilt from the clean
-pre-cutover backup; the final `topik` database again passed deep parity with
-zero differences.
-
-The actual two-device application cutover was **not** activated. At the final
-gate the physical PC previously identified as `DUBUDESKTOP` (`192.168.0.5`)
-was offline/unreachable from the database host: ICMP and the required network
-ports did not respond. Both available Chat On Steroids terminal connectors were
-confirmed to be the Laptop `DUBUYOGA`, so treating them as two independent
-physical clients would have produced false evidence.
+The actual two-device cutover is **not activated**. The physical PC
+`DUBUDESKTOP` (`192.168.0.5`) is now online and responds to ICMP; SMB port 445
+and RPC endpoint-mapper port 135 are reachable. However, SSH port 22 and WinRM
+5985 are unavailable, the current account cannot access the PC's `C$` share,
+and a remote Task Scheduler query is rejected with `Access is denied`. The
+available Chat On Steroids/Core/Desktop connectors all still execute on the
+Laptop `DUBUYOGA`, so none can be used as false second-device evidence.
 
 Accordingly, the Laptop's persistent user environment still has no
 `TOPIK_DATABASE_URL`, `TOPIK_MEDIA_ROOT`, or `PGPASSFILE` cutover values. This
 preserves the pre-cutover operating state and prevents a one-device-only switch.
-When the physical PC is online, Stage 9 must resume at this gate: connect both
-physical devices to the prepared clean `topik` database, repeat cross-device
-human stale-conflict/shared-audio/AI-audit/clip-rematerialization smokes, and
-only then persist both devices' PostgreSQL runtime configuration. Stage 10 must
-not begin before that physical cutover succeeds.
+Stage 9 must resume at this exact gate when a real execution path to
+`DUBUDESKTOP` is available: run cross-device human review/read, stale `409`,
+shared audio, Stage-7 audit, and Stage-8 first-export/rematerialization checks;
+only after they pass may both devices persist the PostgreSQL/media-root runtime
+configuration. Stage 10 must not begin before that physical cutover succeeds.
+
+At this gate, 45 focused Stage 6-9 regression tests pass. `compileall` and
+`git diff --check` also pass, and `stage9_operational.py verify-source` confirms
+the approved SQLite SHA plus all five original source-media hashes/sizes. A full
+135-test run completed with one pre-existing Windows localhost HTTP socket
+failure (`WinError 10053`) in
+`test_audio_segments_api.TestAudioSegmentsAPI.test_host_origin_token_and_content_type_requirements`;
+the same OS-level abort reproduced when that test was run alone. No unrelated
+HTTP behavior was changed as part of Stage 9.
