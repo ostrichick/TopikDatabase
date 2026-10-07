@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src import pilot_35
+from src.sqlite_archive import assert_sqlite_write_allowed
 from src.correct_pilot_35 import _source_snapshot
 from src.extraction_rules import RULE_VERSION, normalize_punctuation_spacing
 from src.transcript_35 import extract_transcripts
@@ -92,6 +93,7 @@ def _candidates(db: sqlite3.Connection, old: dict, new: dict) -> tuple[list, lis
 def upgrade_db(db_path: Path = pilot_35.DB_PATH, backup_path: Path | None = None) -> dict:
     """Versioned, transactional correction on a single existing SQLite DB."""
     db_path = Path(db_path).resolve()
+    assert_sqlite_write_allowed(db_path)
     if not db_path.is_file():
         raise FileNotFoundError(db_path)
     old = extract_transcripts(SOURCE, restore_visual_spacing=False)

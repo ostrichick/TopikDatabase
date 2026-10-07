@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src import audio_35, pilot_35
+from src.sqlite_archive import assert_sqlite_write_allowed
 
 
 VERSION = "silence31-unverified-v1"
@@ -54,6 +55,7 @@ def _atomic_report(path: Path, data: dict) -> None:
 def prepare_audio_db(db_path: Path = pilot_35.DB_PATH, report_path: Path = REPORT_PATH) -> dict:
     """Register 27 candidate intervals linked to 30 questions, never approve."""
     db_path = Path(db_path).resolve()
+    assert_sqlite_write_allowed(db_path)
     if not db_path.is_file():
         raise FileNotFoundError(db_path)
     analysis = audio_35.analyze_audio()

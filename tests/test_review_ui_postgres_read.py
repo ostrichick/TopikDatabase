@@ -159,7 +159,7 @@ class ReviewPostgresReadTests(unittest.TestCase):
         self.assertTrue(paper.is_relative_to(MEDIA_ROOT / "35th"))
         self.assertTrue(audio.is_relative_to(MEDIA_ROOT / "35th"))
 
-        with sqlite3.connect(SOURCE_DB) as db:
+        with sqlite3.connect(SOURCE_DB.resolve().as_uri() + "?mode=ro", uri=True) as db:
             qid = db.execute(
                 "SELECT question_id FROM question_images ORDER BY question_id LIMIT 1"
             ).fetchone()[0]

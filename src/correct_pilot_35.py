@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src import pilot_35
+from src.sqlite_archive import assert_sqlite_write_allowed
 from src.extraction_rules import (RULE_VERSION, clean_question_image,
                                   derived_image_key, normalize_punctuation_spacing)
 from src.transcript_35 import extract_transcripts
@@ -86,6 +87,7 @@ def _baseline(db: sqlite3.Connection, questions: list, groups: list,
 def correct_db(db_path: Path = pilot_35.DB_PATH, backup_path: Path | None = None) -> dict:
     """Apply exactly once, returning changed counts and the preserved backup."""
     db_path = Path(db_path).resolve()
+    assert_sqlite_write_allowed(db_path)
     if not db_path.is_file():
         raise FileNotFoundError(db_path)
     preview_paths = list(pilot_35.SESSION_DIR.glob("*.html"))

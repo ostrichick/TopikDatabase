@@ -2,8 +2,9 @@
 
 Run from the project root: py -3 src/review_ui.py
 Open the local URL printed in the terminal (port 8765 or an available fallback).
-SQLite remains the writable default. When TOPIK_DATABASE_URL is configured the
-reviewer can read and write human-review state in central PostgreSQL using
+After Stage 10 the operational reviewer requires TOPIK_DATABASE_URL and uses
+central PostgreSQL for human-review state. Explicit non-canonical SQLite paths
+remain available only for tests and offline legacy fixtures. PostgreSQL uses
 optimistic version checks plus PostgreSQL row locks. AI audit writes remain
 disabled; stage 8 keeps clip files device-local while PostgreSQL stores only
 their canonical logical path and checksum.
@@ -41,6 +42,7 @@ from src.database import (
     get_database_url,
     get_media_root,
 )
+from src.sqlite_archive import assert_sqlite_write_allowed
 
 
 ROOT = PROJECT_ROOT
@@ -83,7 +85,12 @@ class ReviewStore:
         resolved_url = database_url.strip() if isinstance(database_url, str) and database_url.strip() else None
         if not explicit_sqlite and resolved_url is None:
             resolved_url = get_database_url()
-        self.backend = "postgres" if resolved_url else "sqlite"
+        if not explicit_sqlite and resolved_url is None:
+            raise DatabaseConfigError(
+                "Stage 10 requires TOPIK_DATABASE_URL for operational review; "
+                "implicit SQLite fallback is disabled"
+            )
+        self.backend = "sqlite" if explicit_sqlite else "postgres"
         self.database_url = resolved_url
         self.db_path = Path(db_path or DB_PATH).resolve()
         if media_root is not None:
@@ -112,6 +119,8 @@ class ReviewStore:
             if not self.database_url:
                 raise DatabaseConfigError("TOPIK_DATABASE_URL is not configured")
             return PostgresWriteConnection(self.database_url) if writable else PostgresReadConnection(self.database_url)
+        if writable:
+            assert_sqlite_write_allowed(self.db_path)
         connection = sqlite3.connect(self.db_path.as_uri() + ("?mode=rw" if writable else "?mode=ro"),
                                      uri=True, timeout=5)
         connection.row_factory = sqlite3.Row
@@ -1480,7 +1489,7 @@ def main():
         if getattr(store, "backend", "sqlite") == "postgres":
             print("Central PostgreSQL review mode. Source PDFs/audio and exported clips stay device-local; review/audio/clip workflows are enabled.")
         else:
-            print("Press Ctrl+C to stop. Source PDFs and audio are read-only; only the local SQLite DB is edited.")
+            print("Explicit legacy SQLite fixture mode. The canonical Stage 10 SQLite archive cannot be edited.")
         try:
             server.serve_forever()
         except KeyboardInterrupt:

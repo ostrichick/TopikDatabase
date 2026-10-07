@@ -91,7 +91,8 @@ ports; the launcher selects an available port each time.
 
 The disposable physical-check database was removed after its reports were
 retained. The central operational `topik` database and off-host recovery backup
-remain. Stage 10 SQLite archival/freeze has not been performed.
+remain. Stage 10 SQLite archival/freeze was subsequently implemented; see
+`stage10-sqlite-freeze-2026-10-07.md` for current freeze/verification evidence.
 
 ## Operational entry point
 
@@ -107,10 +108,11 @@ powershell -NoProfile -File scripts/start_postgres_review.ps1
 
 Run this launcher after a restart, rather than assuming an old SSH tunnel is
 still running. Existing terminals may retain old environment values; the
-launcher loads the verified external configuration explicitly. A controlled
-rollback requires stopping the central reviewer and reconciling any PostgreSQL
-writes made after cutover before re-enabling a writable SQLite workflow; do not
-simply unset the URL and start an old SQLite writer.
+launcher loads the verified external configuration explicitly. After Stage 10,
+rollback must not reactivate a writable SQLite workflow. Preserve the frozen
+SQLite files unchanged and recover/reconcile PostgreSQL from retained
+PostgreSQL backups and operational records instead of writing new state into
+the archive.
 
 ## Regression discovered during the physical gate
 

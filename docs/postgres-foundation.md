@@ -1,14 +1,17 @@
 # PostgreSQL migration and central-state foundation (stages 1-7)
 
-**2026-10-07 update:** Stage 9 physical PC/Laptop cutover is now complete.
-See `stage9-cutover-2026-10-07.md` for current execution evidence, runtime entry
-point and backup boundaries. The blocked-gate notes below describe the earlier
-handoff and are retained as history. Stage 10 is still deferred.
+**2026-10-07 update:** Stage 9 physical PC/Laptop cutover is complete and the
+Stage 10 SQLite archive/freeze implementation is in place. See
+`stage9-cutover-2026-10-07.md` for cutover evidence and
+`stage10-sqlite-freeze-2026-10-07.md` for the final no-fallback/read-only
+archive contract and physical-device completion status. The blocked-gate notes
+below describe earlier handoffs and are retained as history.
 
 This foundation prepares the existing 35-I review data for a central standard
 PostgreSQL database while leaving original PDF/audio files local on each PC.
 Stages 5-7 add the reviewer read/write path and append-only AI audit runtime;
-the preserved SQLite source remains untouched until an explicit later cutover.
+the preserved SQLite source is now frozen as Stage 10 read-only historical
+recovery/reference evidence while PostgreSQL remains operational.
 
 ## Safety contract
 

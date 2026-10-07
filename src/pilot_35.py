@@ -35,6 +35,7 @@ sys.path.insert(0, str(CORPUS / ".verification_deps"))
 
 from src.extraction_rules import (RULE_VERSION, clean_question_image,
                                   derived_image_key, normalize_punctuation_spacing)
+from src.sqlite_archive import assert_sqlite_write_allowed
 
 
 def digest(path: Path) -> str:
@@ -310,6 +311,7 @@ def main() -> dict:
         atomic_json(REPORT_PATH, report)
         return report
 
+    assert_sqlite_write_allowed(DB_PATH)
     fd, temp_filename = tempfile.mkstemp(prefix=".035-I-", suffix=".sqlite.part", dir=OUTPUT_DIR)
     os.close(fd)
     try:

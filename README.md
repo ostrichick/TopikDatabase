@@ -58,14 +58,24 @@ for their canonical logical path/checksum; each PC keeps or rematerializes the
 actual MP3 under its own `TOPIK_MEDIA_ROOT`. Stage 9 operational cutover was
 completed on both physical devices on 2026-10-07 against the central
 `wordpress-blog` PostgreSQL server. See `docs/stage9-cutover-2026-10-07.md` for
-current verification and recovery evidence. Stage 10 SQLite archival remains
-deferred; the preserved source has not been modified.
+cutover evidence. Stage 10 is also implemented: the canonical SQLite database
+and its three historical `before-*.sqlite` snapshots are preserved byte-for-byte
+as read-only rollback/reference archives, implicit operational SQLite fallback
+is disabled, and operational writes remain PostgreSQL-only. See
+`docs/stage10-sqlite-freeze-2026-10-07.md` for the archive contract and current
+physical-device completion status.
 
 Start the central reviewer on either device with
 `powershell -NoProfile -File scripts/start_postgres_review.ps1`. The launcher
 loads device-local external configuration, starts the SSH forward if needed,
 and prints an available loopback URL. It never silently selects SQLite after
 a PostgreSQL connection failure.
+
+Recheck a Stage 10 archive with
+`py -3 scripts/stage10_sqlite_freeze.py verify`. The preserved SQLite files are
+read-only recovery/reference evidence only; do not re-enable them as a writable
+operational database. Explicit non-canonical SQLite paths remain available only
+for tests and offline legacy fixtures.
 
 Canonical clip export does **not** use an arbitrary `ffmpeg.exe` from `PATH`.
 On Windows it is pinned to the exact FFmpeg 7.1 binary shipped by

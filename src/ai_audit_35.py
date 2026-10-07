@@ -41,12 +41,20 @@ if __package__:
         PostgresAuditConnection,
         get_database_url,
     )
+    from .sqlite_archive import (
+        assert_sqlite_connection_write_allowed,
+        assert_sqlite_write_allowed,
+    )
 else:  # pragma: no cover - exercised by direct CLI execution.
     from database import (  # type: ignore
         DatabaseConfigError,
         DatabaseOperationError,
         PostgresAuditConnection,
         get_database_url,
+    )
+    from sqlite_archive import (  # type: ignore
+        assert_sqlite_connection_write_allowed,
+        assert_sqlite_write_allowed,
     )
 
 
@@ -150,13 +158,24 @@ def _is_postgres(db: Any) -> bool:
 def _resolve_target(db_or_path: Any = None) -> Any:
     if db_or_path is not None:
         return db_or_path
-    return get_database_url() or DB_PATH
+    target = get_database_url()
+    if target is None:
+        raise DatabaseConfigError(
+            "Stage 10 requires TOPIK_DATABASE_URL for operational AI audit; "
+            "pass --db explicitly only for an offline legacy SQLite fixture"
+        )
+    return target
 
 
 @contextmanager
 def _connection(db_or_path: Any = None, *, writable: bool = False) -> Iterator[Any]:
     db_or_path = _resolve_target(db_or_path)
-    if isinstance(db_or_path, sqlite3.Connection) or getattr(db_or_path, "ai_audit_tuple_rows", False):
+    if isinstance(db_or_path, sqlite3.Connection):
+        if writable:
+            assert_sqlite_connection_write_allowed(db_or_path)
+        yield db_or_path
+        return
+    if getattr(db_or_path, "ai_audit_tuple_rows", False):
         yield db_or_path
         return
     if _is_postgres(db_or_path):
@@ -173,6 +192,8 @@ def _connection(db_or_path: Any = None, *, writable: bool = False) -> Iterator[A
     path = Path(db_or_path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"Pilot database not found: {path}")
+    if writable:
+        assert_sqlite_write_allowed(path)
     mode = "rw" if writable else "ro"
     db = sqlite3.connect(path.as_uri() + f"?mode={mode}", uri=True, timeout=10)
     try:
@@ -2068,7 +2089,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--db",
         default=None,
-        help="Explicit SQLite path or PostgreSQL URL; defaults to TOPIK_DATABASE_URL, then local SQLite",
+        help="Explicit legacy SQLite path or PostgreSQL URL; defaults to required TOPIK_DATABASE_URL",
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
