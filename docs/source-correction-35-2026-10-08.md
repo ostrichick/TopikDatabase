@@ -135,3 +135,22 @@ The final candidate is v4:
 The independent v4 auditor receives only the immutable pass-v4 bundle and
 original cited exam files. Final status and approval must refer to v4 and
 require 70 `clear`, 0 findings and 0 uncertain verdicts.
+
+## Final approval gate
+
+`scripts/finalize_blind_audit_35.py check` validates the exact v4 run/pass
+identity, 70 unique completed subjects and 70 `clear` verdicts, zero findings,
+and a live PostgreSQL content snapshot equal to the frozen v4 SHA-256.
+Until a valid result is imported it fails closed with
+`final v4 independent blind audit result not imported`.
+Only after the check passes may `apply` use the existing versioned
+`ReviewStore.save_review` path to approve pending question records, preserving
+the original answer, choice, image, and audio data and noting the user's
+earlier manual inspection. The audio segment candidates remain outside this
+text-extraction approval.
+
+Latest code validation: **169 tests passed**, `git diff --check` passed.
+The operational PostgreSQL source snapshot has been read again and equals
+`631c4fb71784439961956b582d0e66847eb862e2c2370f49c89d5ca520057c35`.
+v4 independent verdict import and the final 45 pending approvals remain
+incomplete while `result-v4.json` is absent.
