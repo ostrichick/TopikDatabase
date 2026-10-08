@@ -1301,7 +1301,18 @@ def make_handler(store: ReviewStore):
                 self.send_header(name.replace("_", "-"), str(value))
             self.end_headers()
 
+        def _drain_body(self):
+            if not getattr(self, "_body_consumed", False):
+                self._body_consumed = True
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if 0 < length <= MAX_POST_BYTES:
+                        self.rfile.read(length)
+                except Exception:
+                    pass
+
         def _json(self, status: int, content: dict):
+            self._drain_body()
             payload = json.dumps(content, ensure_ascii=False).encode("utf-8")
             self._headers(status, "application/json; charset=utf-8", len(payload))
             self.wfile.write(payload)
@@ -1408,6 +1419,7 @@ def make_handler(store: ReviewStore):
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 < length <= MAX_POST_BYTES:
                     raise ReviewError("Review request too large or empty")
+                self._body_consumed = True
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
                 if parts[3] == "review":
                     result = store.save_review(parts[2], payload)
