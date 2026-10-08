@@ -23,7 +23,7 @@ const end = html.indexOf('      function neighbor(delta) {', start);
 assert.ok(start >= 0 && end > start, 'Could not locate the real approval handler');
 const handler = '(' + html.slice(start, end).trim() + ')';
 
-async function scenario(status, { fail = false, last = false } = {}) {
+async function scenario(status, { fail = false, last = false, slowList = false } = {}) {
   const rows = last ? [{ id: 'q70', number: 70, status: 'needs_manual_review' }]
                     : [{ id: 'q1', number: 1, status: 'needs_manual_review' },
                        { id: 'q2', number: 2, status: 'needs_manual_review' }];
@@ -46,13 +46,21 @@ async function scenario(status, { fail = false, last = false } = {}) {
       return true;
     } },
     setLoading: () => {},
+    reviewWritesBlocked: () => false,
+    audioDirty: () => false,
+    counts: () => events.push('counts'),
+    filterItems: () => events.push('filter'),
     request: async (url) => {
       events.push('post');
       if (fail) throw new Error('Simulated failed save');
-      return { ...state.detail, review_status: status, choices: [], requires_image: false };
+      return { id: state.detail.id, number: state.detail.number, review_status: status,
+               version: state.detail.version + 1, requires_image: false, saved: true };
     },
     renderDetail: () => events.push('render'),
-    loadList: async () => events.push('load'),
+    loadList: () => {
+      events.push('load');
+      return slowList ? new Promise(() => {}) : Promise.resolve();
+    },
     selectQuestion: async (id) => {
       assert.equal(state.saving, false, 'Navigate only after the save has finished');
       events.push('navigate');
@@ -72,6 +80,11 @@ async function scenario(status, { fail = false, last = false } = {}) {
   assert.equal(result.events.filter(item => item === 'post').length, 1);
   assert.equal(result.events.includes('confirm'), false);
   assert.ok(result.events.indexOf('load') < result.events.indexOf('navigate'));
+  assert.equal(result.state.detailsCache.q1.version, 1);
+  assert.equal(result.state.detailsCache.q1.stem, 'draft stays intact');
+
+  result = await scenario('verified', { slowList: true });
+  assert.equal(result.state.selectedId, 'q2', 'Background list refresh must not delay navigation');
 
   result = await scenario('verified', { fail: true });
   assert.equal(result.state.selectedId, 'q1');
@@ -482,6 +495,114 @@ const functions = vm.runInNewContext(source, context);
 
 
 class TestReviewUIFlow(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_question_list_follows_selected_item_without_scrolling_page(self):
+        script = r'''
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const html = fs.readFileSync(process.argv[1], 'utf8');
+const start = html.indexOf('      function keepSelectedQuestionVisible() {');
+const end = html.indexOf('      function filterChanged() {', start);
+assert.ok(start > 0 && end > start, 'Missing selected-question scroll helper');
+const helper = '(' + html.slice(start,end).trim() + ')';
+const selected = { left:40, right:250, top:140, bottom:180 };
+const active = { getBoundingClientRect: () => selected };
+const nav = { scrollTop:100, scrollLeft:50, scrollWidth:260, clientWidth:260,
+  scrollHeight:700, clientHeight:200, querySelector:() => active,
+  getBoundingClientRect:() => ({left:20,right:280,top:100,bottom:300}) };
+let mobile=false;
+const context = { $:id=>{assert.equal(id,'questionList');return nav;},
+  window:{matchMedia:()=>({matches:mobile})} };
+const run = vm.runInNewContext(helper,context);
+run();
+assert.equal(nav.scrollTop,100,'visible question must not jump');
+assert.equal(nav.scrollLeft,50);
+selected.top=310; selected.bottom=340;
+run();
+assert.equal(nav.scrollTop,148,'below viewport should scroll down only within question list');
+selected.top=80; selected.bottom=118;
+run();
+assert.equal(nav.scrollTop,120,'above viewport should scroll up');
+nav.scrollWidth=700; nav.clientWidth=260; nav.scrollHeight=200; nav.clientHeight=200;
+mobile=true;
+selected.top=110; selected.bottom=170; selected.left=290; selected.right=380;
+run();
+assert.equal(nav.scrollLeft,158,'mobile question strip should scroll horizontally');
+assert.equal(nav.scrollTop,120,'mobile should not scroll vertically');
+nav.querySelector=()=>null;
+run();
+assert.equal(nav.scrollLeft,158,'filtered-out selection must not move list');
+const navFn = html.slice(html.indexOf('      async function selectQuestion('),
+                         html.indexOf('      function badge(',html.indexOf('      async function selectQuestion(')));
+assert.equal((navFn.match(/keepSelectedQuestionVisible\(\);/g)||[]).length, 2,
+  'both cached and fetched selection paths should follow the active question');
+console.log('Selected-question scroll: vertical, horizontal, no-op, navigation paths PASS');
+'''
+        result = subprocess.run([shutil.which("node"), "-e", script, str(HTML)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=15,
+                                check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_optimistic_approval_navigates_before_ack_and_fails_closed(self):
+        script = r'''
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const html = fs.readFileSync(process.argv[1], 'utf8');
+const start = html.indexOf('      async function sendOptimisticApproval(');
+const end = html.indexOf('      async function sendReview(status) {', start);
+assert.ok(start >= 0 && end > start);
+const source = '(' + html.slice(start, end).trim() + ')';
+async function scenario(fail) {
+  const deferred = {};
+  deferred.promise = new Promise((resolve, reject) => { deferred.resolve = resolve; deferred.reject = reject; });
+  const question = { id:'q1', number:1, version:2, review_status:'needs_manual_review',
+    section:'reading', choices: [{number:1,text:'original'}], transcript:null };
+  const next = { id:'q2', number:2, version:0, section:'reading' };
+  const state = { detail:question, selectedId:'q1', baseline:'', items:[
+      {id:'q1',number:1,status:'needs_manual_review'}, {id:'q2',number:2,status:'needs_manual_review'}],
+    pendingReviews:new Map(), failedReviews:new Map(), detailsCache:{q2:next},
+    bundleProtectedIds:new Set(), aiHistoryLoadedIds:new Set(), csrfToken:'token', loading:false };
+  const events = [];
+  const ctx = {state, request:()=>{events.push('send');return deferred.promise;},
+    selectQuestion:async id=>{events.push('navigate');state.selectedId=id;state.detail=next;},
+    renderReviewSync:()=>{}, filterItems:()=>{}, counts:()=>{}, setLoading:()=>{}, renderDetail:()=>{},
+    notice:(m,t)=>events.push(['notice',t,m]), $:()=>({hidden:false})};
+  const submit = vm.runInNewContext(source, ctx);
+  const input = {stem:'edited',choices:['a','b','c','d'],transcript_text:null,note:'my evidence'};
+  const task = submit('q1',input,'q2');
+  assert.equal(state.pendingReviews.has('q1'),true);
+  await Promise.resolve();
+  assert.equal(state.selectedId,'q2','must display next question before acknowledgement');
+  assert.equal(state.items[0].status,'needs_manual_review','unconfirmed approval is not committed');
+  assert.equal(state.detailsCache.q1.stem,'edited','submitted draft survives navigation');
+  if (fail) deferred.reject(new Error('network uncertain'));
+  else deferred.resolve({id:'q1',version:3,review_status:'verified',saved:true});
+  await task;
+  assert.equal(state.pendingReviews.size,0);
+  if (fail) {
+    assert.equal(state.items[0].status,'needs_manual_review');
+    assert.equal(state.failedReviews.size,1);
+    assert.equal(state.failedReviews.get('q1').input.note,'my evidence');
+    assert.ok(events.some(e=>Array.isArray(e)&&e[1]==='error'));
+  } else {
+    assert.equal(state.items[0].status,'verified');
+    assert.equal(state.detailsCache.q1.version,3);
+    assert.equal(state.failedReviews.size,0);
+  }
+}
+(async()=>{await scenario(false);await scenario(true);console.log('Optimistic navigation and fail-closed reconciliation PASS')})()
+  .catch(e=>{console.error(e);process.exitCode=1});
+'''
+        result = subprocess.run([shutil.which("node"), "-e", script, str(HTML)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=15,
+                                check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS", result.stdout)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
     def test_approval_automatically_advances_only_after_success(self):
         result = subprocess.run(

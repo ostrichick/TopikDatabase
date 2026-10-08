@@ -48,6 +48,7 @@ from src.sqlite_archive import assert_sqlite_write_allowed
 ROOT = PROJECT_ROOT
 DB_PATH = ROOT / "topik-past-papers" / "derived" / "035-I-B.sqlite"
 HTML_PATH = Path(__file__).with_name("review_ui.html")
+THIRD_PASS_AUDIT_PATH = ROOT / "topik-past-papers" / "derived" / "audit35-third-pass-20261008" / "ai-audit-35-third-pass-gpt6.json"
 QUESTION_ID = re.compile(r"^035-I-[LR]-\d{3}$")
 STATUSES = ("needs_manual_review", "verified", "rejected")
 MAX_POST_BYTES = 64 * 1024
@@ -289,6 +290,21 @@ class ReviewStore:
             }
             self._list_questions_cache = result
             return result
+
+    def list_questions_fast(self) -> dict:
+        """Lightweight navigation list; AI execution history is loaded on demand."""
+        with closing(self._connect()) as db:
+            items = [dict(row) for row in db.execute(
+                "SELECT q.id, q.exam_number AS number, s.name AS section, "
+                "q.review_status AS status, q.requires_image "
+                "FROM questions q JOIN sections s ON s.id=q.section_id ORDER BY q.exam_number"
+            ).fetchall()]
+        counts = {status: sum(item["status"] == status for item in items) for status in STATUSES}
+        counts["total"] = len(items)
+        return {"items": items, "counts": counts, "ai_audit_available": False,
+                "read_only": False, "database_backend": self.backend,
+                "capabilities": {"review_write": True, "audio_segment_write": True,
+                                 "clip_export": True, "ai_audit_write": False}}
 
     @staticmethod
     def _has_ai_audit_tables(db) -> bool:
@@ -958,11 +974,82 @@ class ReviewStore:
                 return True, self._ai_audit_summary(self.database_url, question_id)
         return True, self._ai_audit_summary(db, question_id)
 
-    def get_question(self, question_id: str) -> dict:
+    def get_independent_audit_comparison(self) -> dict:
+        """Present complete archived AI judgments side by side, without mutating audit history."""
+        results: dict[str, dict] = {"gemini": {}, "chatgpt": {}}
+        sources: dict[str, dict] = {
+            "gemini": {"available": False, "label": "Gemini", "reason": "70문항 Gemini 결과를 찾지 못했습니다."},
+            "chatgpt": {"available": False, "label": "ChatGPT 3차", "reason": "3차 독립 감수 JSON이 없습니다."},
+        }
+
+        if THIRD_PASS_AUDIT_PATH.is_file():
+            payload = json.loads(THIRD_PASS_AUDIT_PATH.read_text(encoding="utf-8"))
+            entries = payload.get("results", [])
+            if (payload.get("contract_version") == "ai-audit-35-v1"
+                    and len(entries) == 70
+                    and sorted(row.get("exam_number") for row in entries) == list(range(1, 71))
+                    and all(row.get("verdict") in ("clear", "finding", "uncertain") for row in entries)):
+                results["chatgpt"] = {
+                    str(row["exam_number"]): {
+                        "verdict": row["verdict"],
+                        "summary": row.get("summary", ""),
+                        "detail": row.get("detail", ""),
+                    } for row in entries
+                }
+                sources["chatgpt"] = {"available": True, "label": "ChatGPT 3차", "model": payload.get("model", ""),
+                                       "scope": 70, "origin": "로컬 3차 독립 감수 JSON (2026-10-08)"}
+            else:
+                sources["chatgpt"]["reason"] = "3차 독립 감수 파일의 계약 또는 70문항 범위가 유효하지 않습니다."
+
+        if self.backend == "postgres":
+            with closing(self._connect()) as db:
+                rows = db.execute(
+                    "SELECT p.model_id, p.auditor_id, r.raw_json "
+                    "FROM ai_audit_results r "
+                    "JOIN ai_audit_passes p ON p.id=r.pass_id "
+                    "JOIN ai_audit_runs run ON run.id=p.run_id "
+                    "WHERE run.label=? AND p.model_id LIKE ? "
+                    "ORDER BY run.created_at DESC, p.pass_number DESC",
+                    ("gemini-full-audit-70", "gemini%"),
+                ).fetchall()
+                for row in rows:
+                    payload = json.loads(row["raw_json"])
+                    verdicts = payload.get("verdicts", [])
+                    indexed = {}
+                    for entry in verdicts:
+                        subject_id = entry.get("subject_id", "")
+                        if not QUESTION_ID.fullmatch(subject_id):
+                            continue
+                        n = str(int(subject_id[-3:]))
+                        if n in indexed:
+                            break
+                        indexed[n] = {"verdict": entry.get("verdict"),
+                                      "summary": entry.get("rationale", ""),
+                                      "confidence": entry.get("confidence")}
+                    if len(indexed) == 70 and set(indexed) == {str(n) for n in range(1, 71)} and all(
+                        entry["verdict"] in ("clear", "finding", "uncertain") for entry in indexed.values()
+                    ):
+                        results["gemini"] = indexed
+                        sources["gemini"] = {"available": True, "label": "Gemini",
+                                             "model": row["model_id"], "auditor": row["auditor_id"],
+                                             "scope": 70, "origin": "중앙 PostgreSQL gemini-full-audit-70 실행 결과"}
+                        break
+
+        questions = {}
+        for number in range(1, 71):
+            key = str(number)
+            gemini = results["gemini"].get(key)
+            chatgpt = results["chatgpt"].get(key)
+            questions[key] = {"gemini": gemini, "chatgpt": chatgpt,
+                              "disagreement": bool(gemini and chatgpt and gemini["verdict"] != chatgpt["verdict"])}
+        return {"sources": sources, "questions": questions,
+                "disagreement_count": sum(q["disagreement"] for q in questions.values())}
+
+    def get_question(self, question_id: str, *, fast: bool = False) -> dict:
         with closing(self._connect()) as db:
             row = self._question(db, question_id)
             question = dict(row)
-            _tables_present, ai_audit = self._get_ai_audit_for_question(db, question_id)
+            ai_audit = None if fast else self._get_ai_audit_for_question(db, question_id)[1]
             choices = [dict(item) for item in db.execute(
                 "SELECT number, text FROM choices WHERE question_id=? ORDER BY number", (question_id,)
             )]
@@ -1220,14 +1307,14 @@ class ReviewStore:
             raise ReviewError("A rejection reason is required")
         return payload
 
-    def save_review(self, question_id: str, payload: dict) -> dict:
+    def save_review(self, question_id: str, payload: dict, *, fast_response: bool = False) -> dict:
         self._list_questions_cache = None
         # Validate the immutable local evidence before acquiring a central row lock.
         with closing(self._connect()) as preflight:
             preflight_question = self._question(preflight, question_id)
-        for kind in (("paper", "answer", "transcript") if preflight_question["section"] == "listening"
-                     else ("paper", "answer")):
-            self.media_path(question_id, kind)
+            for kind in (("paper", "answer", "transcript") if preflight_question["section"] == "listening"
+                         else ("paper", "answer")):
+                self._media_path_with_connection(preflight, preflight_question, kind)
 
         with self._write_transaction() as db:
             question = self._lock_question(db, question_id)
@@ -1247,11 +1334,15 @@ class ReviewStore:
                    "transcript_text": old_transcript, "status": question["review_status"]}
             new = {"stem": payload["stem"], "choices": payload["choices"],
                    "transcript_text": payload["transcript_text"], "status": payload["status"]}
-            if new != old or payload["note"].strip():
+            saved = new != old or bool(payload["note"].strip())
+            if saved:
                 db.execute("UPDATE questions SET stem=?, review_status=? WHERE id=?",
                            (new["stem"], new["status"], question_id))
-                db.executemany("UPDATE choices SET text=? WHERE question_id=? AND number=?",
-                               [(text, question_id, n) for n, text in enumerate(new["choices"], 1)])
+                changed_choices = [(text, question_id, n) for n, text in enumerate(new["choices"], 1)
+                                   if text != old_choices[n - 1]]
+                if changed_choices:
+                    db.executemany("UPDATE choices SET text=? WHERE question_id=? AND number=?",
+                                   changed_choices)
                 if transcript_row:
                     db.execute("UPDATE transcripts SET dialogue_text=?, review_status=? WHERE question_id=?",
                                (new["transcript_text"], new["status"], question_id))
@@ -1262,6 +1353,12 @@ class ReviewStore:
                      json.dumps({"before": old, "after": new, "note": payload["note"]}, ensure_ascii=False),
                      datetime.now(timezone.utc).isoformat(timespec="seconds")),
                 )
+        if fast_response:
+            # The transaction has committed. This exact version is authoritative;
+            # a second full detail read is unnecessary for ordinary navigation.
+            return {"id": question_id, "number": question["exam_number"],
+                    "review_status": new["status"], "version": version + int(saved),
+                    "requires_image": bool(question["requires_image"]), "saved": saved}
         return self.get_question(question_id)
 
     def media_path(self, question_id: str, kind: str) -> Path:
@@ -1269,43 +1366,49 @@ class ReviewStore:
             raise NotFound("Unsupported media")
         with closing(self._connect()) as db:
             question = self._question(db, question_id)
-            if kind == "paper":
-                source_id = question["source_file_id"]
-            elif kind == "answer":
-                source_id = question["answer_file_id"]
-            elif kind == "transcript":
-                record = db.execute("SELECT source_file_id FROM transcripts WHERE question_id=?",
-                                    (question_id,)).fetchone()
-                source_id = record["source_file_id"] if record else None
-            else:
-                record = db.execute("SELECT source_file_id FROM audio_assets WHERE section_id=?",
-                                    (question["section_id"],)).fetchone()
-                source_id = record["source_file_id"] if record else None
-            if source_id is None:
-                raise NotFound("This question has no such source")
-            record = db.execute("SELECT relative_path,sha256,byte_size FROM source_files WHERE id=?",
-                                (source_id,)).fetchone()
-            if record is None:
-                raise NotFound("Source does not exist")
-            relative = record["relative_path"]
-            if not relative or "\\" in relative or Path(relative).is_absolute():
-                raise ReviewError("Unsafe stored source path")
-            source = self._local_media_path(relative)
-            try:
-                source.relative_to(self.source_root)
-            except ValueError as exc:
-                raise ReviewError("Source escapes the approved 35th folder") from exc
-            if not source.is_file() or source.suffix.lower() != (".mp3" if kind == "audio" else ".pdf"):
-                raise NotFound("Source file unavailable or of unexpected type")
-            if source.stat().st_size != record["byte_size"]:
-                raise Conflict("Original source file size changed; review is blocked")
-            checksum = hashlib.sha256()
-            with source.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    checksum.update(chunk)
-            if checksum.hexdigest() != record["sha256"]:
-                raise Conflict("Original source file checksum changed; review is blocked")
-            return source
+            return self._media_path_with_connection(db, question, kind)
+
+    def _media_path_with_connection(self, db, question, kind: str) -> Path:
+        """Validate media on a caller's existing read snapshot to avoid reconnects."""
+        if kind not in ("paper", "answer", "transcript", "audio"):
+            raise NotFound("Unsupported media")
+        if kind == "paper":
+            source_id = question["source_file_id"]
+        elif kind == "answer":
+            source_id = question["answer_file_id"]
+        elif kind == "transcript":
+            record = db.execute("SELECT source_file_id FROM transcripts WHERE question_id=?",
+                                (question["id"],)).fetchone()
+            source_id = record["source_file_id"] if record else None
+        else:
+            record = db.execute("SELECT source_file_id FROM audio_assets WHERE section_id=?",
+                                (question["section_id"],)).fetchone()
+            source_id = record["source_file_id"] if record else None
+        if source_id is None:
+            raise NotFound("This question has no such source")
+        record = db.execute("SELECT relative_path,sha256,byte_size FROM source_files WHERE id=?",
+                            (source_id,)).fetchone()
+        if record is None:
+            raise NotFound("Source does not exist")
+        relative = record["relative_path"]
+        if not relative or "\\" in relative or Path(relative).is_absolute():
+            raise ReviewError("Unsafe stored source path")
+        source = self._local_media_path(relative)
+        try:
+            source.relative_to(self.source_root)
+        except ValueError as exc:
+            raise ReviewError("Source escapes the approved 35th folder") from exc
+        if not source.is_file() or source.suffix.lower() != (".mp3" if kind == "audio" else ".pdf"):
+            raise NotFound("Source file unavailable or of unexpected type")
+        if source.stat().st_size != record["byte_size"]:
+            raise Conflict("Original source file size changed; review is blocked")
+        checksum = hashlib.sha256()
+        with source.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                checksum.update(chunk)
+        if checksum.hexdigest() != record["sha256"]:
+            raise Conflict("Original source file checksum changed; review is blocked")
+        return source
 
     def _local_media_path(self, relative: str) -> Path:
         """Resolve DB logical paths against the device-local TOPIK_MEDIA_ROOT."""
@@ -1438,10 +1541,15 @@ def make_handler(store: ReviewStore):
                     return self.wfile.write(contents)
                 if parts == ["api", "questions"]:
                     return self._json(200, {**store.list_questions(), "csrf_token": csrf_token})
+                if parts == ["api", "questions-fast"]:
+                    return self._json(200, {**store.list_questions_fast(), "csrf_token": csrf_token})
                 if parts == ["api", "questions-bundle"]:
                     return self._json(200, store.get_questions_bundle())
+                if parts == ["api", "independent-audits"]:
+                    return self._json(200, store.get_independent_audit_comparison())
                 if len(parts) == 3 and parts[:2] == ["api", "questions"]:
-                    return self._json(200, store.get_question(parts[2]))
+                    fast = urlsplit(self.path).query == "fast=1"
+                    return self._json(200, store.get_question(parts[2], fast=fast))
                 if len(parts) == 3 and parts[0] == "media":
                     if parts[2] == "clip":
                         return self._file(store.clip_path(parts[1]))
@@ -1474,7 +1582,8 @@ def make_handler(store: ReviewStore):
                 self._body_consumed = True
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
                 if parts[3] == "review":
-                    result = store.save_review(parts[2], payload)
+                    result = store.save_review(parts[2], payload,
+                                               fast_response=urlsplit(self.path).query == "fast=1")
                 elif parts[3] == "audio-segment":
                     result = store.save_audio_segment(parts[2], payload)
                 else:

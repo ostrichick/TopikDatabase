@@ -116,6 +116,41 @@ class TestReviewStore(unittest.TestCase):
         self.assertTrue(all(isinstance(item["version"], int) for item in ids))
         self.assertIn(self._answer(self.listening_id), (1, 2, 3, 4))
 
+    def test_fast_navigation_reads_skip_expensive_ai_audit_queries(self):
+        with patch.object(self.store, "_ai_audit_summaries", side_effect=AssertionError("AI list lookup")), \
+             patch.object(self.store, "_get_ai_audit_for_question", side_effect=AssertionError("AI detail lookup")):
+            listing = self.store.list_questions_fast()
+            detail = self.store.get_question(self.listening_id, fast=True)
+        self.assertEqual(listing["counts"]["total"], 70)
+        self.assertFalse(listing["ai_audit_available"])
+        self.assertTrue(all("ai_audit" not in item for item in listing["items"]))
+        self.assertEqual(detail["id"], self.listening_id)
+        self.assertEqual(len(detail["choices"]), 4)
+        self.assertNotIn("ai_audit", detail)
+
+    def test_fast_review_commit_ack_preserves_version_and_source_validation(self):
+        qid = self.listening_id
+        before = self.store.get_question(qid, fast=True)
+        history_before = self._history(qid)
+        no_change = self._payload(qid, status=before["review_status"], note="")
+        with patch.object(self.store, "media_path", side_effect=AssertionError("redundant connection")):
+            ack = self.store.save_review(qid, no_change, fast_response=True)
+        self.assertEqual(ack["version"], before["version"])
+        self.assertFalse(ack["saved"])
+        self.assertEqual(self._history(qid), history_before)
+
+        approved = dict(no_change, status="verified", note="Original PDF checked")
+        with patch.object(self.store, "get_question", side_effect=AssertionError("full reread")):
+            ack = self.store.save_review(qid, approved, fast_response=True)
+        self.assertEqual(ack["id"], qid)
+        self.assertEqual(ack["review_status"], "verified")
+        self.assertEqual(ack["version"], before["version"] + 1)
+        self.assertTrue(ack["saved"])
+        self.assertEqual(self._row(qid)[1], "verified")
+        self.assertEqual(len(self._history(qid)), len(history_before) + 1)
+        with self.assertRaises(review_ui.Conflict):
+            self.store.save_review(qid, approved, fast_response=True)
+
     def test_questions_bundle_covers_all_seventy_questions(self):
         bundle = self.store.get_questions_bundle()
         self.assertIsInstance(bundle, dict)

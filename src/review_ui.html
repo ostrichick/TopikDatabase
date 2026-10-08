@@ -31,6 +31,9 @@
     .progress-track { height: 9px; background: #e7ece7; border-radius: 99px; margin: 13px 0 12px; overflow: hidden; }
     .progress-fill { background: #317b5d; width: 0%; height: 100%; border-radius: inherit; transition: width .2s ease; }
     .metrics { display: flex; flex-wrap: wrap; gap: 9px 18px; font-size: .82rem; color: #58675d; }
+    .review-sync { margin-top:12px; padding:9px 12px; border-radius:9px; border:1px solid #cadde4; background:#edf4fa; font-size:.81rem; color:#314b5f; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+    .review-sync[hidden] { display:none; }
+    .review-sync.failed { border-color:#e6aaa2; background:#fff1ef; color:#8a3026; }
     .metrics b { color: #253a2f; font-variant-numeric: tabular-nums; }
     .layout { display: grid; grid-template-columns: minmax(222px, 265px) minmax(390px, 1fr) minmax(320px, .94fr); gap: 16px; align-items: start; }
     .panel { background: #fff; border: 1px solid #dde4dc; border-radius: 18px; box-shadow: 0 6px 24px #1b33250a; min-width: 0; }
@@ -80,6 +83,20 @@
     .badge.dirty { background: #eaf0fc; color: #385a9a; }
     .section-card { padding: 17px 0; border-top: 1px solid #e9eee9; }
     .section-card h3 { font-size: .98rem; margin: 0 0 11px; }
+    .comparison-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
+    .comparison-count { color:#97452e; font-size:.77rem; font-weight:750; }
+    .comparison-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-top:11px; }
+    .comparison-card { border:1px solid #dbe4db; border-radius:11px; padding:12px; min-width:0; background:#f8faf7; }
+    .comparison-card.finding { background:#fff8ec; border-color:#e7d4a6; }
+    .comparison-card h4 { margin:0 0 7px; font-size:.88rem; }
+    .comparison-card .meta { display:block; margin-top:5px; color:#6b756d; font-size:.73rem; overflow-wrap:anywhere; }
+    .comparison-card p { font-size:.82rem; line-height:1.55; overflow-wrap:anywhere; white-space:pre-wrap; margin:8px 0 0; }
+    .comparison-card strong { font-size:.79rem; }
+    .comparison-status { padding:7px 9px; border-radius:7px; background:#edf3ed; font-size:.76rem; }
+    .comparison-status.diff { background:#fff0e4; color:#9a4c2e; }
+    .comparison-filter { display:flex; align-items:center; gap:8px; font-size:.8rem; color:#45574a; margin:12px 2px 0; }
+    .comparison-filter input { width:17px; height:17px; accent-color:#276f50; }
+    @media (max-width:700px) { .comparison-grid { grid-template-columns:1fr; } }
     .small-label { display: block; margin: 13px 0 6px; font-size: .76rem; font-weight: 800; color: #637369; }
     .readonly { padding: 12px 13px; border: 1px solid #e5ece4; border-radius: 10px; background: #f8faf7; color: #475b4e; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; font-size: .86rem; }
     .readonly.empty { color: #929e94; font-style: italic; }
@@ -182,6 +199,7 @@
       <div class="progress-top"><strong>전체 검수 진행률</strong><span class="progress-label" id="progressLabel">문항을 불러오는 중…</span></div>
       <div class="progress-track" role="progressbar" aria-label="검증 완료 비율" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progressTrack"><div class="progress-fill" id="progressFill"></div></div>
       <div class="metrics"><span>전체 <b id="countAll">—</b></span><span>승인 <b id="countVerified">—</b></span><span>검토 필요 <b id="countPending">—</b></span><span>반려 <b id="countRejected">—</b></span><span>그림 포함 <b id="countImages">—</b></span></div>
+      <div class="review-sync" id="reviewSync" role="status" aria-live="polite" hidden><span id="reviewSyncText"></span><button type="button" class="btn" id="reviewFailureGo" hidden>실패 문항 확인</button></div>
     </section>
 
     <div class="layout">
@@ -197,6 +215,7 @@
             <label id="aiFilterWrap" hidden><span class="control-label">AI 감사</span><select id="aiFilter" aria-label="AI 감사 필터"><option value="all">전체</option><option value="unresolved">미해결 발견</option><option value="finding">발견 있음</option><option value="disagreement">감사 불일치</option><option value="uncertain">불확실 있음</option><option value="high">고위험</option><option value="unaudited">미감사</option></select></label>
             <label id="sortOrderWrap" hidden><span class="control-label">정렬</span><select id="sortOrder" aria-label="문항 정렬"><option value="number">문항 번호</option><option value="risk">AI 위험 높은 순</option><option value="findings">미해결 발견 많은 순</option><option value="latest">최근 AI 감사 순</option></select></label>
           </div>
+          <label class="comparison-filter"><input type="checkbox" id="comparisonDisagreement">Gemini·ChatGPT 판정 차이만 보기</label>
         </div>
         <div class="sidebar-count" id="listCount">불러오는 중…</div>
         <nav class="question-list" id="questionList" aria-label="문항 선택"></nav>
@@ -210,6 +229,11 @@
             <div class="nav-controls"><button type="button" id="previousQuestion" class="btn" aria-label="이전 문항">← 이전</button><button type="button" id="nextQuestion" class="btn" aria-label="다음 문항">다음 →</button></div>
           </div>
           <div class="badges" id="questionBadges"></div>
+          <div class="section-card" id="independentComparisonSection">
+            <div class="comparison-heading"><h3>Gemini · ChatGPT 독립 감수 비교</h3><span id="comparisonStatus" class="comparison-status" aria-live="polite">감수 결과 불러오는 중…</span></div>
+            <p class="hint">두 AI의 판정은 참고 자료입니다. 원본 PDF와 대본을 확인한 뒤 아래에서 직접 수정·승인·반려하세요.</p>
+            <div class="comparison-grid" id="comparisonCards"></div>
+          </div>
           <div class="section-card">
             <h3>공통 지시문 및 지문</h3>
             <span class="small-label">공통 지시문</span><div class="readonly" id="groupInstruction"></div>
@@ -275,8 +299,9 @@
           </div>
           <div class="media-card" id="imageSection" hidden><h3>원본 이미지</h3><div id="imageList" class="image-list"></div></div>
           <div class="media-card"><h3>초기 미리보기의 추출 주의사항</h3><p class="hint">아래 표시는 최초 HTML 추출 시점의 기록입니다. 이후 대본·음원이 등록되었을 수 있으니 현재 자료 패널을 우선 확인하세요.</p><div id="flagList" class="flags"><p class="hint">문항을 선택하면 확인할 항목이 나타납니다.</p></div></div>
-          <div class="media-card" id="aiAuditSection" hidden>
-            <h3>AI 독립 감사 · 읽기 전용</h3>
+          <details class="media-card" id="aiAuditSection">
+            <summary style="padding:14px 16px;cursor:pointer;font-weight:750">기존 AI 감사 상세 기록 펼치기</summary>
+            <div style="padding:0 16px 16px">
             <p class="ai-disclaimer">AI 감사 결과는 사람의 검수 상태·검수 이력·음원 검증 상태를 변경하지 않습니다. 사람 검수 시 우선 확인할 단서로만 사용하세요.</p>
             <div id="aiAuditSummary" class="ai-summary"></div>
             <div id="aiHistorySection" hidden>
@@ -288,7 +313,8 @@
             <ol id="aiAttemptLog" class="ai-log"></ol>
             <h4 class="ai-subhead">완료된 문항 verdict · 발견 근거</h4>
             <ol id="aiAuditLog" class="ai-log"></ol>
-          </div>
+            </div>
+          </details>
           <div class="media-card"><h3>검수 이력</h3><ol id="historyList" class="history-list"><li>기록을 불러오면 여기에 표시됩니다.</li></ol></div>
         </div>
       </aside>
@@ -305,7 +331,7 @@
       const AI_VERDICT_NAMES = { clear: '이상 없음', finding: '결함 발견', uncertain: '불확실' };
       const AI_ATTEMPT_NAMES = { succeeded: '성공', failed: '실패', timed_out: '시간 초과', invalid: '잘못된 응답' };
       const AI_RISK_NAMES = { none: '없음', low: '낮음', medium: '중간', high: '높음', critical: '매우 높음' };
-      const state = { items: [], detail: null, detailsCache: {}, bundleProtectedIds: new Set(), baseline: '', selectedId: null, visible: [], pdfTab: 'question', loading: false, saving: false, requestId: 0, csrfToken: null, aiAuditAvailable: false, readOnly: false,
+      const state = { items: [], detail: null, detailsCache: {}, bundleProtectedIds: new Set(), baseline: '', selectedId: null, visible: [], pdfTab: 'question', loading: false, saving: false, requestId: 0, csrfToken: null, aiAuditAvailable: false, independentAudits: null, independentAuditError: '', aiHistoryLoading: false, aiHistoryLoadedIds: new Set(), pendingReviews: new Map(), failedReviews: new Map(), readOnly: false,
         databaseBackend: 'sqlite', capabilities: { reviewWrite: true, audioSegmentWrite: true, clipExport: true, aiAuditWrite: false },
         audio: { available: false, saving: false, preview: null, heardSignature: null, durationMs: null, error: false } };
 
@@ -327,6 +353,10 @@
       function sourceWithPage(value, page) {
         const url = sameOriginURL(value);
         if (!url) return null;
+        // The 35-I-B pilot uses one paper, answer PDF and transcript PDF for all
+        // questions. Keep the iframe on the same document URL while paging.
+        const shared = /^\/media\/035-I-[LR]-\d{3}\/(paper|answer|transcript)$/.exec(url.pathname);
+        if (shared) url.pathname = `/media/035-I-L-001/${shared[1]}`;
         const n = Number(page);
         if (Number.isSafeInteger(n) && n > 0) url.hash = `page=${n}`;
         return url.href;
@@ -436,6 +466,7 @@
           (section === 'all' || item.section === section) &&
           (status === 'all' || item.status === status) &&
           (image === 'all' || Boolean(item.requires_image) === (image === 'yes')) &&
+          (!$('comparisonDisagreement')?.checked || state.independentAudits?.questions?.[String(item.number)]?.disagreement === true) &&
           (() => {
             const audit = aiAudit(item);
             if (ai === 'all') return true;
@@ -478,6 +509,8 @@
           const left = element('span');
           left.append(element('span', 'question-id', `${item.number}번 문항`), element('span', 'question-sub', SECTION_NAMES[item.section] || item.section));
           const right = element('span', 'item-right');
+          if (state.pendingReviews?.has(item.id)) right.append(element('span', 'ai-tag', '저장 대기'));
+          if (state.failedReviews?.has(item.id)) right.append(element('span', 'ai-tag risk-high', '저장 확인 필요'));
           if (item.requires_image) right.append(element('span', 'image-tag', '그림'));
           if (audit && (aiNumber(audit.total) > 0 || attemptTotal > 0)) {
             const aiTag = element('span', `ai-tag${unresolved ? ` risk-${risk.level}` : ''}`, `최근 V ${aiNumber(audit.total)} · A ${attemptTotal}`);
@@ -492,6 +525,26 @@
           button.append(left, right);
           button.addEventListener('click', () => selectQuestion(item.id));
           root.append(button);
+        }
+      }
+      function keepSelectedQuestionVisible() {
+        // Only move the question list's own scroll position; scrolling the
+        // element into view also scrolls the document and disrupts PDF review.
+        const list = $('questionList');
+        const active = list?.querySelector('.question-item.active');
+        if (!active) return; // Current question can be outside a filter.
+        const viewport = list.getBoundingClientRect();
+        const selected = active.getBoundingClientRect();
+        const margin = 8;
+        // Mobile layout shows a horizontal question strip instead of a list.
+        const horizontal = window.matchMedia('(max-width: 760px)').matches &&
+          list.scrollWidth > list.clientWidth;
+        if (horizontal) {
+          if (selected.left < viewport.left + margin) list.scrollLeft += selected.left - viewport.left - margin;
+          else if (selected.right > viewport.right - margin) list.scrollLeft += selected.right - viewport.right + margin;
+        } else {
+          if (selected.top < viewport.top + margin) list.scrollTop += selected.top - viewport.top - margin;
+          else if (selected.bottom > viewport.bottom - margin) list.scrollTop += selected.bottom - viewport.bottom + margin;
         }
       }
       function filterChanged() {
@@ -509,7 +562,7 @@
         return selectQuestion(next.id, { force: true });
       }
       async function loadList() {
-        const data = await request('/api/questions');
+        const data = await request('/api/questions-fast');
         if (!data || !Array.isArray(data.items)) throw new Error('문항 목록 응답 형식이 올바르지 않습니다.');
         if (typeof data.csrf_token !== 'string' || !data.csrf_token) throw new Error('검수 보안 토큰이 없습니다. 서버를 새로고침하세요.');
         state.csrfToken = data.csrf_token;
@@ -817,6 +870,22 @@
         if (state.saving || state.audio.saving || state.loading) return false;
         return !(dirty() || audioDirty()) || window.confirm('저장하지 않은 문항 또는 음원 구간 변경사항이 있습니다. 저장하지 않고 이동할까요?');
       }
+      function renderReviewSync() {
+        const banner = $('reviewSync');
+        if (!banner) return;
+        const pending = state.pendingReviews.size;
+        const failed = state.failedReviews.size;
+        banner.hidden = pending === 0 && failed === 0;
+        banner.classList.toggle('failed', failed > 0);
+        $('reviewSyncText').textContent = failed
+          ? `저장 확인이 필요한 문항 ${failed}개 · 새 승인은 일시 중단되었습니다. 서버 상태를 확인하세요.${pending ? ` · 저장 중 ${pending}개` : ''}`
+          : `중앙 DB에 저장 중 ${pending}개 · 승인 수는 저장 완료 후에만 증가합니다. 이 화면을 닫지 마세요.`;
+        $('reviewFailureGo').hidden = failed === 0;
+      }
+      function reviewWritesBlocked() {
+        const id = state.detail?.id;
+        return state.pendingReviews?.has(id) || state.failedReviews?.size > 0 || state.pendingReviews?.size >= 4;
+      }
       function updateNavigation() {
         const position = state.items.findIndex(item => item.id === state.selectedId);
         $('previousQuestion').disabled = state.saving || state.audio.saving || state.loading || position <= 0;
@@ -824,9 +893,10 @@
       }
       function setLoading(value) {
         state.loading = value;
-        $('saveDraft').disabled = state.capabilities?.reviewWrite === false || value || state.saving || !state.detail;
-        $('approveQuestion').disabled = state.capabilities?.reviewWrite === false || value || state.saving || !state.detail;
-        $('rejectQuestion').disabled = state.capabilities?.reviewWrite === false || value || state.saving || !state.detail;
+        const blocked = state.capabilities?.reviewWrite === false || value || state.saving || !state.detail || reviewWritesBlocked();
+        $('saveDraft').disabled = blocked;
+        $('approveQuestion').disabled = blocked;
+        $('rejectQuestion').disabled = blocked;
         updateNavigation();
         refreshAudioActions();
       }
@@ -849,6 +919,7 @@
           setLoading(false);
           state.pdfTab = 'question';
           renderDetail();
+          keepSelectedQuestionVisible();
           return;
         }
 
@@ -867,13 +938,14 @@
         filterItems();
         setLoading(true);
         try {
-          const detail = await request(`/api/questions/${encodeURIComponent(id)}`);
+          const detail = await request(`/api/questions/${encodeURIComponent(id)}?fast=1`);
           if (token !== state.requestId) return;
           if (!detail || detail.id !== id || !Array.isArray(detail.choices)) throw new Error('문항 상세 응답 형식이 올바르지 않습니다.');
           if (state.detailsCache) state.detailsCache[id] = detail;
           state.detail = detail;
           state.pdfTab = 'question';
           renderDetail();
+          keepSelectedQuestionVisible();
         } catch (error) {
           if (token !== state.requestId) return;
           $('editorEmpty').textContent = '문항을 불러오지 못했습니다. 목록에서 다시 선택하거나 새로고침하세요.';
@@ -883,8 +955,48 @@
         }
       }
       function badge(text, className = '') { return element('span', `badge ${className}`, text); }
+      function renderIndependentComparison() {
+        const q = state.detail;
+        const root = $('comparisonCards');
+        const status = $('comparisonStatus');
+        root.replaceChildren();
+        const item = state.independentAudits?.questions?.[String(q.number)] || {};
+        const sources = state.independentAudits?.sources || {};
+        if (item.disagreement) {
+          status.textContent = '판정 불일치 · 직접 확인 필요';
+          status.classList.add('diff');
+        } else {
+          status.textContent = state.independentAudits ? '판정 불일치 없음' : '감수 결과 확인 필요';
+          status.classList.remove('diff');
+        }
+        for (const key of ['gemini', 'chatgpt']) {
+          const src = sources[key] || {};
+          const verdict = item[key];
+          const card = element('article', `comparison-card${verdict?.verdict === 'finding' ? ' finding' : ''}`);
+          card.append(element('h4', '', src.label || (key === 'gemini' ? 'Gemini' : 'ChatGPT 3차')));
+          if (!verdict) {
+            card.append(element('p', '', src.reason || state.independentAuditError || '해당 감사 결과를 불러올 수 없습니다.'));
+          } else {
+            card.append(element('strong', '', AI_VERDICT_NAMES[verdict.verdict] || '상태 미확인'));
+            card.append(element('span', 'meta', [src.model, src.origin].filter(Boolean).join(' · ')));
+            if (verdict.verdict === 'finding') {
+              if (verdict.summary) card.append(element('p', '', verdict.summary));
+              if (verdict.detail) card.append(element('p', '', verdict.detail));
+            } else if (verdict.summary || verdict.detail) {
+              const evidence = element('details');
+              evidence.append(element('summary', '', 'AI 판단 근거 펼치기'));
+              if (verdict.summary) evidence.append(element('p', '', verdict.summary));
+              if (verdict.detail) evidence.append(element('p', '', verdict.detail));
+              card.append(evidence);
+            }
+          }
+          root.append(card);
+        }
+      }
       function renderDetail() {
         const q = state.detail;
+        const pendingOrFailed = state.pendingReviews?.has(q.id) || state.failedReviews?.has(q.id);
+        $('aiAuditSection').open = false;
         $('editorEmpty').hidden = true;
         $('editorContent').hidden = false;
         $('editorTitle').textContent = `${q.number}번 문항`;
@@ -902,24 +1014,25 @@
           badge('미저장 변경', 'dirty')
         );
         $('questionBadges').lastElementChild.id = 'dirtyBadge';
+        renderIndependentComparison();
         textBox('groupInstruction', q.group?.instruction, '공통 지시문 없음');
         textBox('groupPassage', q.group?.passage_text, '공통 지문 없음');
         textBox('rawQuestion', q.raw_question_text, '추출 원문 없음');
         $('stemInput').value = typeof q.stem === 'string' ? q.stem : '';
-        $('stemInput').disabled = state.capabilities?.reviewWrite === false;
+        $('stemInput').disabled = state.capabilities?.reviewWrite === false || pendingOrFailed;
         for (let n = 1; n <= 4; n++) {
           const choice = q.choices.find(item => Number(item.number) === n);
           $(`choice${n}`).value = choice && typeof choice.text === 'string' ? choice.text : '';
-          $(`choice${n}`).disabled = state.capabilities?.reviewWrite === false;
+          $(`choice${n}`).disabled = state.capabilities?.reviewWrite === false || pendingOrFailed;
           $(`choiceRow${n}`).classList.toggle('correct', Number(q.answer?.choice_number) === n);
         }
         $('answerNote').textContent = `정답 ${CHOICE_SYMBOLS[Number(q.answer?.choice_number) - 1] || '미확인'} · 정답표 ${q.answer_key_number ?? '—'}번 · 정답표 PDF ${q.answer?.source_pdf_page ?? '—'}쪽 · ${q.points}점`;
         $('transcriptEditorSection').hidden = q.section !== 'listening';
         $('transcriptInput').value = typeof q.transcript?.text === 'string' ? q.transcript.text : '';
-        $('transcriptInput').disabled = state.capabilities?.reviewWrite === false;
+        $('transcriptInput').disabled = state.capabilities?.reviewWrite === false || pendingOrFailed;
         $('transcriptHint').textContent = `대본 검수 상태: ${statusName(q.transcript?.review_status)} · 원본 PDF ${q.transcript?.source_pdf_page || '—'}쪽 · 오른쪽에서 음원 구간을 별도로 듣고 검증할 수 있습니다. 대본 승인과 구간 검증은 별개입니다.`;
-        $('reviewNote').value = '';
-        $('reviewNote').disabled = state.capabilities?.reviewWrite === false;
+        $('reviewNote').value = state.failedReviews?.get(q.id)?.input?.note || '';
+        $('reviewNote').disabled = state.capabilities?.reviewWrite === false || pendingOrFailed;
         state.baseline = JSON.stringify(draft());
         refreshDirty();
         renderReferences();
@@ -941,7 +1054,8 @@
         $('sourceFrame').hidden = !url;
         $('pdfFallback').hidden = !!url;
         $('pdfFallback').textContent = file.url ? '원본 PDF 주소가 로컬 서버와 다른 출처이거나 올바르지 않습니다.' : `${file.label} 파일이 제공되지 않았습니다.`;
-        if (url) $('sourceFrame').src = url;
+        // Saving the current question must not reload the same multi-page PDF.
+        if (url && $('sourceFrame').src !== url) $('sourceFrame').src = url;
         else $('sourceFrame').removeAttribute('src');
         $('sourceLink').hidden = !url;
         if (url) $('sourceLink').href = url;
@@ -1033,14 +1147,18 @@
           ? audit.latest_run : execution.latest_run && typeof execution.latest_run === 'object' ? execution.latest_run : {};
         const attempts = aiNumber(audit?.attempt_total ?? execution.attempt_total);
         const passTotal = aiNumber(latest.pass_total);
-        section.hidden = !audit || (total === 0 && attempts === 0 && passTotal === 0);
+        section.hidden = false;
         summary.replaceChildren();
         historySummary.replaceChildren();
         historyRoot.replaceChildren();
         attemptLog.replaceChildren();
         log.replaceChildren();
         historySection.hidden = true;
-        if (section.hidden) return;
+        if (!audit) {
+          summary.append(element('p', 'hint', state.aiHistoryLoading ? '상세 감사 기록 조회 중…' :
+            state.aiHistoryLoadedIds.has(state.detail.id) ? '저장된 상세 감사 기록이 없습니다.' : '상세 기록을 펼치면 해당 문항의 감사 이력을 불러옵니다.'));
+          return;
+        }
         const risk = aiRisk(audit);
         const outcomes = `이상 없음 ${aiNumber(audit.clear)} · 발견 ${aiNumber(audit.finding)} · 불확실 ${aiNumber(audit.uncertain)}`;
         const attemptCounts = audit.attempt_status_counts && typeof audit.attempt_status_counts === 'object'
@@ -1200,9 +1318,72 @@
           log.append(line);
         }
       }
+      async function sendOptimisticApproval(id, input, nextId) {
+        const before = state.detail;
+        const submitted = { version: before.version, status: 'verified', stem: input.stem,
+          choices: input.choices, transcript_text: input.transcript_text, note: input.note };
+        // Never mark it as verified until the PostgreSQL transaction commits.
+        const draftDetail = {
+          ...before, stem: input.stem,
+          choices: input.choices.map((text, index) => ({ number: index + 1, text })),
+          transcript: before.transcript ? { ...before.transcript, text: input.transcript_text } : null,
+        };
+        state.detailsCache[id] = draftDetail;
+        state.bundleProtectedIds.add(id);
+        state.pendingReviews.set(id, { input, before });
+        renderReviewSync();
+        filterItems();
+        // The request is started immediately. Navigation uses the preloaded next
+        // question and is not gated on its acknowledgement.
+        const savePromise = request(`/api/questions/${encodeURIComponent(id)}/review?fast=1`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Review-Token': state.csrfToken },
+          body: JSON.stringify(submitted),
+        });
+        state.baseline = JSON.stringify(input);
+        try {
+          await selectQuestion(nextId);
+          renderReviewSync();
+          const result = await savePromise;
+          if (!result || result.id !== id || result.review_status !== 'verified' ||
+              !Number.isSafeInteger(result.version) || result.version < before.version ||
+              (result.saved !== true && before.review_status !== 'verified')) {
+            throw new Error('승인 확인 응답이 올바르지 않습니다. 서버 상태를 확인하세요.');
+          }
+          state.detailsCache[id] = {
+            ...draftDetail, review_status: result.review_status, version: result.version,
+            transcript: draftDetail.transcript ? { ...draftDetail.transcript, review_status: result.review_status } : null,
+          };
+          state.aiHistoryLoadedIds?.delete(id);
+          const row = state.items.find(item => item.id === id);
+          if (row) row.status = result.review_status;
+          if (state.detail?.id === id) {
+            state.detail = state.detailsCache[id];
+            renderDetail();
+          }
+          if (!state.failedReviews.size) notice(`${before.number}번 승인 저장 완료`, 'success');
+        } catch (error) {
+          // Preserve the submitted text in the local cache for manual recovery.
+          // Network errors can mean the commit succeeded but the response was
+          // lost: NEVER retry automatically or claim that it was approved.
+          state.failedReviews.set(id, { input, error: error.message || String(error) });
+          notice(`${before.number}번 승인 저장을 확인하지 못했습니다. 실패 문항으로 이동해 서버 상태를 다시 확인하세요.`, 'error');
+          $('reloadConflict').hidden = true;
+          if (state.detail?.id === id) renderDetail();
+        } finally {
+          state.pendingReviews.delete(id);
+          renderReviewSync();
+          counts();
+          filterItems();
+          // A different question might currently be fetching its detail. Do
+          // not accidentally unlock navigation while that fetch is in flight.
+          if (!state.loading && !state.saving) setLoading(false);
+        }
+      }
       async function sendReview(status) {
         if (state.capabilities?.reviewWrite === false) { notice('현재 서버는 문항 검수 저장을 허용하지 않습니다.', 'info'); return; }
         if (!state.detail || state.loading || state.saving || state.audio?.saving) return;
+        if (reviewWritesBlocked()) { notice('먼저 진행 중인 저장 또는 실패 문항을 확인하세요.', 'info'); return; }
         const input = draft();
         if (status === 'rejected' && !input.note.trim()) {
           notice('반려 사유를 검수 메모에 입력해야 합니다.', 'error');
@@ -1210,33 +1391,59 @@
           return;
         }
         if (status === 'rejected' && !window.confirm('이 문항을 반려 상태로 기록할까요?')) return;
+        const currentIndex = state.items.findIndex(item => item.id === state.detail.id);
+        const nextId = status === 'verified' ? state.items[currentIndex + 1]?.id : null;
+        if (status === 'verified' && nextId && state.detailsCache?.[nextId] && !audioDirty()) {
+          return sendOptimisticApproval(state.detail.id, input, nextId);
+        }
         let nextQuestionId = null;
         let approvedNumber = null;
         state.saving = true;
         setLoading(false);
+        notice('중앙 데이터베이스에 검수 결과를 저장하는 중…', 'info');
         try {
           const id = state.detail.id;
-          const updated = await request(`/api/questions/${encodeURIComponent(id)}/review`, {
+          const updated = await request(`/api/questions/${encodeURIComponent(id)}/review?fast=1`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Review-Token': state.csrfToken },
             body: JSON.stringify({ version: state.detail.version, status, stem: input.stem, choices: input.choices, transcript_text: input.transcript_text, note: input.note })
           });
-          if (!updated || updated.id !== id || !Array.isArray(updated.choices)) throw new Error('저장 응답 형식이 올바르지 않습니다. 서버 상태를 확인하세요.');
-          state.detail = updated;
+          if (!updated || updated.id !== id || !Number.isSafeInteger(updated.version) ||
+              typeof updated.review_status !== 'string') throw new Error('저장 응답 형식이 올바르지 않습니다. 서버 상태를 확인하세요.');
+          // A short response is returned only after the database transaction
+          // commits. Reuse the detailed question already in memory.
+          const detail = Array.isArray(updated.choices) ? updated : {
+            ...state.detail, ...updated,
+            stem: input.stem,
+            choices: input.choices.map((text, index) => ({ number: index + 1, text })),
+            transcript: state.detail.transcript ? {
+              ...state.detail.transcript, text: input.transcript_text, review_status: updated.review_status
+            } : null,
+          };
+          state.detail = detail;
+          state.aiHistoryLoadedIds?.delete(id);
           state.bundleProtectedIds.add(id);
-          if (state.detailsCache) state.detailsCache[id] = updated;
+          if (state.detailsCache) state.detailsCache[id] = detail;
           const row = state.items.find(item => item.id === id);
           if (row) { row.status = updated.review_status; row.requires_image = updated.requires_image; }
-          renderDetail();
           if (status === 'verified') {
             approvedNumber = updated.number;
             const index = state.items.findIndex(item => item.id === id);
             nextQuestionId = state.items[index + 1]?.id || null;
           }
+          if (!nextQuestionId) renderDetail();
           notice(status === 'verified' ? '문항이 검수 승인되었습니다.' : status === 'rejected' ? '문항이 반려되었습니다.' : '수정 내용이 미검수 상태로 저장되었습니다.', 'success');
-          // Refresh server-side counts/list, but the successful saved detail remains visible if this fails.
-          try { await loadList(); }
-          catch (error) { notice(`문항 저장은 완료되었지만 목록을 갱신하지 못했습니다: ${error.message}`, 'info'); }
+          // Render the next question as soon as commit is confirmed. Refresh
+          // cross-tab status in the background without delaying navigation.
+          counts();
+          filterItems();
+          try {
+            Promise.resolve(loadList()).catch(error => {
+              if (state.detail?.id === id) notice(`승인은 저장됐지만 목록 갱신에 실패했습니다: ${error.message}`, 'info');
+            });
+          } catch (error) {
+            notice(`승인은 저장됐지만 목록 갱신에 실패했습니다: ${error.message}`, 'info');
+          }
         } catch (error) {
           notice(error.message, 'error', error.status === 409);
         } finally {
@@ -1258,7 +1465,27 @@
         if (item) selectQuestion(item.id);
       }
       function installHandlers() {
-        ['questionSearch', 'sectionFilter', 'statusFilter', 'imageFilter', 'aiFilter', 'sortOrder'].forEach(id => $(id).addEventListener('input', filterChanged));
+        $('aiAuditSection').addEventListener('toggle', async () => {
+          const section = $('aiAuditSection');
+          const current = state.detail;
+          if (!section.open || !current || aiAudit(current) || state.aiHistoryLoading || state.aiHistoryLoadedIds.has(current.id)) return;
+          const id = current.id;
+          state.aiHistoryLoading = true;
+          renderAiAudit();
+          try {
+            const full = await request(`/api/questions/${encodeURIComponent(id)}`);
+            state.aiHistoryLoadedIds.add(id);
+            if (state.detail?.id === id) {
+              state.detail.ai_audit = full.ai_audit || null;
+              renderAiAudit();
+            }
+          } catch (error) {
+            if (state.detail?.id === id) $('aiAuditSummary').textContent = `상세 기록 조회 실패: ${error.message}`;
+          } finally {
+            state.aiHistoryLoading = false;
+          }
+        });
+        ['questionSearch', 'sectionFilter', 'statusFilter', 'imageFilter', 'aiFilter', 'sortOrder', 'comparisonDisagreement'].forEach(id => $(id).addEventListener('input', filterChanged));
         ['stemInput', 'transcriptInput', 'reviewNote', 'choice1', 'choice2', 'choice3', 'choice4'].forEach(id => $(id).addEventListener('input', refreshDirty));
         ['audioStart', 'audioEnd'].forEach(id => $(id).addEventListener('input', audioInputChanged));
         $('audioPreview').addEventListener('click', previewAudio);
@@ -1312,14 +1539,42 @@
         $('saveDraft').addEventListener('click', () => sendReview('needs_manual_review'));
         $('approveQuestion').addEventListener('click', () => sendReview('verified'));
         $('rejectQuestion').addEventListener('click', () => sendReview('rejected'));
+        $('reviewFailureGo').addEventListener('click', async () => {
+          const first = state.failedReviews.entries().next().value;
+          if (!first) return;
+          await selectQuestion(first[0]);
+          if (state.detail?.id === first[0]) {
+            notice(`${state.detail.number}번은 서버 저장 결과를 확인하지 못했습니다. 원본 입력은 보관되어 있습니다. '서버 내용 다시 불러오기'로 현재 DB 상태를 확인하세요.`, 'error', true);
+          }
+        });
         document.querySelectorAll('.source-tab').forEach(button => button.addEventListener('click', () => { if (!state.detail) return; state.pdfTab = button.dataset.source; renderPdf(); }));
-        $('reloadConflict').addEventListener('click', () => {
+        $('reloadConflict').addEventListener('click', async () => {
           if (!state.selectedId || state.saving || state.audio.saving) return;
+          const id = state.selectedId;
+          const failed = state.failedReviews.get(id);
+          if (failed && !window.confirm('서버의 실제 저장 상태를 확인합니다. 서버에 미반영된 수정은 재조회 후 편집란에 복원되지만, 검수 메모나 내용은 제출 전 다시 확인해야 합니다. 계속할까요?')) return;
           if ((dirty() || audioDirty()) && !window.confirm('현재 문항 및 음원 구간 입력을 버리고 서버의 최신 내용을 불러올까요?')) return;
-          selectQuestion(state.selectedId, { force: true });
+          await selectQuestion(id, { force: true });
+          if (failed && state.detail?.id === id && !state.loading) {
+            const committed = state.detail.review_status === 'verified';
+            state.failedReviews.delete(id);
+            renderReviewSync();
+            renderDetail();
+            if (!committed) {
+              $('stemInput').value = failed.input.stem;
+              failed.input.choices.forEach((text, index) => { $(`choice${index + 1}`).value = text; });
+              if (state.detail.section === 'listening') $('transcriptInput').value = failed.input.transcript_text;
+              $('reviewNote').value = failed.input.note;
+              refreshDirty();
+            }
+            setLoading(false);
+            notice(committed ? `${state.detail.number}번은 DB에서 승인 상태로 확인됐습니다.` :
+              `${state.detail.number}번은 아직 승인되지 않았습니다. 보존된 입력을 다시 확인한 뒤 직접 승인하세요.`, 'info');
+          }
         });
         window.addEventListener('beforeunload', event => {
-          if (!(dirty() || audioDirty()) && !state.audio.saving) return;
+          if (!(dirty() || audioDirty()) && !state.audio.saving &&
+              state.pendingReviews.size === 0 && state.failedReviews.size === 0) return;
           event.preventDefault();
           event.returnValue = '';
         });
@@ -1355,8 +1610,18 @@
           return;
         }
         try {
+          // Start independent reads in parallel so slow audit history never blocks navigation.
+          const bundlePromise = loadBundle();
+          request('/api/independent-audits').then(data => {
+            state.independentAudits = data;
+            filterItems();
+            if (state.detail) renderIndependentComparison();
+          }).catch(error => {
+            state.independentAuditError = error.message;
+            if (state.detail) renderIndependentComparison();
+          });
           await loadList();
-          loadBundle();
+          await bundlePromise;
           if (state.items.length) await selectQuestion(state.items[0].id);
           else $('editorEmpty').textContent = '검수할 문항이 없습니다.';
         } catch (error) {
