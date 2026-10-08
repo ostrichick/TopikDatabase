@@ -23,6 +23,7 @@ corpus. AI audit evidence never means human verification or publication rights.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import sqlite3
@@ -70,6 +71,9 @@ DEFAULT_PROMPT_VERSION = "audit35-v1"
 VERDICTS = frozenset({"clear", "finding", "uncertain"})
 SEVERITIES = frozenset({"low", "medium", "high", "critical"})
 ATTEMPT_STATUSES = frozenset({"succeeded", "failed", "timed_out", "invalid"})
+TRANSCRIPT_STEM_SOURCE_IDS = frozenset(
+    f"035-I-L-{number:03d}" for number in range(25, 31)
+)
 AI_AUDIT_TABLES = frozenset({
     "ai_audit_source_snapshots", "ai_audit_runs", "ai_audit_passes",
     "ai_audit_checkpoints", "ai_audit_results", "ai_audit_attempts",
@@ -109,6 +113,33 @@ class AuditError(ValueError):
 
 class AuditConflict(AuditError):
     """The requested append-only operation conflicts with existing evidence."""
+
+
+def _field_source_refs(
+    qid: str,
+    *,
+    paper: dict[str, Any],
+    answer: dict[str, Any],
+    transcript: dict[str, Any] | None,
+    group_paper: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return field-level provenance for blind source comparison.
+
+    Listening questions 25-30 print their choices in the paper while the
+    per-question prompt is present only in the official listening transcript.
+    All other question stems in this pilot use the question paper.
+    """
+    stem_source = transcript if qid in TRANSCRIPT_STEM_SOURCE_IDS and transcript else paper
+    group_source = group_paper or paper
+    return {
+        "stem": stem_source,
+        "choices": paper,
+        "group_instruction": group_source,
+        "group_passage": group_source,
+        "images": paper,
+        "answer": answer,
+        "transcript": transcript,
+    }
 
 
 def _now() -> str:
@@ -320,6 +351,19 @@ def _source_snapshot_payload(db: sqlite3.Connection) -> dict[str, Any]:
             "points_each,passage_image_key FROM question_groups ORDER BY section_id,first_exam_number"
         )
     }
+    image_assets = [
+        {
+            "key": row[0],
+            "sha256": row[1],
+            "mime_type": row[2],
+            "source_file_id": row[3],
+            "bytes_base64": base64.b64encode(bytes(row[4])).decode("ascii"),
+        }
+        for row in db.execute(
+            "SELECT DISTINCT i.key,i.sha256,i.mime_type,i.source_file_id,i.bytes "
+            "FROM question_images qi JOIN images i ON i.key=qi.image_key ORDER BY i.key"
+        )
+    ]
     has_segments = "audio_segments" in _table_names(db)
     questions: list[dict[str, Any]] = []
     rows = db.execute(
@@ -329,6 +373,17 @@ def _source_snapshot_payload(db: sqlite3.Connection) -> dict[str, Any]:
         "a.source_pdf_page FROM questions q JOIN sections s ON s.id=q.section_id "
         "JOIN answers a ON a.question_id=q.id WHERE s.exam_id=? ORDER BY q.exam_number", (EXAM_ID,)
     ).fetchall()
+    # Shared instructions may be printed on an earlier page than a later
+    # question in the same group. Anchor them to the group's first page.
+    group_paper_pages: dict[str, tuple[int, int]] = {}
+    for row in rows:
+        group_id = row[3]
+        if group_id is None:
+            continue
+        previous = group_paper_pages.get(group_id)
+        candidate = (row[4], row[7])
+        if previous is None or candidate[1] < previous[1]:
+            group_paper_pages[group_id] = candidate
     for row in rows:
         qid = row[0]
         transcript = db.execute(
@@ -354,6 +409,15 @@ def _source_snapshot_payload(db: sqlite3.Connection) -> dict[str, Any]:
                     "start_ms": audio[0], "end_ms": audio[1], "source_sha256": audio[2],
                     "source_file_id": audio[3], "source_path": source_paths.get(audio[3]),
                 }
+        paper_ref = {"relative_path": source_paths.get(row[4]), "page": row[7]}
+        answer_ref = {"relative_path": source_paths.get(row[16]), "page": row[17]}
+        transcript_ref = ({"relative_path": source_paths.get(transcript[0]), "page": transcript[1]}
+                          if transcript else None)
+        group_ref = (
+            {"relative_path": source_paths.get(group_paper_pages[row[3]][0]),
+             "page": group_paper_pages[row[3]][1]}
+            if row[3] in group_paper_pages else paper_ref
+        )
         question = {
             "id": qid,
             "section": row[2],
@@ -376,11 +440,14 @@ def _source_snapshot_payload(db: sqlite3.Connection) -> dict[str, Any]:
             } if transcript else None),
             "audio_candidate": segment,
             "source_refs": {
-                "paper": {"relative_path": source_paths.get(row[4]), "page": row[7]},
-                "answer": {"relative_path": source_paths.get(row[16]), "page": row[17]},
-                "transcript": ({"relative_path": source_paths.get(transcript[0]), "page": transcript[1]}
-                               if transcript else None),
+                "paper": paper_ref,
+                "answer": answer_ref,
+                "transcript": transcript_ref,
             },
+            "field_sources": _field_source_refs(
+                qid, paper=paper_ref, answer=answer_ref,
+                transcript=transcript_ref, group_paper=group_ref
+            ),
             "extraction_origin": row[13],
             "preview_flags": json.loads(row[14]),
         }
@@ -391,6 +458,7 @@ def _source_snapshot_payload(db: sqlite3.Connection) -> dict[str, Any]:
     return {
         "exam": {"id": exam[0], "session": exam[1], "level": exam[2], "booklet": exam[3]},
         "sources": sources,
+        "image_assets": image_assets,
         "questions": questions,
     }
 
@@ -537,7 +605,12 @@ def _insert_pass(
         perspective,
         "Perform an independent evidence-based audit of the frozen subjects. Do not use prior AI conclusions.",
     )
-    source = {"exam": snapshot["exam"], "sources": snapshot["sources"], "questions": subjects}
+    source = {
+        "exam": snapshot["exam"],
+        "sources": snapshot["sources"],
+        "image_assets": snapshot.get("image_assets", []),
+        "questions": subjects,
+    }
     bundle = {
         "contract_version": CONTRACT_VERSION,
         "schema_version": RESULT_SCHEMA_VERSION,
@@ -559,7 +632,10 @@ def _insert_pass(
                 "When checking an answer sheet, use answer_key_number as the source-local answer-row number "
                 "and answer.source_pdf_page/source_refs.answer as its citation. exam_number is the global exam "
                 "number and may differ when a source renumbers sections; never assume the answer sheet row "
-                "must equal exam_number."
+                "must equal exam_number. Use each subject's field_sources mapping for field-level provenance; "
+                "in particular, a stem may cite the listening transcript even when choices cite the paper. "
+                "For image-linked questions, source.image_assets contains the exact active DB image payload "
+                "as base64 keyed by subject.images[].key; verify its SHA-256 and compare it with field_sources.images."
             ),
             "calibration": (
                 "Use uncertain when the cited evidence is insufficient or internally conflicting. Do not pick a "
