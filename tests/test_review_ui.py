@@ -128,6 +128,103 @@ class TestReviewStore(unittest.TestCase):
         self.assertEqual(len(detail["choices"]), 4)
         self.assertNotIn("ai_audit", detail)
 
+    def test_fast_navigation_bulk_manual_review_evidence_distinguishes_current_and_historical(self):
+        qid_current, qid_superseded, qid_unproven = [
+            item["id"] for item in self.store.list_questions_fast()["items"][:3]
+        ]
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "DELETE FROM review_records WHERE subject_type='question' AND subject_id IN (?,?,?)",
+                (qid_current, qid_superseded, qid_unproven),
+            )
+            conn.executemany(
+                "UPDATE questions SET review_status='verified' WHERE id=?",
+                [(qid_current,), (qid_superseded,), (qid_unproven,)],
+            )
+            ids = []
+            for subject_id in (qid_current, qid_superseded):
+                ids.append(conn.execute(
+                    "INSERT INTO review_records(subject_type, subject_id, status, reviewer, scope, evidence, reviewed_at) "
+                    "VALUES('question',?,'verified','local_reviewer','manual_question_review','{}',?)",
+                    (subject_id, "2026-10-08T12:00:00+00:00"),
+                ).lastrowid)
+            conn.execute(
+                "INSERT INTO review_records(subject_type, subject_id, status, reviewer, scope, evidence, reviewed_at) "
+                "VALUES('question',?,'verified',NULL,'automatic_correction','{}',?)",
+                (qid_superseded, "2026-10-08T12:30:00+00:00"),
+            )
+            conn.commit()
+
+        original_connect = self.store._connect
+        sql_calls = []
+
+        class CountingConnection:
+            def __init__(self, db):
+                self.db = db
+
+            def execute(self, sql, params=()):
+                sql_calls.append(sql)
+                return self.db.execute(sql, params)
+
+            def close(self):
+                self.db.close()
+
+        with patch.object(self.store, "_connect",
+                          side_effect=lambda: CountingConnection(original_connect())):
+            listing = self.store.list_questions_fast()
+        self.assertEqual(len(sql_calls), 1, "The 70-question listing must use a bulk query")
+        self.assertIn("ROW_NUMBER()", sql_calls[0])
+        self.assertEqual(len(listing["items"]), 70)
+        rows = {item["id"]: item for item in listing["items"]}
+        self.assertEqual(rows[qid_current]["review_version"], 1)
+        self.assertEqual(rows[qid_current]["status"], "verified")
+        self.assertEqual(rows[qid_current]["last_human_review"]["id"], ids[0])
+        self.assertEqual(rows[qid_current]["last_human_review"]["reviewed_at"],
+                         "2026-10-08T12:00:00+00:00")
+        self.assertTrue(rows[qid_current]["last_human_review"]["approved"])
+        self.assertTrue(rows[qid_current]["last_human_review"]["is_current"])
+        self.assertEqual(rows[qid_superseded]["review_version"], 2)
+        self.assertEqual(rows[qid_superseded]["last_human_review"]["id"], ids[1])
+        self.assertEqual(rows[qid_superseded]["last_human_review"]["status"], "verified")
+        self.assertFalse(rows[qid_superseded]["last_human_review"]["approved"])
+        self.assertFalse(rows[qid_superseded]["last_human_review"]["is_current"])
+        self.assertEqual(rows[qid_unproven]["status"], "verified")
+        self.assertIsNone(rows[qid_unproven]["last_human_review"])
+        self.assertEqual(rows[qid_unproven]["review_version"], 0)
+
+    def test_fast_navigation_query_works_with_postgres_style_dict_rows(self):
+        # Exercise the shared SQL with an adapter returning psycopg-like
+        # mappings. No live PostgreSQL service or data is modified.
+        expected = self.store.list_questions_fast()
+
+        class DictCursor:
+            def __init__(self, cursor):
+                self.cursor = cursor
+
+            def fetchall(self):
+                return [dict(row) for row in self.cursor.fetchall()]
+
+        class PostgresStyleRead:
+            backend = "postgres"
+
+            def __init__(self, db_path):
+                self.db = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+                self.db.row_factory = sqlite3.Row
+
+            def execute(self, sql, params=()):
+                return DictCursor(self.db.execute(sql, params))
+
+            def close(self):
+                self.db.close()
+
+        with patch.object(self.store, "backend", "postgres"), \
+             patch.object(self.store, "_connect",
+                          side_effect=lambda: PostgresStyleRead(self.db_path)):
+            listing = self.store.list_questions_fast()
+        self.assertEqual(listing["database_backend"], "postgres")
+        self.assertEqual(listing["items"], expected["items"])
+        self.assertEqual(listing["counts"], expected["counts"])
+
     def test_fast_review_commit_ack_preserves_version_and_source_validation(self):
         qid = self.listening_id
         before = self.store.get_question(qid, fast=True)
@@ -136,7 +233,11 @@ class TestReviewStore(unittest.TestCase):
         with patch.object(self.store, "media_path", side_effect=AssertionError("redundant connection")):
             ack = self.store.save_review(qid, no_change, fast_response=True)
         self.assertEqual(ack["version"], before["version"])
+        self.assertEqual(ack["request_version"], before["version"])
+        self.assertEqual(ack["saved_version"], before["version"])
         self.assertFalse(ack["saved"])
+        self.assertIsNone(ack["saved_review_id"])
+        self.assertIsNone(ack["saved_reviewed_at"])
         self.assertEqual(self._history(qid), history_before)
 
         approved = dict(no_change, status="verified", note="Original PDF checked")
@@ -145,11 +246,138 @@ class TestReviewStore(unittest.TestCase):
         self.assertEqual(ack["id"], qid)
         self.assertEqual(ack["review_status"], "verified")
         self.assertEqual(ack["version"], before["version"] + 1)
+        self.assertEqual(ack["request_version"], before["version"])
+        self.assertEqual(ack["saved_version"], before["version"] + 1)
         self.assertTrue(ack["saved"])
+        self.assertIsInstance(ack["saved_review_id"], int)
+        self.assertTrue(ack["saved_reviewed_at"])
+        self.assertEqual(ack["last_human_review"]["id"], ack["saved_review_id"])
+        self.assertEqual(ack["last_human_review"]["status"], "verified")
+        self.assertEqual(ack["last_human_review"]["reviewed_at"], ack["saved_reviewed_at"])
+        self.assertTrue(ack["last_human_review"]["is_current"])
+        self.assertTrue(ack["last_human_review"]["approved"])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            actual = conn.execute(
+                "SELECT id, reviewed_at FROM review_records WHERE subject_type='question' "
+                "AND subject_id=? AND scope='manual_question_review' ORDER BY id DESC LIMIT 1",
+                (qid,),
+            ).fetchone()
+        self.assertEqual((ack["saved_review_id"], ack["saved_reviewed_at"]), actual)
         self.assertEqual(self._row(qid)[1], "verified")
         self.assertEqual(len(self._history(qid)), len(history_before) + 1)
+        no_op_again = dict(approved, version=ack["version"], note="")
+        after_noop = self.store.save_review(qid, no_op_again, fast_response=True)
+        self.assertFalse(after_noop["saved"])
+        self.assertEqual(after_noop["request_version"], ack["version"])
+        self.assertEqual(after_noop["version"], ack["version"])
+        self.assertEqual(after_noop["last_human_review"], ack["last_human_review"])
+        self.assertIsNone(after_noop["saved_review_id"])
         with self.assertRaises(review_ui.Conflict):
             self.store.save_review(qid, approved, fast_response=True)
+
+    def test_independent_comparison_uses_actual_audit_provenance_and_unknown_archive_time(self):
+        # The complete 70-item fixtures use the production SQLite schema, and
+        # live only in this test's private SQLite backup.
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.executescript((ROOT / "db" / "schema.sql").read_text(encoding="utf-8"))
+            question_ids = [row[0] for row in conn.execute(
+                "SELECT id FROM questions ORDER BY exam_number"
+            )]
+            self.assertEqual(len(question_ids), 70)
+            run_time = "2026-10-07T04:20:00+00:00"
+            pass_time = "2026-10-07T04:21:00+00:00"
+            result_time = "2026-10-07T04:25:00+00:00"
+            snapshot_time = "2026-10-07T04:19:00+00:00"
+            conn.execute(
+                "INSERT INTO ai_audit_source_snapshots"
+                "(snapshot_sha256, exam_id, snapshot_json, created_at) VALUES (?,?,?,?)",
+                ("a" * 64, "035-I-B", "{}", snapshot_time),
+            )
+            conn.execute(
+                "INSERT INTO ai_audit_runs"
+                "(id, exam_id, snapshot_sha256, contract_version, label, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                ("run-gemini", "035-I-B", "a" * 64, "ai-audit-35-v1",
+                 "gemini-full-audit-70", run_time),
+            )
+            conn.execute(
+                "INSERT INTO ai_audit_passes"
+                "(id, run_id, pass_number, auditor_id, model_id, prompt_version, "
+                "perspective, blind, input_sha256, input_json, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                ("pass-gemini", "run-gemini", 1, "gemini-independent", "gemini-test-model",
+                 "audit-prompts-1", "blind", 1, "b" * 64, "{}", pass_time),
+            )
+            gemini_result = {"verdicts": [
+                {"subject_id": subject_id, "verdict": "finding" if i == 0 else "clear",
+                 "rationale": "그대로 보존: 원본 근거", "confidence": 0.82}
+                for i, subject_id in enumerate(question_ids)
+            ]}
+            conn.execute(
+                "INSERT INTO ai_audit_results"
+                "(pass_id, result_sha256, completed_subject_ids_json, notes_json, raw_json, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                ("pass-gemini", "c" * 64, json.dumps(question_ids), "[]",
+                 json.dumps(gemini_result, ensure_ascii=False), result_time),
+            )
+            conn.commit()
+
+        archive = Path(self.sandbox.name) / "third-pass.json"
+        chatgpt_result = {
+            "contract_version": "ai-audit-35-v1", "model": "gpt-6",
+            "auditor": "chatgpt-independent",
+            "results": [
+                {"exam_number": number, "verdict": "clear",
+                 "summary": "원문 유지", "detail": "세부 내용은 변형하지 않음"}
+                for number in range(1, 71)
+            ],
+        }
+        archive.write_text(json.dumps(chatgpt_result, ensure_ascii=False), encoding="utf-8")
+        history_before = self._history(self.listening_id)
+        with patch.object(review_ui, "THIRD_PASS_AUDIT_PATH", archive):
+            comparison = self.store.get_independent_audit_comparison()
+        self.assertEqual(len(comparison["questions"]), 70)
+        sources = comparison["sources"]
+        self.assertEqual(sources["gemini"]["run_id"], "run-gemini")
+        self.assertEqual(sources["gemini"]["pass_id"], "pass-gemini")
+        self.assertEqual(sources["gemini"]["run_created_at"], run_time)
+        self.assertEqual(sources["gemini"]["pass_created_at"], pass_time)
+        self.assertEqual(sources["gemini"]["result_created_at"], result_time)
+        self.assertEqual(sources["gemini"]["source_snapshot_created_at"], snapshot_time)
+        self.assertEqual(sources["gemini"]["source_snapshot_sha256"], "a" * 64)
+        self.assertEqual(sources["gemini"]["input_sha256"], "b" * 64)
+        self.assertEqual(sources["gemini"]["result_sha256"], "c" * 64)
+        self.assertTrue(sources["gemini"]["timestamp_verified"])
+        gemini = comparison["questions"]["1"]["gemini"]
+        self.assertEqual(gemini["created_at"], result_time)
+        self.assertEqual(gemini["snapshot_created_at"], snapshot_time)
+        self.assertTrue(gemini["timestamp_verified"])
+        self.assertTrue(gemini["snapshot_timestamp_verified"])
+        self.assertEqual(gemini["summary"], "그대로 보존: 원본 근거")
+        self.assertEqual(gemini["verdict"], "finding")
+        chatgpt = comparison["questions"]["1"]["chatgpt"]
+        self.assertEqual(chatgpt["created_at"], "unknown")
+        self.assertEqual(chatgpt["snapshot_created_at"], "unknown")
+        self.assertFalse(chatgpt["timestamp_verified"])
+        self.assertFalse(chatgpt["snapshot_timestamp_verified"])
+        self.assertEqual(chatgpt["summary"], "원문 유지")
+        self.assertEqual(chatgpt["detail"], "세부 내용은 변형하지 않음")
+        self.assertEqual(sources["chatgpt"]["created_at"], "unknown")
+        self.assertFalse(sources["chatgpt"]["timestamp_verified"])
+        self.assertEqual(sources["chatgpt"]["source_sha256"], _digest(archive))
+        self.assertEqual(comparison["disagreement_count"], 1)
+        self.assertEqual(self._history(self.listening_id), history_before)
+
+    def test_independent_timestamp_only_trusts_explicit_timezone_aware_source(self):
+        for value, expected in (
+            ("2026-10-08T12:00:00+00:00", True),
+            ("2026-10-08T21:00:00Z", True),
+            ("2026-10-08T21:00:00", False),
+            ("unknown", False),
+            (None, False),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(self.store._audit_timestamp_verified(value), expected)
 
     def test_questions_bundle_covers_all_seventy_questions(self):
         bundle = self.store.get_questions_bundle()

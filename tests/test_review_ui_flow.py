@@ -46,6 +46,13 @@ async function scenario(status, { fail = false, last = false, slowList = false }
       return true;
     } },
     setLoading: () => {},
+    verifyReviewAck: (result,id,wanted,submitted) => {
+      assert.equal(result?.id,id);
+      assert.equal(result.review_status,wanted);
+      assert.equal(result.request_version,submitted.version);
+      assert.equal(result.version,submitted.version + Number(result.saved));
+      return result;
+    },
     reviewWritesBlocked: () => false,
     audioDirty: () => false,
     counts: () => events.push('counts'),
@@ -54,7 +61,7 @@ async function scenario(status, { fail = false, last = false, slowList = false }
       events.push('post');
       if (fail) throw new Error('Simulated failed save');
       return { id: state.detail.id, number: state.detail.number, review_status: status,
-               version: state.detail.version + 1, requires_image: false, saved: true };
+               request_version:state.detail.version, version: state.detail.version + 1, requires_image: false, saved: true };
     },
     renderDetail: () => events.push('render'),
     loadList: () => {
@@ -138,10 +145,13 @@ function extractFunction(name) {
 
 function fakeNode() {
   return {
-    children: [], className: '', textContent: '', hidden: false, value: '',
+    children: [], className: '', textContent: '', hidden: false, value: '', dataset: {},
     classList: { toggle() {} },
     append(...nodes) { this.children.push(...nodes); },
     replaceChildren(...nodes) { this.children = [...nodes]; },
+    insertBefore(node, next) { this.children = this.children.filter(child => child !== node); const i=this.children.indexOf(next); this.children.splice(i<0?this.children.length:i,0,node); },
+    removeChild(node) { this.children = this.children.filter(child => child !== node); },
+    get lastElementChild() { return this.children[this.children.length-1]; },
     setAttribute() {},
     addEventListener() {},
   };
@@ -177,6 +187,7 @@ const context = {
   SECTION_NAMES: { listening: '듣기', reading: '읽기' },
   AI_RISK_NAMES: { low: '낮음', medium: '중간', high: '높음' },
   statusName: value => value,
+  reviewIndicator: item => ({kind:item.status === 'verified'?'verified':'pending',reason:'test'}),
   selectQuestion: () => {},
 };
 const names = ['aiAudit', 'aiNumber', 'aiRisk', 'aiTimestamp', 'element', 'filterItems'];
@@ -185,6 +196,9 @@ const filterItems = vm.runInNewContext(source, context);
 
 filterItems();
 assert.deepEqual(Array.from(state.visible, item => item.id), ['q1', 'q2', 'q3']);
+const focusedButton = controls.questionList.children[0];
+filterItems();
+assert.equal(controls.questionList.children[0],focusedButton,'refresh must preserve button identity and focus');
 controls.aiFilter.value = 'unresolved';
 filterItems();
 assert.deepEqual(Array.from(state.visible, item => item.id), ['q1']);
@@ -374,10 +388,13 @@ function extractFunction(name) {
 }
 function fakeNode() {
   return {
-    children: [], className: '', textContent: '', value: '', hidden: false,
+    children: [], className: '', textContent: '', value: '', hidden: false, dataset: {},
     classList: { toggle() {} },
     append(...nodes) { this.children.push(...nodes); },
     replaceChildren(...nodes) { this.children = [...nodes]; },
+    insertBefore(node, next) { this.children = this.children.filter(child => child !== node); const i=this.children.indexOf(next); this.children.splice(i<0?this.children.length:i,0,node); },
+    removeChild(node) { this.children = this.children.filter(child => child !== node); },
+    get lastElementChild() { return this.children[this.children.length-1]; },
     setAttribute() {}, addEventListener() {},
   };
 }
@@ -407,6 +424,7 @@ const context = {
   document: { createElement: () => fakeNode() },
   SECTION_NAMES:{reading:'읽기'}, AI_RISK_NAMES:{none:'없음',high:'높음'},
   statusName:v=>v, aiAudit:item=>item?.ai_audit||null, aiNumber:v=>Number(v)||0,
+  reviewIndicator:item=>({kind:item.status==='verified'?'verified':'pending',reason:'test'}),
   aiRisk:a=>({score:Number(a?.risk_score)||0,level:a?.risk_level||'none'}), aiTimestamp:()=>0,
   element:(tag,className,text)=>Object.assign(fakeNode(),{className,textContent:text===undefined?'':String(text)}),
   canNavigate:()=>true,
@@ -496,6 +514,105 @@ const functions = vm.runInNewContext(source, context);
 
 class TestReviewUIFlow(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_pdf_repeated_render_keeps_existing_source(self):
+        script = r'''
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const html=fs.readFileSync(process.argv[1],'utf8');
+const start=html.indexOf('      function renderPdf() {');
+const end=html.indexOf('      function renderReferences() {',start);
+assert.ok(start>0 && end>start);
+let writes=0,removals=0;
+const frame={hidden:true,_src:'',get src(){return this._src;},set src(value){writes++;this._src=value;},
+  removeAttribute(name){assert.equal(name,'src');removals++;this._src='';}};
+const node=()=>({hidden:false,textContent:'',removeAttribute(){},setAttribute(){},classList:{toggle(){}}});
+const controls={sourceFrame:frame,pdfFallback:node(),sourceLink:node(),sourcePage:node()};
+const state={pdfTab:'question',detail:{source_pdf_url:'/media/q1/paper',source_pdf_page:1,
+  answer:{source_pdf_page:2},section:'reading'}};
+const ctx={state,$:id=>controls[id],sourceWithPage:(url,page)=>url?'http://127.0.0.1:8577'+url+'#page='+page:null,
+  document:{querySelectorAll:()=>[]}};
+const render=vm.runInNewContext('('+html.slice(start,end).trim()+')',ctx);
+render();render();
+assert.equal(writes,1,'same PDF must be assigned only once');
+assert.equal(removals,0,'same PDF must never clear iframe src');
+state.detail.source_pdf_page=3;
+render();
+assert.equal(writes,2,'different original PDF page should update hash');
+state.detail.source_pdf_url=null;
+render();
+assert.equal(removals,1,'unavailable PDF should clear iframe');
+console.log('PDF source lifecycle PASS');
+'''
+        result = subprocess.run([shutil.which("node"), "-e", script, str(HTML)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=15,
+                                check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_review_indicator_ack_and_media_contract(self):
+        script = r'''
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const html = fs.readFileSync(process.argv[1], 'utf8');
+function getFn(name, next) {
+  let start = html.indexOf('      function ' + name + '(');
+  assert.ok(start>=0,name);
+  let end = html.indexOf('      function ' + next + '(',start+1);
+  assert.ok(end>start,next);
+  return html.slice(start,end);
+}
+const approved = {id:'q1',number:1,status:'verified',last_human_review:{status:'verified',
+  reviewed_at:'2026-10-08T10:00:00+00:00',is_current:true}};
+const pending = {...approved,status:'needs_manual_review'};
+const state = {independentAudits:{questions:{'1':{gemini:{verdict:'finding',
+  created_at:'2026-10-08T09:00:00+00:00', snapshot_created_at:'2026-10-08T08:00:00+00:00',
+  timestamp_verified:true,snapshot_timestamp_verified:true}}}}};
+const context = {state,aiNumber:x=>Number(x)||0,aiAudit:i=>i.ai_audit||null,Date};
+const reviewIndicator = vm.runInNewContext('('+getFn('reviewIndicator','aiConvergenceText').trim()+')',context);
+assert.equal(reviewIndicator(pending).kind,'problem','AI finding without human approval must be red');
+assert.equal(reviewIndicator(approved).kind,'verified','human approval after AI finding must be green');
+const report = state.independentAudits.questions['1'].gemini;
+report.created_at='2026-10-08T11:00:00+00:00';
+assert.equal(reviewIndicator(approved).kind,'verified','late audit of pre-approval snapshot must not reopen');
+report.snapshot_created_at='2026-10-08T10:30:00+00:00';
+assert.equal(reviewIndicator(approved).kind,'problem','verified new finding and postapproval snapshot must reopen');
+report.snapshot_timestamp_verified=false;
+assert.equal(reviewIndicator(approved).kind,'verified','unverified snapshot time cannot reopen');
+assert.equal(reviewIndicator({...pending,status:'rejected'}).kind,'problem');
+state.independentAudits.questions['1']={chatgpt:{verdict:'finding',created_at:'unknown',timestamp_verified:false}};
+assert.equal(reviewIndicator(approved).kind,'verified','unknown ChatGPT timestamp cannot reopen');
+assert.equal(reviewIndicator(pending).kind,'problem');
+state.independentAudits.questions['1']={};
+assert.equal(reviewIndicator(pending).kind,'pending');
+const ack = vm.runInNewContext('('+getFn('verifyReviewAck','matchesReviewInput').trim()+')');
+const input = {version:2};
+const result = {id:'q1',review_status:'verified',request_version:2,version:3,saved:true};
+assert.equal(ack(result,'q1','verified',input),result);
+for (const invalid of [{...result,id:'q9'},{...result,version:2},{...result,request_version:0},
+   {...result,saved:false},{...result,review_status:'rejected'}]) {
+  assert.throws(()=>ack(invalid,'q1','verified',input));
+}
+const matches = vm.runInNewContext('('+getFn('matchesReviewInput','aiAudit').trim()+')');
+assert.equal(matches({stem:'S',section:'listening',choices:[{number:1,text:'a'}],transcript:{text:'t'}},
+  {stem:'S',choices:['a'],transcript_text:'t'}),true);
+assert.equal(matches({stem:'S',section:'listening',choices:[{number:1,text:'a'}],transcript:{text:'old'}},
+  {stem:'S',choices:['a'],transcript_text:'t'}),false);
+const sharedAudio = vm.runInNewContext('('+getFn('sourceWithSharedAudio','statusName').trim()+')',{
+  sameOriginURL:x=>new URL(x,'http://127.0.0.1:8577/')});
+assert.equal(sharedAudio('/media/035-I-L-025/audio').href,sharedAudio('/media/035-I-L-026/audio').href);
+assert.equal(sharedAudio('/media/035-I-L-027/audio').pathname,'/media/035-I-L-001/audio');
+console.log('Review indicator, strict ack, draft comparison, shared-media URL PASS');
+'''
+        result = subprocess.run([shutil.which("node"), "-e", script, str(HTML)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=15,
+                                check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
     def test_question_list_follows_selected_item_without_scrolling_page(self):
         script = r'''
 const assert = require('node:assert/strict');
@@ -568,6 +685,10 @@ async function scenario(fail) {
     bundleProtectedIds:new Set(), aiHistoryLoadedIds:new Set(), csrfToken:'token', loading:false };
   const events = [];
   const ctx = {state, request:()=>{events.push('send');return deferred.promise;},
+    verifyReviewAck:(result,id,status,submitted)=>{
+      assert.equal(result.id,id);assert.equal(result.review_status,status);
+      assert.equal(result.request_version,submitted.version);return result;
+    },
     selectQuestion:async id=>{events.push('navigate');state.selectedId=id;state.detail=next;},
     renderReviewSync:()=>{}, filterItems:()=>{}, counts:()=>{}, setLoading:()=>{}, renderDetail:()=>{},
     notice:(m,t)=>events.push(['notice',t,m]), $:()=>({hidden:false})};
@@ -580,7 +701,7 @@ async function scenario(fail) {
   assert.equal(state.items[0].status,'needs_manual_review','unconfirmed approval is not committed');
   assert.equal(state.detailsCache.q1.stem,'edited','submitted draft survives navigation');
   if (fail) deferred.reject(new Error('network uncertain'));
-  else deferred.resolve({id:'q1',version:3,review_status:'verified',saved:true});
+  else deferred.resolve({id:'q1',request_version:2,version:3,review_status:'verified',saved:true});
   await task;
   assert.equal(state.pendingReviews.size,0);
   if (fail) {

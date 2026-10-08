@@ -141,7 +141,9 @@ class ReviewPostgresReadTests(unittest.TestCase):
             "clip_export": True,
             "ai_audit_write": False,
         })
-        self.assertTrue(listing["ai_audit_available"])
+        # The source SQLite fixture has no AI audit tables; capability must
+        # reflect actual data rather than infer availability from PG mode.
+        self.assertFalse(listing["ai_audit_available"])
         self.assertEqual(len(listing["items"]), 70)
         self.assertEqual(listing["counts"]["verified"], 2)
         self.assertEqual(listing["counts"]["needs_manual_review"], 68)
@@ -233,6 +235,7 @@ const controls = {
 const context = {
   state: {readOnly:false, capabilities:{reviewWrite:true,audioSegmentWrite:true,clipExport:false}, saving:false, loading:false, detail:{id:'q1'}, audio:{saving:false}},
   $: id => controls[id],
+  reviewWritesBlocked: () => false,
   updateNavigation: () => {},
   refreshAudioActions: () => {},
 };

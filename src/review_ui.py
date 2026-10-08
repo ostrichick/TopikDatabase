@@ -203,6 +203,17 @@ class ReviewStore:
         ).fetchone()
         return row["review_count"]
 
+    @staticmethod
+    def _audit_timestamp_verified(value: object) -> bool:
+        """Only an explicit, timezone-aware audit timestamp is comparable."""
+        if not isinstance(value, str) or not value.strip():
+            return False
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
     def list_questions(self) -> dict:
         if self._list_questions_cache is not None:
             return self._list_questions_cache
@@ -292,13 +303,49 @@ class ReviewStore:
             return result
 
     def list_questions_fast(self) -> dict:
-        """Lightweight navigation list; AI execution history is loaded on demand."""
+        """Lightweight list with current human-review evidence in one bulk read."""
         with closing(self._connect()) as db:
             items = [dict(row) for row in db.execute(
-                "SELECT q.id, q.exam_number AS number, s.name AS section, "
-                "q.review_status AS status, q.requires_image "
-                "FROM questions q JOIN sections s ON s.id=q.section_id ORDER BY q.exam_number"
+                "WITH ranked_reviews AS ("
+                " SELECT id, subject_id, status, reviewer, scope, reviewed_at,"
+                " COUNT(*) OVER (PARTITION BY subject_id) AS review_version,"
+                " ROW_NUMBER() OVER (PARTITION BY subject_id ORDER BY id DESC) AS latest_rank,"
+                " ROW_NUMBER() OVER (PARTITION BY subject_id, scope ORDER BY id DESC) AS scope_rank"
+                " FROM review_records WHERE subject_type='question'"
+                ") "
+                "SELECT q.id, q.exam_number AS number, s.name AS section,"
+                " q.review_status AS status, q.requires_image,"
+                " COALESCE(latest.review_version, 0) AS review_version,"
+                " latest.id AS latest_review_id, manual.id AS manual_review_id,"
+                " manual.status AS manual_review_status, manual.reviewer AS manual_reviewer,"
+                " manual.reviewed_at AS manual_reviewed_at"
+                " FROM questions q JOIN sections s ON s.id=q.section_id"
+                " LEFT JOIN ranked_reviews latest ON latest.subject_id=q.id AND latest.latest_rank=1"
+                " LEFT JOIN ranked_reviews manual ON manual.subject_id=q.id"
+                " AND manual.scope='manual_question_review' AND manual.scope_rank=1"
+                " ORDER BY q.exam_number"
             ).fetchall()]
+        for item in items:
+            record_id = item.pop("manual_review_id")
+            record_status = item.pop("manual_review_status")
+            reviewer = item.pop("manual_reviewer")
+            reviewed_at = item.pop("manual_reviewed_at")
+            latest_id = item.pop("latest_review_id")
+            if record_id is None:
+                item["last_human_review"] = None
+            else:
+                # A later question review record may supersede the last manual
+                # decision. Never infer a current approval from q.review_status alone.
+                is_current = (record_id == latest_id and record_status == item["status"])
+                item["last_human_review"] = {
+                    "id": record_id,
+                    "record_id": record_id,
+                    "status": record_status,
+                    "reviewer": reviewer,
+                    "reviewed_at": reviewed_at,
+                    "is_current": is_current,
+                    "approved": is_current and record_status == "verified",
+                }
         counts = {status: sum(item["status"] == status for item in items) for status in STATUSES}
         counts["total"] = len(items)
         return {"items": items, "counts": counts, "ai_audit_available": False,
@@ -983,33 +1030,61 @@ class ReviewStore:
         }
 
         if THIRD_PASS_AUDIT_PATH.is_file():
-            payload = json.loads(THIRD_PASS_AUDIT_PATH.read_text(encoding="utf-8"))
+            archive_bytes = THIRD_PASS_AUDIT_PATH.read_bytes()
+            payload = json.loads(archive_bytes.decode("utf-8"))
             entries = payload.get("results", [])
             if (payload.get("contract_version") == "ai-audit-35-v1"
                     and len(entries) == 70
                     and sorted(row.get("exam_number") for row in entries) == list(range(1, 71))
                     and all(row.get("verdict") in ("clear", "finding", "uncertain") for row in entries)):
+                # Archive metadata must come from the archive itself. Its file
+                # name or modification date is not a trustworthy audit time.
+                time_field = next((field for field in ("created_at", "generated_at", "audited_at")
+                                   if payload.get(field)), None)
+                try:
+                    source_name = str(THIRD_PASS_AUDIT_PATH.relative_to(ROOT)).replace("\\", "/")
+                except ValueError:
+                    source_name = THIRD_PASS_AUDIT_PATH.name
                 results["chatgpt"] = {
                     str(row["exam_number"]): {
                         "verdict": row["verdict"],
-                        "summary": row.get("summary", ""),
-                        "detail": row.get("detail", ""),
+                        "summary": row.get("summary"),
+                        "detail": row.get("detail"),
+                        "created_at": (payload[time_field] if time_field else "unknown"),
+                        "timestamp_verified": bool(time_field and self._audit_timestamp_verified(payload[time_field])),
+                        "snapshot_created_at": "unknown",
+                        "snapshot_timestamp_verified": False,
                     } for row in entries
                 }
                 sources["chatgpt"] = {"available": True, "label": "ChatGPT 3차", "model": payload.get("model", ""),
-                                       "scope": 70, "origin": "로컬 3차 독립 감수 JSON (2026-10-08)"}
+                                       "auditor": payload.get("auditor"), "scope": 70,
+                                       "origin": "로컬 3차 독립 감수 JSON",
+                                       "source_file": source_name,
+                                       "source_sha256": hashlib.sha256(archive_bytes).hexdigest(),
+                                       "contract_version": payload["contract_version"],
+                                       "created_at": payload[time_field] if time_field else "unknown",
+                                       "timestamp_source": time_field or "unknown",
+                                       "timestamp_verified": bool(time_field and self._audit_timestamp_verified(payload[time_field]))}
             else:
                 sources["chatgpt"]["reason"] = "3차 독립 감수 파일의 계약 또는 70문항 범위가 유효하지 않습니다."
 
-        if self.backend == "postgres":
-            with closing(self._connect()) as db:
+        with closing(self._connect()) as db:
+            if self._has_ai_audit_tables(db):
                 rows = db.execute(
-                    "SELECT p.model_id, p.auditor_id, r.raw_json "
+                    "SELECT p.id AS pass_id, p.pass_number, p.model_id, p.auditor_id,"
+                    " p.prompt_version, p.perspective, p.input_sha256,"
+                    " p.created_at AS pass_created_at, r.id AS result_id,"
+                    " r.result_sha256, r.created_at AS result_created_at, r.raw_json,"
+                    " run.id AS run_id, run.label AS run_label,"
+                    " run.contract_version, run.snapshot_sha256 AS source_snapshot_sha256,"
+                    " run.created_at AS run_created_at,"
+                    " snapshot.created_at AS source_snapshot_created_at "
                     "FROM ai_audit_results r "
                     "JOIN ai_audit_passes p ON p.id=r.pass_id "
                     "JOIN ai_audit_runs run ON run.id=p.run_id "
+                    "JOIN ai_audit_source_snapshots snapshot ON snapshot.snapshot_sha256=run.snapshot_sha256 "
                     "WHERE run.label=? AND p.model_id LIKE ? "
-                    "ORDER BY run.created_at DESC, p.pass_number DESC",
+                    "ORDER BY run.created_at DESC, p.pass_number DESC, r.created_at DESC",
                     ("gemini-full-audit-70", "gemini%"),
                 ).fetchall()
                 for row in rows:
@@ -1018,21 +1093,44 @@ class ReviewStore:
                     indexed = {}
                     for entry in verdicts:
                         subject_id = entry.get("subject_id", "")
-                        if not QUESTION_ID.fullmatch(subject_id):
+                        if not isinstance(subject_id, str) or not QUESTION_ID.fullmatch(subject_id):
                             continue
                         n = str(int(subject_id[-3:]))
                         if n in indexed:
                             break
                         indexed[n] = {"verdict": entry.get("verdict"),
                                       "summary": entry.get("rationale", ""),
-                                      "confidence": entry.get("confidence")}
+                                      "confidence": entry.get("confidence"),
+                                      "created_at": row["result_created_at"] or "unknown",
+                                      "timestamp_verified": self._audit_timestamp_verified(row["result_created_at"]),
+                                      "snapshot_created_at": row["source_snapshot_created_at"] or "unknown",
+                                      "snapshot_timestamp_verified": self._audit_timestamp_verified(
+                                          row["source_snapshot_created_at"])}
                     if len(indexed) == 70 and set(indexed) == {str(n) for n in range(1, 71)} and all(
                         entry["verdict"] in ("clear", "finding", "uncertain") for entry in indexed.values()
                     ):
                         results["gemini"] = indexed
                         sources["gemini"] = {"available": True, "label": "Gemini",
                                              "model": row["model_id"], "auditor": row["auditor_id"],
-                                             "scope": 70, "origin": "중앙 PostgreSQL gemini-full-audit-70 실행 결과"}
+                                             "scope": 70,
+                                             "origin": ("중앙 PostgreSQL" if self.backend == "postgres"
+                                                        else "로컬 SQLite") + " gemini-full-audit-70 실행 결과",
+                                             "created_at": row["result_created_at"],
+                                             "timestamp_verified": self._audit_timestamp_verified(row["result_created_at"]),
+                                             "timestamp_source": "ai_audit_results.created_at",
+                                             "run_created_at": row["run_created_at"],
+                                             "pass_created_at": row["pass_created_at"],
+                                             "result_created_at": row["result_created_at"],
+                                             "source_snapshot_created_at": row["source_snapshot_created_at"],
+                                             "run_id": row["run_id"], "run_label": row["run_label"],
+                                             "pass_id": row["pass_id"], "pass_number": row["pass_number"],
+                                             "result_id": row["result_id"],
+                                             "source_snapshot_sha256": row["source_snapshot_sha256"],
+                                             "input_sha256": row["input_sha256"],
+                                             "result_sha256": row["result_sha256"],
+                                             "contract_version": row["contract_version"],
+                                             "prompt_version": row["prompt_version"],
+                                             "perspective": row["perspective"]}
                         break
 
         questions = {}
@@ -1353,11 +1451,40 @@ class ReviewStore:
                      json.dumps({"before": old, "after": new, "note": payload["note"]}, ensure_ascii=False),
                      datetime.now(timezone.utc).isoformat(timespec="seconds")),
                 )
+            last_human = None
+            if fast_response:
+                # Read the latest human evidence in the same locked transaction
+                # for both a new save and an idempotent no-op acknowledgment.
+                # A subsequent concurrent writer cannot alter this ACK.
+                record = db.execute(
+                    "SELECT m.id, m.status, m.reviewer, m.reviewed_at, "
+                    "(SELECT id FROM review_records WHERE subject_type='question' "
+                    "AND subject_id=? ORDER BY id DESC LIMIT 1) AS latest_review_id "
+                    "FROM review_records m WHERE m.subject_type='question' "
+                    "AND m.subject_id=? AND m.scope='manual_question_review' "
+                    "ORDER BY m.id DESC LIMIT 1",
+                    (question_id, question_id),
+                ).fetchone()
+                if record:
+                    is_current = (record["id"] == record["latest_review_id"]
+                                  and record["status"] == new["status"])
+                    last_human = {
+                        "id": record["id"], "record_id": record["id"],
+                        "status": record["status"], "reviewer": record["reviewer"],
+                        "reviewed_at": record["reviewed_at"],
+                        "is_current": is_current,
+                        "approved": is_current and record["status"] == "verified",
+                    }
         if fast_response:
             # The transaction has committed. This exact version is authoritative;
             # a second full detail read is unnecessary for ordinary navigation.
+            final_version = version + int(saved)
             return {"id": question_id, "number": question["exam_number"],
-                    "review_status": new["status"], "version": version + int(saved),
+                    "review_status": new["status"], "version": final_version,
+                    "request_version": payload["version"], "saved_version": final_version,
+                    "last_human_review": last_human,
+                    "saved_review_id": last_human["id"] if saved and last_human else None,
+                    "saved_reviewed_at": last_human["reviewed_at"] if saved and last_human else None,
                     "requires_image": bool(question["requires_image"]), "saved": saved}
         return self.get_question(question_id)
 
