@@ -103,6 +103,9 @@ class ReviewStore:
         self._has_ai_runs_cache: bool | None = None
         self._has_audio_segments_cache: bool | None = None
         self._audio_asset_cache: dict[str, dict] = {}
+        self._list_questions_cache: dict | None = None
+        self._ai_summaries_cache: tuple[bool, dict] | None = None
+        self._ai_summaries_loading: bool = False
         if self.backend == "sqlite" and not self.db_path.is_file():
             raise FileNotFoundError(f"Pilot database not found: {self.db_path}. Run py -3 src/pilot_35.py first.")
         with closing(self._connect()) as db:
@@ -200,6 +203,8 @@ class ReviewStore:
         return row["review_count"]
 
     def list_questions(self) -> dict:
+        if self._list_questions_cache is not None:
+            return self._list_questions_cache
         with closing(self._connect()) as db:
             rows = db.execute(
                 "SELECT q.id, q.exam_number AS number, s.name AS section, "
@@ -208,7 +213,24 @@ class ReviewStore:
             ).fetchall()
             items = [dict(row) for row in rows]
             audit_target = self.database_url if self.backend == "postgres" else db
-            ai_available, ai_summaries = self._ai_audit_summaries(audit_target)
+            if self._ai_summaries_cache is not None:
+                ai_available, ai_summaries = self._ai_summaries_cache
+            elif self.backend == "sqlite":
+                self._ai_summaries_cache = self._ai_audit_summaries(audit_target)
+                ai_available, ai_summaries = self._ai_summaries_cache
+            else:
+                ai_available = self._has_ai_audit_tables(db)
+                ai_summaries = {}
+                if not self._ai_summaries_loading:
+                    self._ai_summaries_loading = True
+                    def _preload():
+                        try:
+                            self._ai_summaries_cache = self._ai_audit_summaries(self.database_url)
+                            self._list_questions_cache = None
+                        finally:
+                            self._ai_summaries_loading = False
+                    import threading
+                    threading.Thread(target=_preload, daemon=True).start()
             if ai_available:
                 try:
                     from src.ai_audit_35 import audit_subject_ids
@@ -216,22 +238,43 @@ class ReviewStore:
                     execution_subjects = None
                 else:
                     execution_subjects = audit_subject_ids(audit_target)
-                for item in items:
-                    qid = item["id"]
-                    is_scoped = execution_subjects is None or qid in execution_subjects
-                    summary = ai_summaries.get(qid)
-                    audit = self._ai_audit_list_summary(summary) if summary else {}
-                    run_id = summary.get("run_id") if summary else None
-                    execution = self._ai_audit_execution(audit_target, subject_id=qid, run_id=run_id) \
-                        if is_scoped else None
-                    execution_summary = self._ai_audit_execution_list_summary(execution)
-                    if execution_summary:
-                        audit.update(execution_summary)
-                    if audit:
-                        item["ai_audit"] = audit
+
+                audit_exec_db = None
+                if self.backend == "postgres":
+                    try:
+                        from src.database import PostgresAuditConnection
+                        audit_exec_db = PostgresAuditConnection(self.database_url, readonly=True)
+                    except Exception:
+                        audit_exec_db = audit_target
+                else:
+                    audit_exec_db = db
+
+                exec_cache = {}
+                try:
+                    for item in items:
+                        qid = item["id"]
+                        is_scoped = execution_subjects is None or qid in execution_subjects
+                        summary = ai_summaries.get(qid)
+                        audit = self._ai_audit_list_summary(summary) if summary else {}
+                        run_id = summary.get("run_id") if summary else None
+                        if is_scoped:
+                            cache_key = run_id
+                            if cache_key not in exec_cache:
+                                exec_cache[cache_key] = self._ai_audit_execution(audit_exec_db, subject_id=qid, run_id=run_id)
+                            execution = exec_cache[cache_key]
+                        else:
+                            execution = None
+                        execution_summary = self._ai_audit_execution_list_summary(execution)
+                        if execution_summary:
+                            audit.update(execution_summary)
+                        if audit:
+                            item["ai_audit"] = audit
+                finally:
+                    if self.backend == "postgres" and hasattr(audit_exec_db, "close"):
+                        audit_exec_db.close()
             counts = {status: sum(item["status"] == status for item in items) for status in STATUSES}
             counts["total"] = len(items)
-            return {
+            result = {
                 "items": items,
                 "counts": counts,
                 "ai_audit_available": ai_available,
@@ -244,6 +287,8 @@ class ReviewStore:
                     "ai_audit_write": False,
                 },
             }
+            self._list_questions_cache = result
+            return result
 
     @staticmethod
     def _has_ai_audit_tables(db) -> bool:
@@ -260,7 +305,8 @@ class ReviewStore:
             try:
                 rows = db.execute(
                     "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema=current_schema() AND table_name LIKE 'ai_audit_%'"
+                    "WHERE table_schema=current_schema() AND table_name LIKE ?",
+                    ("ai_audit_%",),
                 ).fetchall()
                 existing = {row[0] if isinstance(row, tuple) else row["table_name"] for row in rows}
                 return AI_AUDIT_TABLES.issubset(existing)
@@ -350,11 +396,14 @@ class ReviewStore:
             return None
         return history
 
-    @staticmethod
-    def _ai_audit_table_names(db) -> set[str]:
+    @classmethod
+    def _ai_audit_table_names(cls, db) -> set[str]:
         if isinstance(db, str) and db.strip().lower().startswith(("postgresql://", "postgres://")):
             return set(AI_AUDIT_TABLES) | {"ai_audit_checkpoints", "ai_audit_attempts"} \
-                if ReviewStore._has_ai_audit_tables(db) else set()
+                if cls._has_ai_audit_tables(db) else set()
+        if getattr(db, "ai_audit_tuple_rows", False) or type(db).__name__.startswith("Postgres"):
+            return set(AI_AUDIT_TABLES) | {"ai_audit_checkpoints", "ai_audit_attempts"} \
+                if cls._has_ai_audit_tables(db) else set()
         return {
             row[0] for row in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'ai_audit_%'"
@@ -670,6 +719,7 @@ class ReviewStore:
             return self._clip_file(segment)
 
     def save_audio_segment(self, question_id: str, payload: dict) -> dict:
+        self._list_questions_cache = None
         """Persist a reviewer-specified interval; sync shared-dialogue pairs atomically.
 
         This NEVER modifies question/text approval or silently verifies the audio.
@@ -744,6 +794,7 @@ class ReviewStore:
         return self.get_question(question_id)
 
     def export_audio_clip(self, question_id: str) -> dict:
+        self._list_questions_cache = None
         """Export/rematerialize a verified interval while keeping the source MP3 immutable."""
         from src.audio_35 import AudioError, export_segment
 
@@ -1170,6 +1221,7 @@ class ReviewStore:
         return payload
 
     def save_review(self, question_id: str, payload: dict) -> dict:
+        self._list_questions_cache = None
         # Validate the immutable local evidence before acquiring a central row lock.
         with closing(self._connect()) as preflight:
             preflight_question = self._question(preflight, question_id)
