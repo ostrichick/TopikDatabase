@@ -149,15 +149,29 @@ def validate(data):
     require(transcribed == 30, "expected 30 transcripts")
     warnings = data.get("warnings", [])
     require(isinstance(warnings, list), "warnings must be a list")
-    blocked = [w for w in warnings if isinstance(w, dict) and
-               w.get("severity") in ("high", "critical", "blocking")]
+    all_warnings = []
+    scopes = [("exam", warnings)]
+    scopes.extend((q["id"], q.get("warnings", [])) for q in questions)
+    scopes.extend((q["id"] + ":transcript", q["transcript"].get("warnings", []))
+                  for q in questions if q.get("transcript") is not None)
+    scopes.extend((g["id"] + ":group", g.get("warnings", [])) for g in groups)
+    for scope, entries in scopes:
+        require(isinstance(entries, list), f"warnings for {scope} must be a list")
+        for warning in entries:
+            require(isinstance(warning, dict) and
+                    warning.get("severity") in ("info", "review", "low", "medium", "high", "critical", "blocking") and
+                    isinstance(warning.get("code"), str) and bool(warning["code"]) and
+                    isinstance(warning.get("message"), str) and bool(warning["message"]),
+                    f"malformed/unclassified warning for {scope}; fail closed")
+            all_warnings.append({"scope": scope, **warning})
+    blocked = [w for w in all_warnings if w["severity"] in ("high", "critical", "blocking")]
     return {
         "status": "blocked" if blocked else "validated",
         "exam_id": EXAM_ID, "questions": 70, "choices": 280,
         "answers": 70, "transcripts": transcribed,
         "groups": len(gmap), "image_assets": len(images), "image_links": image_links,
         "points_by_section": dict(points), "sources": len(sources),
-        "warnings": len(warnings), "blocking_warnings": blocked,
+        "warnings": len(all_warnings), "blocking_warnings": blocked,
         "staging_sha256": hashlib.sha256(json.dumps(
             data, sort_keys=True, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")).hexdigest(),
@@ -225,7 +239,7 @@ def apply(data):
                            (q["id"], c["number"], c["text"]))
             db.execute(
                 "INSERT INTO answers(question_id,choice_number,source_file_id,source_pdf_page,"
-                "preview_and_pdf_agree) VALUES(?,?,?,?,1)",
+                "preview_and_pdf_agree) VALUES(?,?,?,?,0)",
                 (q["id"], q["answer"]["choice_number"], source_ids[answer_path],
                  q["answer"]["source_pdf_page"]),
             )

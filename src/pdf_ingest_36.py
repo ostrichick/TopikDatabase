@@ -18,8 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIR = ROOT / "topik-past-papers" / "36th"
 MANIFEST = ROOT / "topik-past-papers" / "manifest_early.json"
-STAGING = ROOT / "topik-past-papers" / "derived" / "036-I-B" / "staging.json"
-EXTRACTION_VERSION = "pdf-first-36-v1"
+STAGING = ROOT / "topik-past-papers" / "derived" / "036-I-B" / "staging-v2.json"
+EXTRACTION_VERSION = "pdf-first-36-v2"
 
 FILENAMES = {
     "test_paper": "36th-TOPIK-I-Combined-Test-Paper.pdf",
@@ -256,7 +256,8 @@ def transcript_entries(reader):
             # Preserve each explicitly printed speaker turn, without inventing a speaker.
             dialogue = re.sub(r"\s*(?=(?:남자|여자)\s*:)", "\n", dialogue).strip()
             entries[number] = {"dialogue_text": dialogue, "source_pdf_page": page_index,
-                               "warnings": ["Source PDF text; requires human/audio review"]}
+                               "warnings": [{"severity": "review", "code": "audio_playback_unchecked",
+                                            "message": "Source transcript PDF was not compared to full MP3 playback."}]}
     if set(entries) != set(range(1, 31)):
         raise ValueError(f"Missing transcript subjects: {sorted(set(range(1,31)) - set(entries))}")
     return entries
@@ -340,11 +341,18 @@ def extract():
     return {"extraction_version": EXTRACTION_VERSION,
             "exam": {"id": "036-I-B", "session": 36, "level": "I", "booklet": "B"},
             "sources": sources, "groups": groups, "questions": questions,
-            "warnings": ["The standalone listening and reading PDFs were matched page by page to the manifest-verified combined booklet; their hashes are recorded independently.",
-                         "Listening transcript comes from the original PDF and has not been matched to audio playback.",
-                         "Pypdf line breaks were collapsed for readability; some Korean word breaks may need visual correction.",
-                         "Image crops are mechanical PyMuPDF bounding rectangles; visual/manual review is required before approval.",
-                         "No source-derived content is designated human verified by this extractor."]}
+            "warnings": [
+                {"severity": "review", "code": "source_paper_crosscheck",
+                 "message": "Standalone paper PDFs were compared page by page with the manifest-backed combined booklet."},
+                {"severity": "review", "code": "audio_playback_unchecked",
+                 "message": "The listening transcript PDF was not validated by complete MP3 playback."},
+                {"severity": "review", "code": "korean_word_spacing_review",
+                 "message": "Line breaks were collapsed, and Korean word boundaries still need visual checking."},
+                {"severity": "review", "code": "image_crop_visual_review",
+                 "message": "Mechanical PDF image crops require visual approval against original pages."},
+                {"severity": "review", "code": "human_review_pending",
+                 "message": "Source-derived content is not designated human-verified by this extractor."}
+            ]}
 
 
 def write_staging(data, dest=STAGING):

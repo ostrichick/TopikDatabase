@@ -118,12 +118,29 @@ class ImportExamStagingTests(unittest.TestCase):
             importer.validate(self.staging)
 
     def test_blocking_warnings_are_never_applied(self):
-        self.staging["warnings"] = [{"severity": "blocking", "message": "source ambiguity"}]
+        self.staging["warnings"] = [{"severity": "blocking", "code": "source_ambiguity",
+                                      "message": "source ambiguity"}]
+        self.assertEqual(importer.validate(self.staging)["status"], "blocked")
+
+    def test_unknown_warning_format_fails_closed_including_nested(self):
+        self.staging["warnings"] = ["CRITICAL: source mismatch"]
+        with self.assertRaisesRegex(importer.ImportBlocked, "malformed"):
+            importer.validate(self.staging)
+        self.staging["warnings"] = []
+        self.staging["questions"][0]["transcript"]["warnings"] = [
+            {"severity": "blocking", "code": "text_mismatch", "message": "unresolved"}
+        ]
         self.assertEqual(importer.validate(self.staging)["status"], "blocked")
 
     def test_36th_namespace_does_not_collide_with_35th(self):
         self.assertEqual(importer.EXAM_ID, "036-I-B")
         self.assertTrue(all(q["id"].startswith("036-I-") for q in self.staging["questions"]))
+
+    def test_pdf_first_import_does_not_claim_nonexistent_preview_agreement(self):
+        from inspect import getsource
+        code = getsource(importer.apply)
+        self.assertIn("preview_and_pdf_agree) VALUES(?,?,?,?,0)", code)
+        self.assertNotIn("preview_and_pdf_agree) VALUES(?,?,?,?,1)", code)
 
 
 if __name__ == "__main__":
