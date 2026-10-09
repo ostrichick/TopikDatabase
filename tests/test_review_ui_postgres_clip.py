@@ -68,6 +68,9 @@ class PgSQLiteConnection:
 
     def execute(self, sql, params=()):
         self.calls.append((sql, tuple(params)))
+        if sql == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY":
+            # Detailed 35th reads now pin a snapshot just like other exams.
+            return self.db.execute("BEGIN")
         if "information_schema.tables" in sql:
             return StaticCursor([{"present": True}])
         if self.fail_review_insert[0] and sql.startswith("INSERT INTO review_records"):

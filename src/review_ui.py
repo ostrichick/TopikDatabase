@@ -1327,10 +1327,10 @@ class ReviewStore:
 
     def get_question(self, question_id: str, *, fast: bool = False) -> dict:
         with closing(self._connect()) as db:
-            # A concurrent source migration must never yield old question text
-            # combined with the new optimistic review version. Use one stable
-            # database snapshot for the complete editor payload.
-            if self.backend == "postgres" and self.exam_id == "036-I-B":
+            # Concurrent reviews or source migrations must never combine old
+            # editor fields with a newer optimistic review version. Every exam
+            # needs one stable snapshot for the complete editor payload.
+            if self.backend == "postgres":
                 db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             elif self.backend == "sqlite":
                 db.execute("BEGIN")
