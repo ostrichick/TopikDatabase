@@ -134,6 +134,34 @@ class MultiExamReviewTests(unittest.TestCase):
         with closing(sqlite3.connect(self.db_path)) as db:
             self.assertEqual(db.execute("SELECT raw_question_text FROM questions WHERE id=?", (qid,)).fetchone()[0], raw)
 
+    def test_both_35_and_36_preview_new_punctuation_without_mutating_verified_db(self):
+        # Historical 35th approvals and 36th v5 rows remain canonical until
+        # a deliberate reviewed save or a separately gated migration.
+        with closing(sqlite3.connect(self.db_path)) as db:
+            for exam in ("035", "036"):
+                qid = f"{exam}-I-R-001"
+                db.execute("UPDATE questions SET stem=? WHERE id=?",
+                           ("그렇습니까?그럼", qid))
+                db.execute("UPDATE choices SET text=? WHERE question_id=? AND number=1",
+                           ("아!우리", qid))
+                db.execute("UPDATE question_groups SET instruction=? WHERE id=?",
+                           ("어디입니까?<보기>", f"{exam}-I-R-01"))
+            db.commit()
+        for store, exam in ((self.default, "035"), (self.other, "036")):
+            qid = f"{exam}-I-R-001"
+            for item in (store.get_question(qid, fast=True),
+                         store.get_questions_bundle()["questions"][qid]):
+                self.assertEqual(item["stem"], "그렇습니까?그럼")
+                self.assertEqual(item["stem_display"], "그렇습니까? 그럼")
+                self.assertEqual(item["choices"][0]["text"], "아!우리")
+                self.assertEqual(item["choices"][0]["display_text"], "아! 우리")
+                self.assertEqual(item["group"]["instruction"], "어디입니까?<보기>")
+                self.assertEqual(item["group"]["instruction_display"], "어디입니까? <보기>")
+            with closing(sqlite3.connect(self.db_path)) as db:
+                self.assertEqual(db.execute(
+                    "SELECT stem FROM questions WHERE id=?", (qid,)).fetchone()[0],
+                    "그렇습니까?그럼")
+
     def test_punctuation_marker_invalidates_open_36_review_form(self):
         qid = "036-I-R-001"
         stale = self.other.get_question(qid, fast=True)
@@ -165,6 +193,17 @@ class MultiExamReviewTests(unittest.TestCase):
         result = self.other.save_review(qid, payload, fast_response=True)
         self.assertTrue(result["saved"])
         self.assertEqual(result["version"], current["version"] + 1)
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("INSERT INTO import_metadata(key,value) VALUES(?,?)",
+                       ("036-I-B:punctuation:v5-to-v6", "verified fixture"))
+            db.commit()
+        revised = self.other.get_question(qid, fast=True)
+        self.assertEqual(revised["version"], result["version"] + 1)
+        self.assertEqual(self.other.get_questions_bundle()["questions"][qid]["version"],
+                         revised["version"])
+        self.assertEqual(self.other.list_questions_fast()["items"][0]["review_version"],
+                         revised["version"])
+        self.assertEqual(self.default.get_question("035-I-R-001", fast=True)["version"], baseline_35)
 
     def test_postgres_detail_starts_repeatable_read_before_fetching_text(self):
         # If a migration commits between the detail's SQL statements, a

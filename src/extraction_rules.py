@@ -61,6 +61,7 @@ _IMAGE_RULES = {
 # later PDF-first staging without requiring or changing any 35th DB records.
 PUNCTUATION_RULE_VERSION = "punctuation-space-v2"
 RULE_VERSION = "punctuation-space-v1,image-pure-v1"
+PUNCTUATION_RULE_VERSION_V3 = "punctuation-space-v3"
 
 # TOPIK 36 R51-52 PDF page 8 has an explicitly printed sentence boundary:
 # "... 있습니다. 120전화는 ...".  pypdf loses that gap; v1 intentionally
@@ -88,6 +89,31 @@ def normalize_punctuation_spacing_v2(value: str) -> str:
         if (_PROTECTED_TOKEN.search(token) or _FILENAME_TOKEN.search(token)):
             return token
         return _DIGIT_SENTENCE.sub(". ", normalize_punctuation_spacing(token))
+
+    return _TOKEN_OR_WHITESPACE.sub(transform, value)
+
+
+# PDF-first 36th v6 only. Preserve v1/v2 as immutable 35th/v5 evidence.
+# Spaces can be lost after a sentence question/exclamation mark or a speaker
+# label's colon, including e.g. "그렇습니까?<보기>" and "여자 :________".
+# Avoid punctuation chains ("?!"), pre-existing whitespace, numeric clock
+# notation (12:30), colon-delimited paths and unverified URL/email/file tokens.
+_FOLLOWING_SENTENCE_TEXT = re.compile(r"([?!:])(?=[가-힣A-Za-z_<\[(\"“‘])")
+_PUNCTUATION_BEFORE_NUMBER = re.compile(r"(?<=[가-힣])([?!:])(?=\d+[가-힣])")
+
+
+def normalize_punctuation_spacing_v3(value: str) -> str:
+    """Normalize v2 plus ? ! : word boundaries without changing protected data."""
+    if not isinstance(value, str):
+        raise TypeError("Expected extracted text")
+
+    def transform(match: re.Match[str]) -> str:
+        token = match.group()
+        if _PROTECTED_TOKEN.search(token) or _FILENAME_TOKEN.search(token):
+            return token
+        spaced = normalize_punctuation_spacing_v2(token)
+        spaced = _FOLLOWING_SENTENCE_TEXT.sub(r"\1 ", spaced)
+        return _PUNCTUATION_BEFORE_NUMBER.sub(r"\1 ", spaced)
 
     return _TOKEN_OR_WHITESPACE.sub(transform, value)
 

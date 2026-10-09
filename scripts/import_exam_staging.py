@@ -16,7 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from src import ai_audit_35
 from src.database import PostgresAuditConnection, get_database_url
-from src.extraction_rules import PUNCTUATION_RULE_VERSION, normalize_punctuation_spacing_v2
+from src.extraction_rules import (
+    PUNCTUATION_RULE_VERSION, PUNCTUATION_RULE_VERSION_V3,
+    normalize_punctuation_spacing_v2, normalize_punctuation_spacing_v3,
+)
 
 CORPUS = ROOT / "topik-past-papers"
 EXAM_ID = "036-I-B"
@@ -53,9 +56,12 @@ def validate(data, *, allow_historical_v4=False):
                 "4c02c999b0fcbdaad48aaf9af6d0f5c754ca424f8a37885466a6704d90403684",
                 "historical punctuation exception requires frozen 36th v4 SHA-256")
     else:
-        require(data.get("extraction_version") == "pdf-first-36-v5",
-                "PDF staging requires supported extraction version pdf-first-36-v5")
-        require(data.get("punctuation_rule_version") == PUNCTUATION_RULE_VERSION,
+        source_version = data.get("extraction_version")
+        require(source_version in ("pdf-first-36-v5", "pdf-first-36-v6"),
+                "PDF staging requires supported extraction version pdf-first-36-v5/v6")
+        expected_rule = (PUNCTUATION_RULE_VERSION_V3 if source_version == "pdf-first-36-v6"
+                         else PUNCTUATION_RULE_VERSION)
+        require(data.get("punctuation_rule_version") == expected_rule,
                 "PDF staging requires shared punctuation normalization version")
     sources, groups, questions = data.get("sources"), data.get("groups"), data.get("questions")
     require(isinstance(sources, list) and len(sources) >= 4, "missing source files")
@@ -175,8 +181,11 @@ def validate(data, *, allow_historical_v4=False):
                            for c in q["choices"])
         if q.get("transcript") is not None:
             text_fields.append((f"{q['id']}.transcript", q["transcript"]["dialogue_text"]))
+    normalizer = (normalize_punctuation_spacing_v3
+                  if data.get("extraction_version") == "pdf-first-36-v6"
+                  else normalize_punctuation_spacing_v2)
     residual = [scope for scope, value in text_fields
-                if normalize_punctuation_spacing_v2(value) != value]
+                if normalizer(value) != value]
     require(not residual or historical_v4,
             "unresolved punctuation spacing: " + ", ".join(residual[:12]))
     warnings = data.get("warnings", [])

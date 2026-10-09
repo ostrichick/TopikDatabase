@@ -284,6 +284,10 @@
           <div class="section-card" id="transcriptEditorSection" hidden>
             <h3>듣기 대본 검수</h3>
             <label class="small-label" for="transcriptInput">대본 · 원본 PDF와 대조</label><textarea id="transcriptInput" rows="7" spellcheck="false" placeholder="추출 대본을 확인하고 필요한 부분만 수정하세요."></textarea>
+            <div id="transcriptSpacingPreview" hidden>
+              <span class="small-label">문장부호 교정 미리보기 · 승인된 대본 및 원본 DB 텍스트는 변경하지 않음</span>
+              <div class="readonly" id="transcriptSpacingPreviewText"></div>
+            </div>
             <p class="hint" id="transcriptHint">전체 음원만 제공됩니다. 문항별 재생 구간을 추정하지 않습니다.</p>
           </div>
           <details class="section-card" id="independentComparisonSection">
@@ -1188,23 +1192,30 @@
         );
         $('questionBadges').lastElementChild.id = 'dirtyBadge';
         renderIndependentComparison();
-        textBox('groupInstruction', q.group?.instruction, '공통 지시문 없음');
-        textBox('groupPassage', q.group?.passage_text, '공통 지문 없음');
+        textBox('groupInstruction', q.group?.instruction_display ?? q.group?.instruction, '공통 지시문 없음');
+        textBox('groupPassage', q.group?.passage_text_display ?? q.group?.passage_text, '공통 지문 없음');
         $('rawQuestionLabel').textContent = q.exam_id === '036-I-B'
           ? '초기 추출 텍스트 · 문장부호 공백 표시 보정 (원본 보존 · 읽기 전용)'
           : '초기 추출 원문 · 공백 보정 전 기록 (읽기 전용)';
         textBox('rawQuestion', q.raw_question_text_display ?? q.raw_question_text, '추출 원문 없음');
+        // Never silently replace editor values before the versioned source
+        // migration. Review approvals must not write a partial v6 corpus.
         $('stemInput').value = typeof q.stem === 'string' ? q.stem : '';
         $('stemInput').disabled = state.capabilities?.reviewWrite === false || pendingOrFailed;
         for (let n = 1; n <= 4; n++) {
           const choice = q.choices.find(item => Number(item.number) === n);
-          $(`choice${n}`).value = choice && typeof choice.text === 'string' ? choice.text : '';
+          $(`choice${n}`).value = typeof choice?.text === 'string' ? choice.text : '';
           $(`choice${n}`).disabled = state.capabilities?.reviewWrite === false || pendingOrFailed;
           $(`choiceRow${n}`).classList.toggle('correct', Number(q.answer?.choice_number) === n);
         }
         $('answerNote').textContent = `정답 ${CHOICE_SYMBOLS[Number(q.answer?.choice_number) - 1] || '미확인'} · 정답표 ${q.answer_key_number ?? '—'}번 · 정답표 PDF ${q.answer?.source_pdf_page ?? '—'}쪽 · ${q.points}점`;
         $('transcriptEditorSection').hidden = q.section !== 'listening';
         $('transcriptInput').value = typeof q.transcript?.text === 'string' ? q.transcript.text : '';
+        const showSpacingPreview = q.section === 'listening' &&
+          typeof q.transcript?.display_text === 'string' &&
+          q.transcript.display_text !== q.transcript.text;
+        $('transcriptSpacingPreview').hidden = !showSpacingPreview;
+        if (showSpacingPreview) textBox('transcriptSpacingPreviewText', q.transcript.display_text, '');
         $('transcriptInput').disabled = state.capabilities?.reviewWrite === false || pendingOrFailed;
         $('transcriptHint').textContent = `대본 검수 상태: ${statusName(q.transcript?.review_status)} · 원본 PDF ${q.transcript?.source_pdf_page || '—'}쪽 · 오른쪽에서 음원 구간을 별도로 듣고 검증할 수 있습니다. 대본 승인과 구간 검증은 별개입니다.`;
         $('reviewNote').value = state.failedReviews?.get(q.id)?.input?.note || '';

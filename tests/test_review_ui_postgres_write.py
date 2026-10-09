@@ -165,9 +165,10 @@ class Stage6TransactionTests(unittest.TestCase):
         probe = Probe()
         self.assertEqual(store._version(probe, "036-I-R-001"), 5)
         self.assertEqual(len(probe.calls), 1)
-        self.assertIn("EXISTS(SELECT 1 FROM import_metadata", probe.calls[0][0])
+        self.assertIn("SELECT COUNT(*) FROM import_metadata", probe.calls[0][0])
         self.assertEqual(probe.calls[0][1],
-                         ("036-I-B:punctuation:v4-to-v5", "036-I-R-001"))
+                         ("036-I-B:punctuation:v4-to-v5",
+                          "036-I-B:punctuation:v5-to-v6", "036-I-R-001"))
 
     def test_batched_pg_preflight_keeps_full_sha_and_exam_scope(self):
         class Cursor:

@@ -45,7 +45,7 @@ from src.database import (
     get_media_root,
 )
 from src.sqlite_archive import assert_sqlite_write_allowed
-from src.extraction_rules import normalize_punctuation_spacing_v2
+from src.extraction_rules import normalize_punctuation_spacing_v3
 
 
 ROOT = PROJECT_ROOT
@@ -327,19 +327,21 @@ class ReviewStore:
         """
         if self.exam_id != "036-I-B":
             return 0
-        return int(db.execute(
-            "SELECT 1 FROM import_metadata WHERE key=?",
-            ("036-I-B:punctuation:v4-to-v5",),
-        ).fetchone() is not None)
+        return db.execute(
+            "SELECT COUNT(*) AS revision FROM import_metadata WHERE key IN (?,?)",
+            ("036-I-B:punctuation:v4-to-v5", "036-I-B:punctuation:v5-to-v6"),
+        ).fetchone()["revision"]
 
     def _version(self, db, question_id: str) -> int:
         if self.backend == "postgres" and self.exam_id == "036-I-B":
-            # One database roundtrip for both review count and migration marker.
+            # One database roundtrip for both human review count and additive
+            # source punctuation revisions (v4→v5, then v5→v6).
             row = db.execute(
-                "SELECT COUNT(*) + CASE WHEN EXISTS(SELECT 1 FROM import_metadata "
-                "WHERE key=?) THEN 1 ELSE 0 END AS review_count "
+                "SELECT COUNT(*) + (SELECT COUNT(*) FROM import_metadata "
+                "WHERE key IN (?,?)) AS review_count "
                 "FROM review_records WHERE subject_type='question' AND subject_id=?",
-                ("036-I-B:punctuation:v4-to-v5", question_id),
+                ("036-I-B:punctuation:v4-to-v5",
+                 "036-I-B:punctuation:v5-to-v6", question_id),
             ).fetchone()
             return row["review_count"]
         row = db.execute(
@@ -348,6 +350,21 @@ class ReviewStore:
             (question_id,)
         ).fetchone()
         return row["review_count"] + self._punctuation_revision(db)
+
+    @staticmethod
+    def _add_punctuation_preview(detail: dict) -> dict:
+        """Derived editor typography; never mutate canonical 35th/36th DB text."""
+        if detail.get("exam_id") not in ("035-I-B", "036-I-B"):
+            return detail
+        normal = normalize_punctuation_spacing_v3
+        detail["stem_display"] = normal(detail["stem"])
+        detail["group"]["instruction_display"] = normal(detail["group"]["instruction"])
+        detail["group"]["passage_text_display"] = normal(detail["group"]["passage_text"])
+        for choice in detail["choices"]:
+            choice["display_text"] = normal(choice["text"])
+        if detail.get("transcript"):
+            detail["transcript"]["display_text"] = normal(detail["transcript"]["text"])
+        return detail
 
     @staticmethod
     def _audit_timestamp_verified(value: object) -> bool:
@@ -1358,7 +1375,7 @@ class ReviewStore:
                 "stem": question["stem"],
                 "raw_question_text": question["raw_question_text"],
                 "raw_question_text_display": (
-                    normalize_punctuation_spacing_v2(question["raw_question_text"])
+                    normalize_punctuation_spacing_v3(question["raw_question_text"])
                     if self.exam_id == "036-I-B" else question["raw_question_text"]
                 ),
                 "group": {"instruction": question["instruction"] or "",
@@ -1386,7 +1403,7 @@ class ReviewStore:
             }
             if ai_audit:
                 result["ai_audit"] = ai_audit
-            return result
+            return self._add_punctuation_preview(result)
 
     def get_questions_bundle(self) -> dict:
         with closing(self._connect()) as db:
@@ -1532,7 +1549,7 @@ class ReviewStore:
                     "stem": question["stem"],
                     "raw_question_text": question["raw_question_text"],
                     "raw_question_text_display": (
-                        normalize_punctuation_spacing_v2(question["raw_question_text"])
+                        normalize_punctuation_spacing_v3(question["raw_question_text"])
                         if self.exam_id == "036-I-B" else question["raw_question_text"]
                     ),
                     "group": {
@@ -1566,7 +1583,7 @@ class ReviewStore:
                     "preview_flags": json.loads(question["preview_flags_json"]),
                     "history": history,
                 }
-                questions_map[qid] = q_data
+                questions_map[qid] = self._add_punctuation_preview(q_data)
 
             return {
                 "exam_id": self.exam_id,

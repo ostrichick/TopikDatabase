@@ -22,6 +22,8 @@ STAGING = ROOT / "topik-past-papers" / "derived" / "036-I-B" / "staging-v4.json"
 EXTRACTION_VERSION = "pdf-first-36-v4"
 STAGING_V5 = STAGING.with_name("staging-v5.json")
 PUNCTUATION_DIFF_REPORT = STAGING.with_name("punctuation-diff-v4-v5.json")
+STAGING_V6 = STAGING.with_name("staging-v6.json")
+PUNCTUATION_DIFF_V6_REPORT = STAGING.with_name("punctuation-diff-v5-v6.json")
 
 FILENAMES = {
     "test_paper": "36th-TOPIK-I-Combined-Test-Paper.pdf",
@@ -439,10 +441,10 @@ def write_staging(data, dest=STAGING):
 
 
 def main():
-    # Keep extract() and STAGING v4 historically stable; publish only validated
-    # v5 output in future CLI runs.  Verify the PDF-derived v4 bytes match the
-    # independent, human-audited v4 input before applying any spacing changes.
+    # Preserve exact v4 and v5 artifacts as previous review/migration evidence.
+    # Produce the next normalization snapshot separately, never in-place.
     from src import punctuation_pipeline as punctuation
+    from src import punctuation_pipeline_v6 as punctuation_v6
 
     original = extract()
     if hashlib.sha256(punctuation.encoded_staging(original)).hexdigest() != punctuation.SOURCE_V4_SHA256:
@@ -452,16 +454,25 @@ def main():
     data = punctuation.normalize_v4(original)
     gate = punctuation.validate_for_import(data)
     report = punctuation.diff_report(original, data)
-    written = write_staging(data, STAGING_V5)
+    if STAGING_V5.is_file() and punctuation_v6.verified_v5(STAGING_V5) != data:
+        raise ValueError("36th frozen v5 differs from regenerated v5")
+    normalized = punctuation_v6.normalize_v5(data)
+    latest_gate = punctuation_v6.validate_for_import(normalized)
+    v6_report = punctuation_v6.diff_report(data, normalized)
+    write_staging(data, STAGING_V5)
     write_staging(report, PUNCTUATION_DIFF_REPORT)
-    return {"staging": str(written.relative_to(ROOT)), "questions": len(data["questions"]),
-            "listening": sum(q["section"] == "listening" for q in data["questions"]),
-            "reading": sum(q["section"] == "reading" for q in data["questions"]),
-            "groups": len(data["groups"]), "transcripts": sum("transcript" in q for q in data["questions"]),
-            "image_questions": [q["exam_number"] for q in data["questions"] if q["requires_image"]],
-            "warnings": data["warnings"], "quality_gate": gate["status"],
-            "punctuation_changes": report["fields_changed"],
-            "diff_report": str(PUNCTUATION_DIFF_REPORT.relative_to(ROOT))}
+    written = write_staging(normalized, STAGING_V6)
+    write_staging(v6_report, PUNCTUATION_DIFF_V6_REPORT)
+    return {"staging": str(written.relative_to(ROOT)), "questions": len(normalized["questions"]),
+            "listening": sum(q["section"] == "listening" for q in normalized["questions"]),
+            "reading": sum(q["section"] == "reading" for q in normalized["questions"]),
+            "groups": len(normalized["groups"]),
+            "transcripts": sum("transcript" in q for q in normalized["questions"]),
+            "image_questions": [q["exam_number"] for q in normalized["questions"] if q["requires_image"]],
+            "warnings": normalized["warnings"], "quality_gate": latest_gate["status"],
+            "punctuation_changes": v6_report["fields_changed"],
+            "diff_report": str(PUNCTUATION_DIFF_V6_REPORT.relative_to(ROOT)),
+            "archival_v5_gate": gate["status"]}
 
 
 if __name__ == "__main__":
