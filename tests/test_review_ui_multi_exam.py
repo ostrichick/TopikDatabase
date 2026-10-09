@@ -1,0 +1,177 @@
+"""Read/query isolation for 35th and 36th TOPIK in a private SQLite fixture."""
+
+from __future__ import annotations
+
+import hashlib
+import http.client
+import json
+import sqlite3
+import tempfile
+import threading
+import unittest
+from contextlib import closing
+from pathlib import Path
+
+from src import review_ui
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class MultiExamReviewTests(unittest.TestCase):
+    def setUp(self):
+        self.sandbox = tempfile.TemporaryDirectory(prefix="topik-multi-exam-")
+        self.addCleanup(self.sandbox.cleanup)
+        root = Path(self.sandbox.name)
+        self.db_path = root / "two-exams.sqlite"
+        self.media_root = root / "topik-past-papers"
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.executescript((ROOT / "db" / "schema.sql").read_text(encoding="utf-8"))
+            for session in (35, 36):
+                number = f"{session:03d}"
+                exam = f"{number}-I-B"
+                section = f"{number}-I-reading"
+                group = f"{number}-I-R-01"
+                qid = f"{number}-I-R-001"
+                folder = self.media_root / f"{session}th"
+                folder.mkdir(parents=True)
+                source = folder / f"{number}-paper.pdf"
+                source.write_bytes(f"%PDF-1.4\nexam {number}\n%%EOF\n".encode())
+                logical = f"topik-past-papers/{session}th/{number}-paper.pdf"
+                db.execute(
+                    "INSERT INTO source_files(relative_path,kind,sha256,byte_size) VALUES(?,?,?,?)",
+                    (logical, "test_paper", hashlib.sha256(source.read_bytes()).hexdigest(), source.stat().st_size),
+                )
+                file_id = db.execute(
+                    "SELECT id FROM source_files WHERE relative_path=?", (logical,)
+                ).fetchone()[0]
+                db.execute("INSERT INTO exams(id,session,level,booklet) VALUES(?,?,?,?)",
+                           (exam, session, "I", "B"))
+                db.execute(
+                    "INSERT INTO sections(id,exam_id,name,first_exam_number,last_exam_number) "
+                    "VALUES(?,?,?,1,1)", (section, exam, "reading"),
+                )
+                db.execute(
+                    "INSERT INTO question_groups(id,section_id,first_exam_number,last_exam_number,instruction) "
+                    "VALUES(?,?,1,1,?)", (group, section, f"{number} instructions"),
+                )
+                db.execute(
+                    "INSERT INTO questions(id,section_id,group_id,source_file_id,exam_number,"
+                    "answer_key_number,source_pdf_page,points,stem,raw_question_text,extraction_origin) "
+                    "VALUES(?,?,?,?,1,1,1,2,?,?,?)",
+                    (qid, section, group, file_id, f"{number} question", f"{number} raw", "fixture"),
+                )
+                db.executemany(
+                    "INSERT INTO choices(question_id,number,text) VALUES(?,?,?)",
+                    [(qid, i, f"{number} choice {i}") for i in range(1, 5)],
+                )
+                db.execute(
+                    "INSERT INTO answers(question_id,choice_number,source_file_id,source_pdf_page,"
+                    "preview_and_pdf_agree) VALUES(?,1,?,1,1)", (qid, file_id),
+                )
+                db.execute(
+                    "INSERT INTO review_records(subject_type,subject_id,status,scope,evidence) "
+                    "VALUES('question',?,'needs_manual_review','fixture','{}')", (qid,),
+                )
+            db.commit()
+        self.default = review_ui.ReviewStore(self.db_path, root=root, media_root=self.media_root)
+        self.other = self.default.for_exam("036-I-B")
+
+    def test_store_defaults_to_35_and_filters_list_fast_bundle_and_history(self):
+        for store, number in ((self.default, "035"), (self.other, "036")):
+            qid = f"{number}-I-R-001"
+            self.assertEqual(store.exam_id, f"{number}-I-B")
+            for listing in (store.list_questions(), store.list_questions_fast()):
+                self.assertEqual(listing["exam_id"], store.exam_id)
+                self.assertEqual(listing["counts"]["total"], 1)
+                self.assertEqual([item["id"] for item in listing["items"]], [qid])
+            bundle = store.get_questions_bundle()
+            self.assertEqual(bundle["exam_id"], store.exam_id)
+            self.assertEqual(bundle["total_questions"], 1)
+            self.assertEqual(set(bundle["questions"]), {qid})
+            self.assertEqual(bundle["questions"][qid]["version"], 1)
+            detail = store.get_question(qid, fast=True)
+            self.assertEqual(detail["exam_id"], store.exam_id)
+            self.assertEqual(detail["stem"], f"{number} question")
+            self.assertEqual(len(detail["history"]), 1)
+            self.assertEqual(len(detail["choices"]), 4)
+            if number == "036":
+                self.assertIn(f"?exam_id={store.exam_id}", detail["source_pdf_url"])
+            else:
+                self.assertNotIn("?exam_id=", detail["source_pdf_url"])
+        self.assertFalse(self.other.list_questions()["ai_audit_available"])
+        self.assertEqual(self.other.get_independent_audit_comparison()["questions"], {})
+
+    def test_cross_exam_access_rejected_and_registered_media_isolated(self):
+        with self.assertRaises(review_ui.NotFound):
+            self.default.get_question("036-I-R-001", fast=True)
+        with self.assertRaises(review_ui.NotFound):
+            self.other.get_question("035-I-R-001", fast=True)
+        with self.assertRaises(review_ui.NotFound):
+            self.default.media_path("036-I-R-001", "paper")
+        self.assertEqual(self.other.media_path("036-I-R-001", "paper").parent.name, "36th")
+        self.assertEqual(self.default.media_path("035-I-R-001", "paper").parent.name, "35th")
+        with self.assertRaises(review_ui.ReviewError):
+            self.default.for_exam("036-I-B;DROP TABLE exams")
+        with self.assertRaises(review_ui.ReviewError):
+            self.other.save_audio_segment("036-I-R-001", {})
+
+    def test_review_write_changes_only_selected_exam(self):
+        before_35 = self.default.get_question("035-I-R-001", fast=True)
+        before_36 = self.other.get_question("036-I-R-001", fast=True)
+        result = self.other.save_review("036-I-R-001", {
+            "version": before_36["version"],
+            "status": "verified",
+            "stem": before_36["stem"],
+            "choices": [item["text"] for item in before_36["choices"]],
+            "transcript_text": None,
+            "note": "Checked against the registered source",
+        }, fast_response=True)
+        self.assertTrue(result["saved"])
+        self.assertEqual(result["review_status"], "verified")
+        self.assertEqual(self.other.get_question("036-I-R-001", fast=True)["version"], 2)
+        self.assertEqual(self.default.get_question("035-I-R-001", fast=True)["version"], before_35["version"])
+        self.assertEqual(self.default.get_question("035-I-R-001", fast=True)["review_status"],
+                         before_35["review_status"])
+        with self.assertRaises(review_ui.NotFound):
+            self.other.save_review("035-I-R-001", {})
+
+    def test_http_explicit_exam_selection_and_media(self):
+        server = review_ui.ThreadingHTTPServer(("127.0.0.1", 0), review_ui.make_handler(self.default))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        def stop_server():
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+        self.addCleanup(stop_server)
+        def request(path):
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            try:
+                conn.request("GET", path)
+                response = conn.getresponse()
+                return response.status, response.read()
+            finally:
+                conn.close()
+
+        status, payload = request("/api/questions-fast?exam_id=036-I-B")
+        self.assertEqual(status, 200)
+        data = json.loads(payload)
+        self.assertEqual([item["id"] for item in data["items"]], ["036-I-R-001"])
+        status, payload = request("/api/questions-bundle?exam_id=036-I-B")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(payload)["exam_id"], "036-I-B")
+        status, payload = request("/api/questions/036-I-R-001?exam_id=036-I-B&fast=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(payload)["stem"], "036 question")
+        status, payload = request("/media/036-I-R-001/paper?exam_id=036-I-B")
+        self.assertEqual(status, 200)
+        self.assertIn(b"exam 036", payload)
+        status, _ = request("/api/questions/036-I-R-001?fast=1")
+        self.assertEqual(status, 404)
+        status, _ = request("/media/035-I-R-001/paper?exam_id=036-I-B")
+        self.assertEqual(status, 404)
+
+
+if __name__ == "__main__":
+    unittest.main()

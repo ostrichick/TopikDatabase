@@ -24,11 +24,12 @@ import secrets
 import sqlite3
 import sys
 import tempfile
+import threading
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -49,7 +50,9 @@ ROOT = PROJECT_ROOT
 DB_PATH = ROOT / "topik-past-papers" / "derived" / "035-I-B.sqlite"
 HTML_PATH = Path(__file__).with_name("review_ui.html")
 THIRD_PASS_AUDIT_PATH = ROOT / "topik-past-papers" / "derived" / "audit35-third-pass-20261008" / "ai-audit-35-third-pass-gpt6.json"
-QUESTION_ID = re.compile(r"^035-I-[LR]-\d{3}$")
+DEFAULT_EXAM_ID = "035-I-B"
+EXAM_ID = re.compile(r"^(\d{3})-(I|II)-([A-Z])$")
+QUESTION_ID = re.compile(r"^\d{3}-(?:I|II)-[LR]-\d{3}$")
 STATUSES = ("needs_manual_review", "verified", "rejected")
 MAX_POST_BYTES = 64 * 1024
 SHARED_AUDIO = {25: (25, 26), 26: (25, 26), 27: (27, 28), 28: (27, 28),
@@ -80,7 +83,12 @@ class ReviewStore:
         *,
         database_url: str | None = None,
         media_root: Path | None = None,
+        exam_id: str = DEFAULT_EXAM_ID,
     ):
+        if not isinstance(exam_id, str) or not EXAM_ID.fullmatch(exam_id):
+            raise ReviewError("Invalid exam ID")
+        self.exam_id = exam_id
+        self.question_prefix = exam_id.rsplit("-", 1)[0] + "-"
         self.root = Path(root).resolve()
         explicit_sqlite = db_path is not None
         resolved_url = database_url.strip() if isinstance(database_url, str) and database_url.strip() else None
@@ -100,19 +108,46 @@ class ReviewStore:
             self.media_root = (self.root / "topik-past-papers").resolve()
         else:
             self.media_root = get_media_root()
-        self.source_root = (self.media_root / "35th").resolve()
+        self.source_root = (self.media_root / f"{int(EXAM_ID.fullmatch(exam_id).group(1))}th").resolve()
         self._has_ai_runs_cache: bool | None = None
         self._has_audio_segments_cache: bool | None = None
         self._audio_asset_cache: dict[str, dict] = {}
         self._list_questions_cache: dict | None = None
         self._ai_summaries_cache: tuple[bool, dict] | None = None
         self._ai_summaries_loading: bool = False
+        self._exam_stores: dict[str, ReviewStore] = {}
+        self._exam_stores_lock = threading.Lock()
         if self.backend == "sqlite" and not self.db_path.is_file():
             raise FileNotFoundError(f"Pilot database not found: {self.db_path}. Run py -3 src/pilot_35.py first.")
         with closing(self._connect()) as db:
-            exam = db.execute("SELECT session, level, booklet FROM exams").fetchall()
-            if len(exam) != 1 or (exam[0]["session"], exam[0]["level"], exam[0]["booklet"]) != (35, "I", "B"):
-                raise ReviewError("This reviewer only accepts the 35th TOPIK I B pilot database")
+            exam = db.execute(
+                "SELECT session,level,booklet FROM exams WHERE id=?", (self.exam_id,)
+            ).fetchone()
+            match = EXAM_ID.fullmatch(self.exam_id)
+            if exam is None or (exam["session"], exam["level"], exam["booklet"]) != (
+                int(match.group(1)), match.group(2), match.group(3)
+            ):
+                raise ReviewError(f"Requested exam {self.exam_id} is unavailable or inconsistent")
+
+    def for_exam(self, exam_id: str) -> ReviewStore:
+        """Resolve an explicitly selected exam without changing this store's default."""
+        if exam_id == self.exam_id:
+            return self
+        if not isinstance(exam_id, str) or not EXAM_ID.fullmatch(exam_id):
+            raise ReviewError("Invalid exam ID")
+        with self._exam_stores_lock:
+            if exam_id not in self._exam_stores:
+                self._exam_stores[exam_id] = ReviewStore(
+                    self.db_path if self.backend == "sqlite" else None,
+                    root=self.root, database_url=self.database_url,
+                    media_root=self.media_root, exam_id=exam_id,
+                )
+            return self._exam_stores[exam_id]
+
+    def _media_url(self, question_id: str, kind: str, *, page: int | None = None) -> str:
+        suffix = "" if self.exam_id == DEFAULT_EXAM_ID else f"?exam_id={self.exam_id}"
+        fragment = f"#page={page}" if page is not None else ""
+        return f"/media/{question_id}/{kind}{suffix}{fragment}"
 
     def _connect(self, writable: bool = False):
         if self.backend == "postgres":
@@ -178,9 +213,9 @@ class ReviewStore:
             sql = f"SELECT * FROM audio_segments WHERE question_id IN ({placeholders}) ORDER BY question_id"
         return {item["question_id"]: item for item in db.execute(sql, ordered)}
 
-    @staticmethod
-    def _question(db: sqlite3.Connection, question_id: str) -> sqlite3.Row:
-        if not isinstance(question_id, str) or not QUESTION_ID.fullmatch(question_id):
+    def _question(self, db: sqlite3.Connection, question_id: str) -> sqlite3.Row:
+        if (not isinstance(question_id, str) or not QUESTION_ID.fullmatch(question_id)
+                or not question_id.startswith(self.question_prefix)):
             raise NotFound("Unknown question")
         row = db.execute(
             "SELECT q.*, s.name AS section, g.instruction, g.passage_text, "
@@ -188,7 +223,8 @@ class ReviewStore:
             "a.source_file_id AS answer_file_id, a.source_pdf_page AS answer_pdf_page "
             "FROM questions q JOIN sections s ON s.id=q.section_id "
             "LEFT JOIN question_groups g ON g.id=q.group_id "
-            "JOIN answers a ON a.question_id=q.id WHERE q.id=?", (question_id,)
+            "JOIN answers a ON a.question_id=q.id WHERE q.id=? AND s.exam_id=?",
+            (question_id, self.exam_id),
         ).fetchone()
         if row is None:
             raise NotFound("Unknown question")
@@ -221,11 +257,14 @@ class ReviewStore:
             rows = db.execute(
                 "SELECT q.id, q.exam_number AS number, s.name AS section, "
                 "q.review_status AS status, q.requires_image "
-                "FROM questions q JOIN sections s ON s.id=q.section_id ORDER BY q.exam_number"
+                "FROM questions q JOIN sections s ON s.id=q.section_id "
+                "WHERE s.exam_id=? ORDER BY q.exam_number", (self.exam_id,)
             ).fetchall()
             items = [dict(row) for row in rows]
             audit_target = self.database_url if self.backend == "postgres" else db
-            if self._ai_summaries_cache is not None:
+            if self.exam_id != DEFAULT_EXAM_ID:
+                ai_available, ai_summaries = False, {}
+            elif self._ai_summaries_cache is not None:
                 ai_available, ai_summaries = self._ai_summaries_cache
             elif self.backend == "sqlite":
                 self._ai_summaries_cache = self._ai_audit_summaries(audit_target)
@@ -287,6 +326,7 @@ class ReviewStore:
             counts = {status: sum(item["status"] == status for item in items) for status in STATUSES}
             counts["total"] = len(items)
             result = {
+                "exam_id": self.exam_id,
                 "items": items,
                 "counts": counts,
                 "ai_audit_available": ai_available,
@@ -294,8 +334,8 @@ class ReviewStore:
                 "database_backend": self.backend,
                 "capabilities": {
                     "review_write": True,
-                    "audio_segment_write": True,
-                    "clip_export": True,
+                    "audio_segment_write": self.exam_id == DEFAULT_EXAM_ID,
+                    "clip_export": self.exam_id == DEFAULT_EXAM_ID,
                     "ai_audit_write": False,
                 },
             }
@@ -323,7 +363,8 @@ class ReviewStore:
                 " LEFT JOIN ranked_reviews latest ON latest.subject_id=q.id AND latest.latest_rank=1"
                 " LEFT JOIN ranked_reviews manual ON manual.subject_id=q.id"
                 " AND manual.scope='manual_question_review' AND manual.scope_rank=1"
-                " ORDER BY q.exam_number"
+                " WHERE s.exam_id=? ORDER BY q.exam_number",
+                (self.exam_id,),
             ).fetchall()]
         for item in items:
             record_id = item.pop("manual_review_id")
@@ -348,10 +389,12 @@ class ReviewStore:
                 }
         counts = {status: sum(item["status"] == status for item in items) for status in STATUSES}
         counts["total"] = len(items)
-        return {"items": items, "counts": counts, "ai_audit_available": False,
+        return {"exam_id": self.exam_id, "items": items, "counts": counts, "ai_audit_available": False,
                 "read_only": False, "database_backend": self.backend,
-                "capabilities": {"review_write": True, "audio_segment_write": True,
-                                 "clip_export": True, "ai_audit_write": False}}
+                "capabilities": {"review_write": True,
+                                 "audio_segment_write": self.exam_id == DEFAULT_EXAM_ID,
+                                 "clip_export": self.exam_id == DEFAULT_EXAM_ID,
+                                 "ai_audit_write": False}}
 
     @staticmethod
     def _has_ai_audit_tables(db) -> bool:
@@ -670,7 +713,8 @@ class ReviewStore:
                              (question["id"],)).fetchone()
         if segment is None:
             return None
-        pair = list(SHARED_AUDIO.get(question["exam_number"], (question["exam_number"],)))
+        pair = list(SHARED_AUDIO.get(question["exam_number"], (question["exam_number"],))
+                    if self.exam_id == DEFAULT_EXAM_ID else (question["exam_number"],))
         clip_url = None
         if segment["status"] == "verified" and segment["clip_relative_path"]:
             # Never reveal an unverified file path supplied by database contents.
@@ -782,6 +826,8 @@ class ReviewStore:
             return self._clip_file(segment)
 
     def save_audio_segment(self, question_id: str, payload: dict) -> dict:
+        if self.exam_id != DEFAULT_EXAM_ID:
+            raise ReviewError("Audio editing for this exam is not yet supported")
         self._list_questions_cache = None
         """Persist a reviewer-specified interval; sync shared-dialogue pairs atomically.
 
@@ -857,6 +903,8 @@ class ReviewStore:
         return self.get_question(question_id)
 
     def export_audio_clip(self, question_id: str) -> dict:
+        if self.exam_id != DEFAULT_EXAM_ID:
+            raise ReviewError("Audio clip export for this exam is not yet supported")
         self._list_questions_cache = None
         """Export/rematerialize a verified interval while keeping the source MP3 immutable."""
         from src.audio_35 import AudioError, export_segment
@@ -1023,6 +1071,9 @@ class ReviewStore:
 
     def get_independent_audit_comparison(self) -> dict:
         """Present complete archived AI judgments side by side, without mutating audit history."""
+        if self.exam_id != DEFAULT_EXAM_ID:
+            return {"exam_id": self.exam_id, "sources": {}, "questions": {},
+                    "disagreement_count": 0, "available": False}
         results: dict[str, dict] = {"gemini": {}, "chatgpt": {}}
         sources: dict[str, dict] = {
             "gemini": {"available": False, "label": "Gemini", "reason": "70문항 Gemini 결과를 찾지 못했습니다."},
@@ -1147,7 +1198,7 @@ class ReviewStore:
         with closing(self._connect()) as db:
             row = self._question(db, question_id)
             question = dict(row)
-            ai_audit = None if fast else self._get_ai_audit_for_question(db, question_id)[1]
+            ai_audit = None if fast or self.exam_id != DEFAULT_EXAM_ID else self._get_ai_audit_for_question(db, question_id)[1]
             choices = [dict(item) for item in db.execute(
                 "SELECT number, text FROM choices WHERE question_id=? ORDER BY number", (question_id,)
             )]
@@ -1177,6 +1228,7 @@ class ReviewStore:
             version = len(records) if len(records) < 30 else self._version(db, question_id)
             result = {
                 "id": question_id,
+                "exam_id": self.exam_id,
                 "number": question["exam_number"],
                 "section": question["section"],
                 "review_status": question["review_status"],
@@ -1193,14 +1245,14 @@ class ReviewStore:
                 "points": question["points"],
                 "source_pdf_page": question["source_pdf_page"],
                 "answer_key_number": question["answer_key_number"],
-                "source_pdf_url": f"/media/{question_id}/paper#page={question['source_pdf_page']}",
-                "answer_pdf_url": f"/media/{question_id}/answer#page={question['answer_pdf_page']}",
+                "source_pdf_url": self._media_url(question_id, "paper", page=question["source_pdf_page"]),
+                "answer_pdf_url": self._media_url(question_id, "answer", page=question["answer_pdf_page"]),
                 "transcript": transcript_info,
-                "transcript_pdf_url": (f"/media/{question_id}/transcript#page={transcript_info['source_pdf_page']}"
+                "transcript_pdf_url": (self._media_url(question_id, "transcript", page=transcript_info["source_pdf_page"])
                                        if transcript_info else None),
-                "audio_url": f"/media/{question_id}/audio" if transcript_info else None,
+                "audio_url": self._media_url(question_id, "audio") if transcript_info else None,
                 "audio_segment": self._audio_info(db, row),
-                "images": [{"url": f"/media/{question_id}/image/{index}", "key": key}
+                "images": [{"url": self._media_url(question_id, f"image/{index}"), "key": key}
                            for index, key in enumerate(image_keys)],
                 "requires_image": bool(question["requires_image"]),
                 "preview_flags": json.loads(question["preview_flags_json"]),
@@ -1219,28 +1271,31 @@ class ReviewStore:
                 db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             else:
                 db.execute("BEGIN")
-            exam_row = db.execute("SELECT id FROM exams LIMIT 1").fetchone()
-            exam_id = exam_row["id"] if exam_row else "035-I-B"
-
             rows = db.execute(
                 "SELECT q.*, s.name AS section, g.instruction, g.passage_text, "
                 "g.first_exam_number, g.last_exam_number, a.choice_number, "
                 "a.source_file_id AS answer_file_id, a.source_pdf_page AS answer_pdf_page "
                 "FROM questions q JOIN sections s ON s.id=q.section_id "
                 "LEFT JOIN question_groups g ON g.id=q.group_id "
-                "JOIN answers a ON a.question_id=q.id ORDER BY q.exam_number"
+                "JOIN answers a ON a.question_id=q.id "
+                "WHERE s.exam_id=? ORDER BY q.exam_number", (self.exam_id,)
             ).fetchall()
 
             choice_rows = db.execute(
-                "SELECT question_id, number, text FROM choices ORDER BY question_id, number"
+                "SELECT c.question_id,c.number,c.text FROM choices c "
+                "JOIN questions q ON q.id=c.question_id "
+                "JOIN sections s ON s.id=q.section_id "
+                "WHERE s.exam_id=? ORDER BY c.question_id,c.number", (self.exam_id,)
             ).fetchall()
             choices_by_qid: dict[str, list[dict]] = defaultdict(list)
             for c in choice_rows:
                 choices_by_qid[c["question_id"]].append({"number": c["number"], "text": c["text"]})
 
             transcript_rows = db.execute(
-                "SELECT question_id, dialogue_text AS text, source_pdf_page, review_status, warnings_json "
-                "FROM transcripts"
+                "SELECT t.question_id,t.dialogue_text AS text,t.source_pdf_page,"
+                "t.review_status,t.warnings_json FROM transcripts t "
+                "JOIN questions q ON q.id=t.question_id "
+                "JOIN sections s ON s.id=q.section_id WHERE s.exam_id=?", (self.exam_id,)
             ).fetchall()
             transcript_by_qid = {}
             for t in transcript_rows:
@@ -1253,7 +1308,10 @@ class ReviewStore:
                 transcript_by_qid[qid] = item
 
             image_rows = db.execute(
-                "SELECT question_id, image_key FROM question_images ORDER BY question_id, image_key"
+                "SELECT qi.question_id,qi.image_key FROM question_images qi "
+                "JOIN questions q ON q.id=qi.question_id "
+                "JOIN sections s ON s.id=q.section_id "
+                "WHERE s.exam_id=? ORDER BY qi.question_id,qi.image_key", (self.exam_id,)
             ).fetchall()
             images_by_qid: dict[str, list[str]] = defaultdict(list)
             for img in image_rows:
@@ -1261,7 +1319,9 @@ class ReviewStore:
 
             record_rows = db.execute(
                 "SELECT subject_id, status, scope, evidence, reviewed_at FROM review_records "
-                "WHERE subject_type='question' ORDER BY id DESC"
+                "WHERE subject_type='question' AND subject_id IN ("
+                "SELECT q.id FROM questions q JOIN sections s ON s.id=q.section_id "
+                "WHERE s.exam_id=?) ORDER BY id DESC", (self.exam_id,)
             ).fetchall()
             records_by_qid: dict[str, list[dict]] = defaultdict(list)
             count_by_qid: dict[str, int] = defaultdict(int)
@@ -1284,13 +1344,20 @@ class ReviewStore:
             if has_audio:
                 asset_rows = db.execute(
                     "SELECT a.id, a.section_id, a.duration_seconds, s.sha256 FROM audio_assets a "
-                    "JOIN source_files s ON s.id=a.source_file_id"
+                    "JOIN source_files s ON s.id=a.source_file_id "
+                    "JOIN sections sec ON sec.id=a.section_id "
+                    "WHERE sec.exam_id=?", (self.exam_id,)
                 ).fetchall()
                 assets_by_sec = {r["section_id"]: r for r in asset_rows}
                 for sec_id, asset in assets_by_sec.items():
                     self._audio_asset_cache[sec_id] = asset
 
-                segment_rows = db.execute("SELECT * FROM audio_segments").fetchall()
+                segment_rows = db.execute(
+                    "SELECT a.* FROM audio_segments a "
+                    "JOIN questions q ON q.id=a.question_id "
+                    "JOIN sections s ON s.id=q.section_id WHERE s.exam_id=?",
+                    (self.exam_id,),
+                ).fetchall()
                 segments_by_qid = {r["question_id"]: r for r in segment_rows}
 
             questions_map = {}
@@ -1309,12 +1376,13 @@ class ReviewStore:
                     if asset and asset["duration_seconds"] is not None:
                         segment = segments_by_qid.get(qid)
                         if segment is not None:
-                            pair = list(SHARED_AUDIO.get(question["exam_number"], (question["exam_number"],)))
+                            pair = list(SHARED_AUDIO.get(question["exam_number"], (question["exam_number"],))
+                                        if self.exam_id == DEFAULT_EXAM_ID else (question["exam_number"],))
                             clip_url = None
                             if segment["status"] == "verified" and segment["clip_relative_path"]:
                                 try:
                                     self._clip_file(segment)
-                                    clip_url = f"/media/{qid}/clip"
+                                    clip_url = self._media_url(qid, "clip")
                                 except ReviewError:
                                     pass
                             audio_segment = {
@@ -1329,6 +1397,7 @@ class ReviewStore:
 
                 q_data = {
                     "id": qid,
+                    "exam_id": self.exam_id,
                     "number": question["exam_number"],
                     "section": question["section"],
                     "review_status": question["review_status"],
@@ -1349,17 +1418,17 @@ class ReviewStore:
                     "points": question["points"],
                     "source_pdf_page": question["source_pdf_page"],
                     "answer_key_number": question["answer_key_number"],
-                    "source_pdf_url": f"/media/{qid}/paper#page={question['source_pdf_page']}",
-                    "answer_pdf_url": f"/media/{qid}/answer#page={question['answer_pdf_page']}",
+                    "source_pdf_url": self._media_url(qid, "paper", page=question["source_pdf_page"]),
+                    "answer_pdf_url": self._media_url(qid, "answer", page=question["answer_pdf_page"]),
                     "transcript": transcript_info,
                     "transcript_pdf_url": (
-                        f"/media/{qid}/transcript#page={transcript_info['source_pdf_page']}"
+                        self._media_url(qid, "transcript", page=transcript_info["source_pdf_page"])
                         if transcript_info else None
                     ),
-                    "audio_url": f"/media/{qid}/audio" if transcript_info else None,
+                    "audio_url": self._media_url(qid, "audio") if transcript_info else None,
                     "audio_segment": audio_segment,
                     "images": [
-                        {"url": f"/media/{qid}/image/{index}", "key": key}
+                        {"url": self._media_url(qid, f"image/{index}"), "key": key}
                         for index, key in enumerate(image_keys)
                     ],
                     "requires_image": bool(question["requires_image"]),
@@ -1369,7 +1438,7 @@ class ReviewStore:
                 questions_map[qid] = q_data
 
             return {
-                "exam_id": exam_id,
+                "exam_id": self.exam_id,
                 "total_questions": len(questions_map),
                 "questions": questions_map,
             }
@@ -1524,7 +1593,7 @@ class ReviewStore:
         try:
             source.relative_to(self.source_root)
         except ValueError as exc:
-            raise ReviewError("Source escapes the approved 35th folder") from exc
+            raise ReviewError("Source escapes the selected exam folder") from exc
         if not source.is_file() or source.suffix.lower() != (".mp3" if kind == "audio" else ".pdf"):
             raise NotFound("Source file unavailable or of unexpected type")
         if source.stat().st_size != record["byte_size"]:
@@ -1567,6 +1636,15 @@ def make_handler(store: ReviewStore):
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "TOPIKLocalReview/1.0"
+
+        def _request_store(self):
+            query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            selected = query.get("exam_id", [])
+            if not selected:
+                return store
+            if len(selected) != 1 or not EXAM_ID.fullmatch(selected[0]):
+                raise ReviewError("Invalid exam ID")
+            return store.for_exam(selected[0])
 
         def _headers(self, status: int, mime: str, length: int, **extra):
             self.send_response(status)
@@ -1662,27 +1740,28 @@ def make_handler(store: ReviewStore):
                 return self._json(403, {"error": "Only 127.0.0.1 is allowed"})
             parts = [unquote(piece) for piece in urlsplit(self.path).path.split("/") if piece]
             try:
+                active_store = self._request_store()
                 if not parts:
                     contents = HTML_PATH.read_bytes()
                     self._headers(200, "text/html; charset=utf-8", len(contents))
                     return self.wfile.write(contents)
                 if parts == ["api", "questions"]:
-                    return self._json(200, {**store.list_questions(), "csrf_token": csrf_token})
+                    return self._json(200, {**active_store.list_questions(), "csrf_token": csrf_token})
                 if parts == ["api", "questions-fast"]:
-                    return self._json(200, {**store.list_questions_fast(), "csrf_token": csrf_token})
+                    return self._json(200, {**active_store.list_questions_fast(), "csrf_token": csrf_token})
                 if parts == ["api", "questions-bundle"]:
-                    return self._json(200, store.get_questions_bundle())
+                    return self._json(200, active_store.get_questions_bundle())
                 if parts == ["api", "independent-audits"]:
-                    return self._json(200, store.get_independent_audit_comparison())
+                    return self._json(200, active_store.get_independent_audit_comparison())
                 if len(parts) == 3 and parts[:2] == ["api", "questions"]:
-                    fast = urlsplit(self.path).query == "fast=1"
-                    return self._json(200, store.get_question(parts[2], fast=fast))
+                    fast = parse_qs(urlsplit(self.path).query).get("fast") == ["1"]
+                    return self._json(200, active_store.get_question(parts[2], fast=fast))
                 if len(parts) == 3 and parts[0] == "media":
                     if parts[2] == "clip":
-                        return self._file(store.clip_path(parts[1]))
-                    return self._file(store.media_path(parts[1], parts[2]))
+                        return self._file(active_store.clip_path(parts[1]))
+                    return self._file(active_store.media_path(parts[1], parts[2]))
                 if len(parts) == 4 and parts[0] == "media" and parts[2] == "image" and parts[3].isdigit():
-                    image, mime = store.get_image(parts[1], int(parts[3]))
+                    image, mime = active_store.get_image(parts[1], int(parts[3]))
                     self._headers(200, mime, len(image))
                     return self.wfile.write(image)
                 raise NotFound("Unknown page")
@@ -1703,20 +1782,21 @@ def make_handler(store: ReviewStore):
             if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
                 return self._json(415, {"error": "Expected application/json"})
             try:
+                active_store = self._request_store()
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 < length <= MAX_POST_BYTES:
                     raise ReviewError("Review request too large or empty")
                 self._body_consumed = True
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
                 if parts[3] == "review":
-                    result = store.save_review(parts[2], payload,
-                                               fast_response=urlsplit(self.path).query == "fast=1")
+                    result = active_store.save_review(parts[2], payload,
+                        fast_response=parse_qs(urlsplit(self.path).query).get("fast") == ["1"])
                 elif parts[3] == "audio-segment":
-                    result = store.save_audio_segment(parts[2], payload)
+                    result = active_store.save_audio_segment(parts[2], payload)
                 else:
                     if payload != {}:
                         raise ReviewError("Audio export request must be an empty JSON object")
-                    result = store.export_audio_clip(parts[2])
+                    result = active_store.export_audio_clip(parts[2])
                 return self._json(200, result)
             except ReviewError as exc:
                 return self._error(exc)
@@ -1736,10 +1816,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=None,
                         help="Local-only port (default: try 8765, then choose a free port; 0: OS-selected)")
+    parser.add_argument("--exam-id", default=DEFAULT_EXAM_ID,
+                        help="Explicit exam selection, e.g. 035-I-B or 036-I-B (default: 035-I-B)")
     args = parser.parse_args()
     if args.port is not None and not 0 <= args.port <= 65535:
         parser.error("--port must be between 0 and 65535")
-    store = ReviewStore()
+    store = ReviewStore(exam_id=args.exam_id)
     handler = make_handler(store)
     requested = 8765 if args.port is None else args.port
     try:
@@ -1757,7 +1839,7 @@ def main():
         except OSError as fallback_error:
             raise SystemExit(f"Cannot bind a local review server: {fallback_error}") from fallback_error
     with server:
-        print(f"TOPIK 35 I review: http://127.0.0.1:{server.server_port}/")
+        print(f"TOPIK {getattr(store, 'exam_id', DEFAULT_EXAM_ID)} review: http://127.0.0.1:{server.server_port}/")
         if getattr(store, "backend", "sqlite") == "postgres":
             print("Central PostgreSQL review mode. Source PDFs/audio and exported clips stay device-local; review/audio/clip workflows are enabled.")
         else:
