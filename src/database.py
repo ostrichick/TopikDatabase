@@ -242,6 +242,17 @@ class PostgresAuditConnection:
                 raise DatabaseOperationError("PostgreSQL AI audit operation failed") from exc
             raise
 
+    def executemany(self, sql: str, params_seq) -> None:
+        """Insert a batch on the same transaction without per-row network RTT."""
+        try:
+            with self._raw.cursor() as cursor:
+                cursor.executemany(qmark_to_postgres(sql), params_seq)
+        except Exception as exc:
+            psycopg, _ = _psycopg_tuple()
+            if isinstance(exc, psycopg.Error):
+                raise DatabaseOperationError("PostgreSQL batch operation failed") from exc
+            raise
+
     def commit(self):
         self._raw.commit()
 

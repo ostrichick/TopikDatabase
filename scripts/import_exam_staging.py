@@ -221,6 +221,7 @@ def apply(data):
             )
         answer_path = next(s["relative_path"] for s in data["sources"] if s["kind"] == "answer_key")
         linked_images = set()
+        pending_choices = []
         for q in data["questions"]:
             db.execute(
                 "INSERT INTO questions(id,section_id,group_id,source_file_id,exam_number,"
@@ -235,8 +236,7 @@ def apply(data):
                  json.dumps(q.get("warnings", []), ensure_ascii=False)),
             )
             for c in q["choices"]:
-                db.execute("INSERT INTO choices(question_id,number,text) VALUES(?,?,?)",
-                           (q["id"], c["number"], c["text"]))
+                pending_choices.append((q["id"], c["number"], c["text"]))
             db.execute(
                 "INSERT INTO answers(question_id,choice_number,source_file_id,source_pdf_page,"
                 "preview_and_pdf_agree) VALUES(?,?,?,?,0)",
@@ -263,6 +263,8 @@ def apply(data):
                     (q["id"], source_ids[t["source_relative_path"]], t["source_pdf_page"],
                      t["dialogue_text"], json.dumps(t.get("warnings", []), ensure_ascii=False)),
                 )
+        db.executemany("INSERT INTO choices(question_id,number,text) VALUES(?,?,?)",
+                       pending_choices)
         audio_path = next(s["relative_path"] for s in data["sources"] if s["kind"] == "listening_audio")
         db.execute(
             "INSERT INTO audio_assets(id,section_id,source_file_id,duration_seconds,timing_status) "

@@ -142,6 +142,31 @@ class ImportExamStagingTests(unittest.TestCase):
         self.assertIn("preview_and_pdf_agree) VALUES(?,?,?,?,0)", code)
         self.assertNotIn("preview_and_pdf_agree) VALUES(?,?,?,?,1)", code)
 
+    def test_postgres_audit_adapter_supports_single_batch_on_same_connection(self):
+        from src.database import PostgresAuditConnection
+
+        class Cursor:
+            calls = []
+            def __enter__(self):
+                return self
+            def __exit__(self, *unused):
+                return False
+            def executemany(self, sql, values):
+                self.calls.append((sql, values))
+
+        class Raw:
+            cursor_instance = Cursor()
+            def cursor(self):
+                return self.cursor_instance
+
+        adapter = object.__new__(PostgresAuditConnection)
+        adapter._raw = Raw()
+        adapter.executemany("INSERT INTO choices VALUES(?,?,?)",
+                            [("036-I-L-001", 1, "a"), ("036-I-L-001", 2, "b")])
+        sql, values = Raw.cursor_instance.calls[-1]
+        self.assertEqual(sql, "INSERT INTO choices VALUES(%s,%s,%s)")
+        self.assertEqual(len(values), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
