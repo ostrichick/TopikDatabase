@@ -6,6 +6,7 @@ import base64
 import hashlib
 import sqlite3
 import unittest
+from unittest.mock import patch
 
 from scripts import correct_audit_findings_35 as correction
 from scripts import finalize_blind_audit_35 as finalization
@@ -169,6 +170,113 @@ class CorrectAuditFindings35Tests(unittest.TestCase):
         response["findings"] = [{"subject_id": ids[0]}]
         with self.assertRaisesRegex(RuntimeError, "unresolved findings"):
             finalization._validate_result(response, expected)
+
+    def test_atomic_final_approval_commits_once_and_preserves_transcripts(self):
+        ids = [f"035-I-L-{n:03d}" for n in range(1, 31)] + [
+            f"035-I-R-{n:03d}" for n in range(31, 71)
+        ]
+        response = {
+            "contract_version": ai_audit_35.CONTRACT_VERSION,
+            "pass_id": finalization.PASS_ID,
+            "input_sha256": finalization.INPUT_SHA256,
+            "completed_subject_ids": ids,
+            "verdicts": [{"subject_id": qid, "verdict": "clear"} for qid in ids],
+            "findings": [],
+        }
+
+        class FakeCursor:
+            def __init__(self, rows=(), rowcount=0):
+                self.rows = rows
+                self.rowcount = rowcount
+
+            def fetchone(self):
+                return self.rows[0] if self.rows else None
+
+            def fetchall(self):
+                return self.rows
+
+        class FakeAuditConnection:
+            def __init__(self, *, corrupted_source=False, rejected_transcript=False,
+                         missing_history=False):
+                self.corrupted_source = corrupted_source
+                self.rejected_transcript = rejected_transcript
+                self.missing_history = missing_history
+                self.statements = []
+                self.commits = 0
+                self.rollbacks = 0
+                self.closed = False
+
+            def execute(self, sql, params=()):
+                self.statements.append(sql)
+                if sql.startswith("SELECT r.snapshot_sha256"):
+                    return FakeCursor([(
+                        finalization.SOURCE_SNAPSHOT_SHA256,
+                        finalization.INPUT_SHA256,
+                        "independent",
+                        __import__("json").dumps(response),
+                    )])
+                if sql.startswith("SELECT id,review_status FROM questions"):
+                    return FakeCursor([(qid, "needs_manual_review" if i < 45 else "verified")
+                                       for i, qid in enumerate(ids)])
+                if sql.startswith("SELECT question_id,review_status FROM transcripts"):
+                    statuses = [(qid, "verified") for qid in ids[:30]]
+                    if self.rejected_transcript:
+                        statuses[0] = (ids[0], "rejected")
+                    return FakeCursor(statuses)
+                if sql.startswith("UPDATE questions SET review_status"):
+                    return FakeCursor([(qid,) for qid in ids[:45]], 45)
+                if sql.startswith("INSERT INTO review_records"):
+                    return FakeCursor(rowcount=44 if self.missing_history else 45)
+                if sql.startswith("SELECT review_status,COUNT"):
+                    return FakeCursor([("verified", 70)])
+                return FakeCursor()
+
+            def commit(self):
+                self.commits += 1
+
+            def rollback(self):
+                self.rollbacks += 1
+
+            def close(self):
+                self.closed = True
+
+        def exercise(**options):
+            db = FakeAuditConnection(**options)
+            with patch.object(finalization, "get_database_url", return_value="postgresql://mock"), \
+                 patch.object(finalization, "PostgresAuditConnection", return_value=db), \
+                 patch.object(ai_audit_35, "_source_snapshot_payload", return_value={"mock": "snapshot"}), \
+                 patch.object(ai_audit_35, "_sha", return_value=(
+                     "different" if options.get("corrupted_source") else
+                     finalization.SOURCE_SNAPSHOT_SHA256
+                 )):
+                if options:
+                    with self.assertRaises(RuntimeError):
+                        finalization.apply()
+                else:
+                    result = finalization.apply()
+                    self.assertEqual(result["approved_now_count"], 45)
+                    self.assertTrue(result["atomic"])
+            return db
+
+        successful = exercise()
+        self.assertEqual(successful.commits, 1)
+        self.assertEqual(successful.rollbacks, 0)
+        self.assertTrue(successful.closed)
+        self.assertTrue(next(i for i, s in enumerate(successful.statements)
+                             if s.startswith("LOCK TABLE")) <
+                        next(i for i, s in enumerate(successful.statements)
+                             if s.startswith("UPDATE questions")))
+        self.assertFalse(any("UPDATE transcripts" in sql for sql in successful.statements))
+
+        for options in (
+            {"corrupted_source": True},
+            {"rejected_transcript": True},
+            {"missing_history": True},
+        ):
+            failed = exercise(**options)
+            self.assertEqual(failed.commits, 0)
+            self.assertEqual(failed.rollbacks, 1)
+            self.assertTrue(failed.closed)
 
 
 if __name__ == "__main__":

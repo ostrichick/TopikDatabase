@@ -1,8 +1,9 @@
 """Finalize the human-confirmed 35-I text extraction review after full blind audit.
 
 The user already reviewed the 70 questions and confirmed source-backed fixes.
-This helper never approves from a partial or stale AI result. The only
-operational write path is the existing versioned ReviewStore.save_review API.
+This helper never approves from a partial or stale AI result. Finalization is
+one PostgreSQL transaction, preserving existing transcript/audio status and
+recording explicitly user-authorized automated approvals.
 
 Usage:
     py -3 scripts/finalize_blind_audit_35.py check
@@ -21,8 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src import ai_audit_35
-from src.database import connect_postgres, get_database_url
-from src.review_ui import ReviewStore
+from src.database import PostgresAuditConnection, connect_postgres, get_database_url
 
 
 RUN_ID = "audit35-f05e8a9febf348b2"
@@ -30,9 +30,11 @@ PASS_ID = "audit35-f05e8a9febf348b2-p1-ee94537a"
 SOURCE_SNAPSHOT_SHA256 = "631c4fb71784439961956b582d0e66847eb862e2c2370f49c89d5ca520057c35"
 INPUT_SHA256 = "d509e54faea7982fd01cabb3b5dbd1cc4e8c7b5b9ada39841a2f562b48767249"
 REVIEW_NOTE = (
-    "35회차 문제/텍스트 추출 최종 검수: 사용자가 전체 문항을 검토하고 "
-    "원본 기반 오류 보정을 확인함. source-backed correction 이후 70문항 "
-    f"독립 blind audit {RUN_ID} 전부 clear. 음원 candidate 구간 승인은 별도 작업."
+    "User-authorized completion of 35th TOPIK I question/text extraction: "
+    "the user examined the extracted exam and confirmed the source-backed "
+    f"correction findings; independent blind audit {RUN_ID} returned 70/70 clear. "
+    "Applied by automation, not a new per-question human inspection. "
+    "MP3 segment timing/audio playback verification is a separate task."
 )
 
 
@@ -105,31 +107,107 @@ def check() -> dict:
 
 
 def apply() -> dict:
-    baseline = check()
-    store = ReviewStore()
-    completed = []
-    for question_id in baseline["pending"]:
-        question = store.get_question(question_id, fast=True)
-        if question["review_status"] != "needs_manual_review":
-            raise RuntimeError(f"question state changed during finalization: {question_id}")
-        payload = {
-            "version": question["version"],
-            "status": "verified",
-            "stem": question["stem"],
-            "choices": [item["text"] for item in question["choices"]],
-            "transcript_text": (
-                question["transcript"]["text"] if question["transcript"] else None
-            ),
-            "note": REVIEW_NOTE,
+    url = get_database_url(required=True)
+    db = PostgresAuditConnection(url, readonly=False)
+    try:
+        # Prevent any changes to the frozen audit source while comparing the
+        # full content snapshot and committing all approval/history rows.
+        # SELECTs by reviewers remain available; competing writes wait.
+        db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        db.execute(
+            "LOCK TABLE exams,sections,source_files,question_groups,questions,"
+            "choices,answers,images,question_images,transcripts,audio_assets,"
+            "audio_segments IN SHARE ROW EXCLUSIVE MODE"
+        )
+
+        audit_row = db.execute(
+            "SELECT r.snapshot_sha256,p.input_sha256,p.perspective,res.raw_json "
+            "FROM ai_audit_runs r JOIN ai_audit_passes p ON p.run_id=r.id "
+            "JOIN ai_audit_results res ON res.pass_id=p.id "
+            "WHERE r.id=? AND p.id=?",
+            (RUN_ID, PASS_ID),
+        ).fetchone()
+        if audit_row is None:
+            raise RuntimeError("final v4 independent blind audit result not imported")
+        snapshot_sha, input_sha, perspective, raw_json = audit_row
+        if snapshot_sha != SOURCE_SNAPSHOT_SHA256 or input_sha != INPUT_SHA256:
+            raise RuntimeError("frozen audit run/pass identity mismatch")
+        if perspective != "independent":
+            raise RuntimeError("final pass must be independently audited")
+
+        questions = db.execute(
+            "SELECT id,review_status FROM questions ORDER BY id"
+        ).fetchall()
+        subject_ids = {item[0] for item in questions}
+        if len(questions) != 70 or len(subject_ids) != 70:
+            raise RuntimeError("operational corpus is not exactly 70 unique questions")
+        if any(status not in ("verified", "needs_manual_review") for _, status in questions):
+            raise RuntimeError("rejected or unexpected review status blocks finalization")
+        _validate_result(json.loads(raw_json), subject_ids)
+
+        transcript_statuses = db.execute(
+            "SELECT question_id,review_status FROM transcripts ORDER BY question_id"
+        ).fetchall()
+        if len(transcript_statuses) != 30 or any(
+            status != "verified" for _, status in transcript_statuses
+        ):
+            raise RuntimeError("all 30 human-verified listening transcripts must remain verified")
+
+        # This is the actual source snapshot check inside the SAME database
+        # transaction that applies the approvals; there is no TOCTOU window.
+        current_snapshot = ai_audit_35._source_snapshot_payload(db)
+        if ai_audit_35._sha(current_snapshot) != SOURCE_SNAPSHOT_SHA256:
+            raise RuntimeError("frozen source differs from operational content; nothing approved")
+
+        pending = [qid for qid, status in questions if status == "needs_manual_review"]
+        if pending:
+            changed = db.execute(
+                "UPDATE questions SET review_status='verified' "
+                "WHERE id=ANY(?) AND review_status='needs_manual_review' RETURNING id",
+                (pending,),
+            ).fetchall()
+            if {row[0] for row in changed} != set(pending):
+                raise RuntimeError("stale question status prevented atomic finalization")
+            cursor = db.execute(
+                "INSERT INTO review_records "
+                "(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
+                "SELECT 'question',q.id,'verified','user_authorized_bulk_finalizer',"
+                "'manual_question_review',"
+                "jsonb_build_object("
+                "'note',?::text,"
+                "'automation',true,"
+                "'audit_run_id',?::text,"
+                "'before',jsonb_build_object('status','needs_manual_review'),"
+                "'after',jsonb_build_object('status','verified')"
+                ")::text,"
+                "to_char(clock_timestamp() AT TIME ZONE 'UTC', "
+                "'YYYY-MM-DD\"T\"HH24:MI:SS.US\"+00:00\"') "
+                "FROM questions q WHERE q.id=ANY(?) ORDER BY q.id",
+                (REVIEW_NOTE, RUN_ID, pending),
+            )
+            if cursor.rowcount != len(pending):
+                raise RuntimeError("missing approval history rows; rolling back all changes")
+        status_rows = db.execute(
+            "SELECT review_status,COUNT(*) FROM questions GROUP BY review_status"
+        ).fetchall()
+        if dict(status_rows) != {"verified": 70}:
+            raise RuntimeError("not all 70 questions verified; rolling back all changes")
+
+        # Do not change transcript, answer, choice, image or audio rows.
+        db.commit()
+        return {
+            "run_id": RUN_ID,
+            "snapshot_sha256": SOURCE_SNAPSHOT_SHA256,
+            "clear": 70, "finding": 0, "uncertain": 0,
+            "verified": 70, "pending": [], "approved": True,
+            "approved_now": pending, "approved_now_count": len(pending),
+            "atomic": True,
         }
-        saved = store.save_review(question_id, payload, fast_response=True)
-        if not saved["saved"] or saved["review_status"] != "verified":
-            raise RuntimeError(f"review approval not confirmed: {question_id}")
-        completed.append(question_id)
-    verified = check()
-    if not verified["approved"]:
-        raise RuntimeError("final human review status not fully verified")
-    return {"approved_now": completed, "approved_now_count": len(completed), **verified}
+    except BaseException:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def main(argv: list[str] | None = None) -> int:

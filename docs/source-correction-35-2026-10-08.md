@@ -120,7 +120,7 @@ the stored SHA-256 for source-level fidelity verification.
 The intermediate v3 run added frozen image payloads before the group page
 reference fix and has no final result. It is retained for traceability.
 
-The final candidate is v4:
+The final accepted blind audit is v4:
 
 - run: `audit35-f05e8a9febf348b2`
 - label: `final-blind-full70-after-source-correction-20261008-v4`
@@ -136,21 +136,71 @@ The independent v4 auditor receives only the immutable pass-v4 bundle and
 original cited exam files. Final status and approval must refer to v4 and
 require 70 `clear`, 0 findings and 0 uncertain verdicts.
 
+The v4 audit was completed independently with **70 clear / 0 finding /
+0 uncertain**. The audit compared the original paper, official answer key,
+listening transcript and active image payloads against the frozen bundle.
+It verified all 70 answer/point pairs and six active image SHA-256 values.
+Listening MP3 SHA-256 was verified, but full audio playback / segment timing
+was **not** certified.
+
+The first v4 result was valid but its free-text rationale had been replaced
+with literal question marks by an encoding error. The auditor preserved that
+original and produced a second, human-readable ASCII evidence file with the
+same 70 subject IDs, judgments, confidences, source references, pass/input
+identity and no new audit decisions:
+
+- retained original: `topik-past-papers/derived/ai-audit-final-blind-20261008/result-v4.json`
+- imported evidence: `topik-past-papers/derived/ai-audit-final-blind-20261008/result-v4-evidence.json`
+- operational audit result ID: `5`
+- import attempt ID: `5`, status `succeeded`
+- stored result SHA-256:
+  `e0de2bdeb2337c67ba89a99aa871de365cfb40dbadf5f43277d8dcda09039cfa`
+
 ## Final approval gate
 
 `scripts/finalize_blind_audit_35.py check` validates the exact v4 run/pass
 identity, 70 unique completed subjects and 70 `clear` verdicts, zero findings,
-and a live PostgreSQL content snapshot equal to the frozen v4 SHA-256.
-Until a valid result is imported it fails closed with
-`final v4 independent blind audit result not imported`.
-Only after the check passes may `apply` use the existing versioned
-`ReviewStore.save_review` path to approve pending question records, preserving
-the original answer, choice, image, and audio data and noting the user's
-earlier manual inspection. The audio segment candidates remain outside this
-text-extraction approval.
+and a live PostgreSQL source-content snapshot equal to the frozen v4 SHA-256.
 
-Latest code validation: **169 tests passed**, `git diff --check` passed.
-The operational PostgreSQL source snapshot has been read again and equals
+After independent QA uncovered TOCTOU and partial-commit risks in a
+per-question approach, `apply` was hardened to use **one PostgreSQL
+REPEATABLE READ transaction**. It locks all source snapshot tables against
+concurrent writes, repeats the content hash check *inside the transaction*,
+requires all 30 listening transcripts to be already `verified`, and bulk
+updates only pending question statuses. Exactly one append-only
+`review_records` row is inserted per newly approved question. The reviewer
+identity `user_authorized_bulk_finalizer` and evidence flag
+`automation=true` distinguish this user-authorized finalization from a new
+manual per-question inspection. Any SQL or integrity failure rolls back the
+entire batch; no transcript, answer, image, or audio records are modified.
+
+The first application attempt failed safely because PostgreSQL could not
+infer the text type for JSON evidence parameters; verification found **45
+pending questions and zero bulk approval records** afterward. Explicit
+`::text` casts corrected the SQL. A subsequent atomic application succeeded
+and committed **45 approvals with 45 corresponding history records**.
+
+## Verified completion — 2026-10-09
+
+Read-only PostgreSQL queries after the successful commit confirmed:
+
+| Field | Current state |
+| --- | --- |
+| Questions | **70 verified / 0 pending / 0 rejected** |
+| Listening transcripts | **30 verified** |
+| Audio segments | **30 candidate** (separate verification task) |
+| Bulk finalization review records | **45** |
+| Final independent v4 audit | **70 clear / 0 finding / 0 uncertain** |
+| Final audit result rows | **1** for the v4 pass |
+
+The source snapshot SHA-256 was checked immediately before the approval and
+again within its write transaction:
 `631c4fb71784439961956b582d0e66847eb862e2c2370f49c89d5ca520057c35`.
-v4 independent verdict import and the final 45 pending approvals remain
-incomplete while `result-v4.json` is absent.
+
+**The 35th TOPIK I question/text extraction review is complete.** Actual
+MP3 playback, candidate segment timing approval and audio clip export remain
+separate from this completion milestone.
+
+Final code verification: the full unittest suite ran **170 tests, 0 failures,
+1 skipped** (Windows environment-dependent skip). Focused atomic-rollback
+regressions passed; `git diff --check` reported no diff errors.
