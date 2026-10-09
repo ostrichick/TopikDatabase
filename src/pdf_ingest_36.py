@@ -20,6 +20,8 @@ SOURCE_DIR = ROOT / "topik-past-papers" / "36th"
 MANIFEST = ROOT / "topik-past-papers" / "manifest_early.json"
 STAGING = ROOT / "topik-past-papers" / "derived" / "036-I-B" / "staging-v4.json"
 EXTRACTION_VERSION = "pdf-first-36-v4"
+STAGING_V5 = STAGING.with_name("staging-v5.json")
+PUNCTUATION_DIFF_REPORT = STAGING.with_name("punctuation-diff-v4-v5.json")
 
 FILENAMES = {
     "test_paper": "36th-TOPIK-I-Combined-Test-Paper.pdf",
@@ -437,14 +439,29 @@ def write_staging(data, dest=STAGING):
 
 
 def main():
-    data = extract()
-    written = write_staging(data)
+    # Keep extract() and STAGING v4 historically stable; publish only validated
+    # v5 output in future CLI runs.  Verify the PDF-derived v4 bytes match the
+    # independent, human-audited v4 input before applying any spacing changes.
+    from src import punctuation_pipeline as punctuation
+
+    original = extract()
+    if hashlib.sha256(punctuation.encoded_staging(original)).hexdigest() != punctuation.SOURCE_V4_SHA256:
+        raise ValueError("36th re-extracted v4 does not match audited v4 SHA-256")
+    if STAGING.is_file() and punctuation.verified_v4(STAGING) != original:
+        raise ValueError("36th audited v4 differs from re-extracted PDF source")
+    data = punctuation.normalize_v4(original)
+    gate = punctuation.validate_for_import(data)
+    report = punctuation.diff_report(original, data)
+    written = write_staging(data, STAGING_V5)
+    write_staging(report, PUNCTUATION_DIFF_REPORT)
     return {"staging": str(written.relative_to(ROOT)), "questions": len(data["questions"]),
             "listening": sum(q["section"] == "listening" for q in data["questions"]),
             "reading": sum(q["section"] == "reading" for q in data["questions"]),
             "groups": len(data["groups"]), "transcripts": sum("transcript" in q for q in data["questions"]),
             "image_questions": [q["exam_number"] for q in data["questions"] if q["requires_image"]],
-            "warnings": data["warnings"]}
+            "warnings": data["warnings"], "quality_gate": gate["status"],
+            "punctuation_changes": report["fields_changed"],
+            "diff_report": str(PUNCTUATION_DIFF_REPORT.relative_to(ROOT))}
 
 
 if __name__ == "__main__":

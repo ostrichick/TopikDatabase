@@ -272,7 +272,7 @@
           <div class="section-card">
             <h3>문항 내용 수정</h3>
             <label class="small-label" for="stemInput">문항 본문</label><textarea id="stemInput" rows="4" spellcheck="false" placeholder="원본 PDF와 대조해 문항 본문을 수정하세요."></textarea>
-            <label class="small-label">초기 추출 원문 · 공백 보정 전 기록 (읽기 전용)</label><div class="readonly" id="rawQuestion"></div>
+            <label class="small-label" id="rawQuestionLabel">초기 추출 원문 · 공백 보정 전 기록 (읽기 전용)</label><div class="readonly" id="rawQuestion"></div>
             <span class="small-label">선택지 ①–④</span>
             <div class="choice-row" id="choiceRow1"><label class="choice-number" for="choice1">①</label><input id="choice1" class="field" type="text" autocomplete="off" aria-label="선택지 1"></div>
             <div class="choice-row" id="choiceRow2"><label class="choice-number" for="choice2">②</label><input id="choice2" class="field" type="text" autocomplete="off" aria-label="선택지 2"></div>
@@ -1183,7 +1183,10 @@
         renderIndependentComparison();
         textBox('groupInstruction', q.group?.instruction, '공통 지시문 없음');
         textBox('groupPassage', q.group?.passage_text, '공통 지문 없음');
-        textBox('rawQuestion', q.raw_question_text, '추출 원문 없음');
+        $('rawQuestionLabel').textContent = q.exam_id === '036-I-B'
+          ? '초기 추출 텍스트 · 문장부호 공백 표시 보정 (원본 보존 · 읽기 전용)'
+          : '초기 추출 원문 · 공백 보정 전 기록 (읽기 전용)';
+        textBox('rawQuestion', q.raw_question_text_display ?? q.raw_question_text, '추출 원문 없음');
         $('stemInput').value = typeof q.stem === 'string' ? q.stem : '';
         $('stemInput').disabled = state.capabilities?.reviewWrite === false || pendingOrFailed;
         for (let n = 1; n <= 4; n++) {

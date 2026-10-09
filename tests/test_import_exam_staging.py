@@ -85,7 +85,8 @@ class ImportExamStagingTests(unittest.TestCase):
             ],
             "questions": questions,
             "warnings": [],
-            "extraction_version": "test-only",
+            "extraction_version": "pdf-first-36-v5",
+            "punctuation_rule_version": importer.PUNCTUATION_RULE_VERSION,
         }
 
     def test_valid_staging_has_70_questions_and_200_points(self):
@@ -140,6 +141,55 @@ class ImportExamStagingTests(unittest.TestCase):
     def test_36th_namespace_does_not_collide_with_35th(self):
         self.assertEqual(importer.EXAM_ID, "036-I-B")
         self.assertTrue(all(q["id"].startswith("036-I-") for q in self.staging["questions"]))
+
+    def test_punctuation_quality_gate_fails_closed_on_each_mutable_text_field(self):
+        samples = (
+            ("stem", self.staging["questions"][0], "stem"),
+            ("choice", self.staging["questions"][0]["choices"][0], "text"),
+            ("group", self.staging["groups"][0], "passage_text"),
+            ("instruction", self.staging["groups"][0], "instruction"),
+            ("transcript", self.staging["questions"][0]["transcript"], "dialogue_text"),
+        )
+        for label, row, field in samples:
+            with self.subTest(label=label):
+                previous = row[field]
+                row[field] = "네,공책이에요.친구입니다."
+                with self.assertRaisesRegex(importer.ImportBlocked, "punctuation spacing"):
+                    importer.validate(self.staging)
+                row[field] = previous
+        # The raw field is PDF evidence; it must be preserved verbatim.
+        self.staging["questions"][0]["raw_question_text"] = "네,공책이에요."
+        self.assertEqual(importer.validate(self.staging)["status"], "validated")
+
+    def test_punctuation_quality_gate_preserves_numbers_and_links(self):
+        self.staging["questions"][0]["stem"] = (
+            "3.14와 1,000 www.example.com user@example.com file.txt ..."
+        )
+        self.assertEqual(importer.validate(self.staging)["status"], "validated")
+
+    def test_punctuation_quality_gate_catches_numeric_sentence_boundary(self):
+        self.staging["groups"][0]["passage_text"] = "예약할 수 있습니다.120전화는 무료입니다."
+        with self.assertRaisesRegex(importer.ImportBlocked, "punctuation spacing"):
+            importer.validate(self.staging)
+
+    def test_pdf_staging_requires_version_and_historical_bypass_is_tightly_scoped(self):
+        self.staging["extraction_version"] = "pdf-first-37-v1"
+        with self.assertRaisesRegex(importer.ImportBlocked, "supported extraction version"):
+            importer.validate(self.staging)
+        with self.assertRaisesRegex(importer.ImportBlocked, "historical punctuation exception"):
+            importer.validate(self.staging, allow_historical_v4=True)
+        self.staging["extraction_version"] = "pdf-first-36-v4"
+        self.staging["questions"][0]["stem"] = "저는 학생입니다.친구입니다."
+        with self.assertRaisesRegex(importer.ImportBlocked, "supported extraction version"):
+            importer.validate(self.staging)
+        with self.assertRaisesRegex(importer.ImportBlocked, "frozen 36th v4 SHA-256"):
+            importer.validate(self.staging, allow_historical_v4=True)
+        self.staging["extraction_version"] = "pdf-first-36-v5"
+        self.staging["questions"][0]["stem"] = "저는 학생입니다. 친구입니다."
+        self.assertEqual(importer.validate(self.staging)["status"], "validated")
+        self.staging["extraction_version"] = "unversioned"
+        with self.assertRaisesRegex(importer.ImportBlocked, "supported extraction version"):
+            importer.validate(self.staging)
 
     def test_pdf_first_import_does_not_claim_nonexistent_preview_agreement(self):
         from inspect import getsource

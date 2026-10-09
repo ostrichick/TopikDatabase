@@ -44,6 +44,7 @@ from src.database import (
     get_media_root,
 )
 from src.sqlite_archive import assert_sqlite_write_allowed
+from src.extraction_rules import normalize_punctuation_spacing_v2
 
 
 ROOT = PROJECT_ROOT
@@ -230,14 +231,26 @@ class ReviewStore:
             raise NotFound("Unknown question")
         return row
 
-    @staticmethod
-    def _version(db, question_id: str) -> int:
+    def _punctuation_revision(self, db) -> int:
+        """Invalidate 36th review forms opened before the v4 -> v5 migration.
+
+        The migration intentionally does not fabricate human review records.
+        Its immutable metadata marker is a separate one-time source revision.
+        """
+        if self.exam_id != "036-I-B":
+            return 0
+        return int(db.execute(
+            "SELECT 1 FROM import_metadata WHERE key=?",
+            ("036-I-B:punctuation:v4-to-v5",),
+        ).fetchone() is not None)
+
+    def _version(self, db, question_id: str) -> int:
         row = db.execute(
             "SELECT COUNT(*) AS review_count FROM review_records WHERE subject_type='question' "
             "AND subject_id=?",
             (question_id,)
         ).fetchone()
-        return row["review_count"]
+        return row["review_count"] + self._punctuation_revision(db)
 
     @staticmethod
     def _audit_timestamp_verified(value: object) -> bool:
@@ -366,6 +379,10 @@ class ReviewStore:
                 " WHERE s.exam_id=? ORDER BY q.exam_number",
                 (self.exam_id,),
             ).fetchall()]
+            punctuation_revision = self._punctuation_revision(db)
+        if punctuation_revision:
+            for item in items:
+                item["review_version"] += punctuation_revision
         for item in items:
             record_id = item.pop("manual_review_id")
             record_status = item.pop("manual_review_status")
@@ -1196,6 +1213,13 @@ class ReviewStore:
 
     def get_question(self, question_id: str, *, fast: bool = False) -> dict:
         with closing(self._connect()) as db:
+            # A concurrent source migration must never yield old question text
+            # combined with the new optimistic review version. Use one stable
+            # database snapshot for the complete editor payload.
+            if self.backend == "postgres" and self.exam_id == "036-I-B":
+                db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            elif self.backend == "sqlite":
+                db.execute("BEGIN")
             row = self._question(db, question_id)
             question = dict(row)
             ai_audit = None if fast or self.exam_id != DEFAULT_EXAM_ID else self._get_ai_audit_for_question(db, question_id)[1]
@@ -1225,7 +1249,8 @@ class ReviewStore:
                     item["note"] = ""
                 item.pop("evidence")
                 history.append(item)
-            version = len(records) if len(records) < 30 else self._version(db, question_id)
+            version = (len(records) + self._punctuation_revision(db)
+                       if len(records) < 30 else self._version(db, question_id))
             result = {
                 "id": question_id,
                 "exam_id": self.exam_id,
@@ -1235,6 +1260,10 @@ class ReviewStore:
                 "version": version,
                 "stem": question["stem"],
                 "raw_question_text": question["raw_question_text"],
+                "raw_question_text_display": (
+                    normalize_punctuation_spacing_v2(question["raw_question_text"])
+                    if self.exam_id == "036-I-B" else question["raw_question_text"]
+                ),
                 "group": {"instruction": question["instruction"] or "",
                           "passage_text": question["passage_text"] or "",
                           "start": question["first_exam_number"],
@@ -1360,6 +1389,7 @@ class ReviewStore:
                 ).fetchall()
                 segments_by_qid = {r["question_id"]: r for r in segment_rows}
 
+            punctuation_revision = self._punctuation_revision(db)
             questions_map = {}
             for row in rows:
                 question = dict(row)
@@ -1368,7 +1398,7 @@ class ReviewStore:
                 transcript_info = transcript_by_qid.get(qid)
                 image_keys = images_by_qid.get(qid, [])
                 history = records_by_qid.get(qid, [])
-                version = count_by_qid.get(qid, 0)
+                version = count_by_qid.get(qid, 0) + punctuation_revision
 
                 audio_segment = None
                 if question["section"] == "listening" and has_audio:
@@ -1404,6 +1434,10 @@ class ReviewStore:
                     "version": version,
                     "stem": question["stem"],
                     "raw_question_text": question["raw_question_text"],
+                    "raw_question_text_display": (
+                        normalize_punctuation_spacing_v2(question["raw_question_text"])
+                        if self.exam_id == "036-I-B" else question["raw_question_text"]
+                    ),
                     "group": {
                         "instruction": question["instruction"] or "",
                         "passage_text": question["passage_text"] or "",

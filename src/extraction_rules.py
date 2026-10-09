@@ -1,4 +1,4 @@
-"""Conservative, reproducible corrections for the 35th TOPIK I pilot extraction.
+"""Conservative, reproducible text rules shared by TOPIK I extractions.
 
 The historical HTML preview and the source exam PDFs are immutable inputs.
 Only derived display text and derived image bytes are corrected here.
@@ -56,7 +56,40 @@ _IMAGE_RULES = {
     ),
 }
 
+# The 35th pilot's correction metadata is a historical DB contract.  Keep its
+# compound version stable; the punctuation sub-version can also be applied to
+# later PDF-first staging without requiring or changing any 35th DB records.
+PUNCTUATION_RULE_VERSION = "punctuation-space-v2"
 RULE_VERSION = "punctuation-space-v1,image-pure-v1"
+
+# TOPIK 36 R51-52 PDF page 8 has an explicitly printed sentence boundary:
+# "... 있습니다. 120전화는 ...".  pypdf loses that gap; v1 intentionally
+# excludes digit-start sentences to protect decimal notation.  Version 2
+# conservatively extends v1 only for a complete formal Hangul ending and a
+# digit-led Korean sentence, outside URL/email/filename spans. v1 and the frozen 35th
+# correction metadata remain unchanged.
+_DIGIT_SENTENCE = re.compile(r"(?:(?<=습니다)|(?<=합니다)|(?<=입니다)|(?<=됩니다))\.(?=\d+[가-힣])")
+_PROTECTED_TOKEN = re.compile(r"(?i)(?:https?://|www\.|[^\s@]+@[^\s@]+)")
+# A conventional filename has an ASCII extension, but its basename and
+# intermediate suffixes may contain Hangul (e.g. 자료.설명.pdf).
+_FILENAME_TOKEN = re.compile(
+    r"(?i)(?<![\w.-])[\w-]+(?:\.[\w-]+)*\.[a-z][a-z0-9]{0,9}(?![A-Za-z0-9_.-])"
+)
+_TOKEN_OR_WHITESPACE = re.compile(r"\S+|\s+")
+
+
+def normalize_punctuation_spacing_v2(value: str) -> str:
+    """Apply both spacing rules outside original URL/email/filename tokens."""
+    if not isinstance(value, str):
+        raise TypeError("Expected extracted text")
+
+    def transform(match: re.Match[str]) -> str:
+        token = match.group()
+        if (_PROTECTED_TOKEN.search(token) or _FILENAME_TOKEN.search(token)):
+            return token
+        return _DIGIT_SENTENCE.sub(". ", normalize_punctuation_spacing(token))
+
+    return _TOKEN_OR_WHITESPACE.sub(transform, value)
 
 
 def image_keys() -> set[str]:

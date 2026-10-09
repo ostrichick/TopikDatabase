@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from src import ai_audit_35
 from src.database import PostgresAuditConnection, get_database_url
+from src.extraction_rules import PUNCTUATION_RULE_VERSION, normalize_punctuation_spacing_v2
 
 CORPUS = ROOT / "topik-past-papers"
 EXAM_ID = "036-I-B"
@@ -39,11 +40,23 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def validate(data):
+def validate(data, *, allow_historical_v4=False):
     """Check source provenance, contents and complete 36-I-B shape, no DB writes."""
     require(isinstance(data, dict), "staging must be an object")
     require(data.get("exam") == {"id": EXAM_ID, "session": 36, "level": "I", "booklet": "B"},
             "unexpected exam identity")
+    historical_v4 = allow_historical_v4 and data.get("extraction_version") == "pdf-first-36-v4"
+    if allow_historical_v4:
+        require(historical_v4, "historical punctuation exception requires 36th immutable v4")
+        canonical = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        require(hashlib.sha256(canonical).hexdigest() ==
+                "4c02c999b0fcbdaad48aaf9af6d0f5c754ca424f8a37885466a6704d90403684",
+                "historical punctuation exception requires frozen 36th v4 SHA-256")
+    else:
+        require(data.get("extraction_version") == "pdf-first-36-v5",
+                "PDF staging requires supported extraction version pdf-first-36-v5")
+        require(data.get("punctuation_rule_version") == PUNCTUATION_RULE_VERSION,
+                "PDF staging requires shared punctuation normalization version")
     sources, groups, questions = data.get("sources"), data.get("groups"), data.get("questions")
     require(isinstance(sources, list) and len(sources) >= 4, "missing source files")
     require(isinstance(groups, list) and len(groups) > 0, "missing groups")
@@ -149,6 +162,23 @@ def validate(data):
             require(transcript is None, f"reading has unexpected transcript: {qid}")
     require(points == {"listening": 100, "reading": 100}, f"score total mismatch: {points}")
     require(transcribed == 30, "expected 30 transcripts")
+    # The original raw_question_text is immutable extraction evidence and is
+    # intentionally exempt. Every persisted, human-readable text field must
+    # pass the shared punctuation stage before a new session can be imported.
+    text_fields = []
+    for g in groups:
+        text_fields.extend((f"{g['id']}.{field}", g.get(field, ""))
+                           for field in ("instruction", "passage_text"))
+    for q in questions:
+        text_fields.append((f"{q['id']}.stem", q["stem"]))
+        text_fields.extend((f"{q['id']}.choice[{c['number']}]", c["text"])
+                           for c in q["choices"])
+        if q.get("transcript") is not None:
+            text_fields.append((f"{q['id']}.transcript", q["transcript"]["dialogue_text"]))
+    residual = [scope for scope, value in text_fields
+                if normalize_punctuation_spacing_v2(value) != value]
+    require(not residual or historical_v4,
+            "unresolved punctuation spacing: " + ", ".join(residual[:12]))
     warnings = data.get("warnings", [])
     require(isinstance(warnings, list), "warnings must be a list")
     all_warnings = []

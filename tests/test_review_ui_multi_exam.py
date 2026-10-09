@@ -13,6 +13,7 @@ import threading
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from src import review_ui
 
@@ -117,6 +118,70 @@ class MultiExamReviewTests(unittest.TestCase):
             self.default.for_exam("036-I-B;DROP TABLE exams")
         with self.assertRaises(review_ui.ReviewError):
             self.other.save_audio_segment("036-I-R-001", {})
+
+    def test_36_raw_source_is_immutable_while_view_text_is_normalized(self):
+        qid = "036-I-R-001"
+        raw = "네,공책이에요.친구입니다.( ㉠ ) 있습니다.120전화는 무료입니다."
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("UPDATE questions SET raw_question_text=? WHERE id=?", (raw, qid))
+            db.commit()
+        expected = "네, 공책이에요. 친구입니다. ( ㉠ ) 있습니다. 120전화는 무료입니다."
+        detail = self.other.get_question(qid, fast=True)
+        bundle = self.other.get_questions_bundle()["questions"][qid]
+        for result in (detail, bundle):
+            self.assertEqual(result["raw_question_text"], raw)
+            self.assertEqual(result["raw_question_text_display"], expected)
+        with closing(sqlite3.connect(self.db_path)) as db:
+            self.assertEqual(db.execute("SELECT raw_question_text FROM questions WHERE id=?", (qid,)).fetchone()[0], raw)
+
+    def test_punctuation_marker_invalidates_open_36_review_form(self):
+        qid = "036-I-R-001"
+        stale = self.other.get_question(qid, fast=True)
+        self.assertEqual(stale["version"], 1)
+        baseline_35 = self.default.get_question("035-I-R-001", fast=True)["version"]
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("UPDATE questions SET stem=? WHERE id=?",
+                       ("corrected 36th stem", qid))
+            db.execute("INSERT INTO import_metadata(key,value) VALUES(?,?)",
+                       ("036-I-B:punctuation:v4-to-v5", "verified fixture"))
+            db.commit()
+        current = self.other.get_question(qid, fast=True)
+        self.assertEqual(current["version"], stale["version"] + 1)
+        self.assertEqual(self.other.get_questions_bundle()["questions"][qid]["version"],
+                         current["version"])
+        fast_item = self.other.list_questions_fast()["items"][0]
+        self.assertEqual(fast_item["review_version"], current["version"])
+        self.assertEqual(self.default.get_question("035-I-R-001", fast=True)["version"], baseline_35)
+        payload = {
+            "version": stale["version"], "status": "verified", "stem": stale["stem"],
+            "choices": [item["text"] for item in stale["choices"]],
+            "transcript_text": None, "note": "opened before correction",
+        }
+        with self.assertRaises(review_ui.Conflict):
+            self.other.save_review(qid, payload, fast_response=True)
+        self.assertEqual(self.other.get_question(qid, fast=True)["stem"], "corrected 36th stem")
+        payload["version"] = current["version"]
+        payload["stem"] = current["stem"]
+        result = self.other.save_review(qid, payload, fast_response=True)
+        self.assertTrue(result["saved"])
+        self.assertEqual(result["version"], current["version"] + 1)
+
+    def test_postgres_detail_starts_repeatable_read_before_fetching_text(self):
+        # If a migration commits between the detail's SQL statements, a
+        # READ COMMITTED GET could send v4 text with the v5 version token.
+        class StopAfterSnapshot(Exception):
+            pass
+
+        proxy = Mock()
+        with patch.object(self.other, "_connect", return_value=proxy), \
+             patch.object(self.other, "_question", side_effect=StopAfterSnapshot):
+            self.other.backend = "postgres"
+            with self.assertRaises(StopAfterSnapshot):
+                self.other.get_question("036-I-R-001", fast=True)
+        self.assertEqual(
+            proxy.execute.call_args_list[0].args[0],
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+        )
 
     def test_review_write_changes_only_selected_exam(self):
         before_35 = self.default.get_question("035-I-R-001", fast=True)
