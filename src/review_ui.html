@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self'; frame-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'none'">
-  <title>TOPIK 35 · 문항 검수실</title>
+  <title>TOPIK · 문항 검수실</title>
   <style>
     :root { color-scheme: light; font-family: "Pretendard", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif; background: #f4f5f2; color: #24332c; font-size: 15px; }
     * { box-sizing: border-box; }
@@ -23,6 +23,8 @@
     .masthead p:last-child { margin: 5px 0 0; color: #c6d5ce; font-size: .88rem; }
     .masthead-badges { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .masthead-badges span { border: 1px solid #6a8777; border-radius: 99px; padding: 6px 11px; font-size: .76rem; color: #e0eddf; font-weight: 700; }
+    .exam-picker { display: flex; align-items: center; gap: 8px; color: #e0eddf; font-size: .82rem; font-weight: 700; }
+    .exam-picker select { color: #18392e; background: #fff; border: 1px solid #b1cc94; border-radius: 8px; padding: 6px 9px; max-width: 175px; }
     .workspace { max-width: 1700px; margin: 0 auto; padding: 20px clamp(12px, 1.5vw, 24px) 40px; }
     .progress-panel { background: white; border: 1px solid #dce4dc; border-radius: 17px; padding: 17px 20px; margin-bottom: 18px; box-shadow: 0 6px 24px #1a302409; }
     .progress-top { display: flex; justify-content: space-between; gap: 14px; align-items: center; flex-wrap: wrap; }
@@ -214,10 +216,12 @@
     <div class="masthead-inner">
       <div>
         <p class="eyebrow">TOPIK DATABASE / REVIEW WORKSPACE</p>
-        <h1>35회 TOPIK I · 문항 검수실</h1>
+        <h1 id="pageHeading">35회 TOPIK I · 문항 검수실</h1>
         <p>원문과 정답표를 나란히 확인하고, 검수 결과를 로컬 데이터베이스에 기록합니다.</p>
       </div>
-      <div class="masthead-badges"><span>● LOCAL ONLY</span><span>35회 · I · B형</span><span id="connectionState">서버 확인 중</span></div>
+      <div class="masthead-badges"><label class="exam-picker" for="examSelector">시험 회차
+        <select id="examSelector" aria-label="시험 회차 선택"><option value="035-I-B">35회 · TOPIK I · B형</option><option value="036-I-B">36회 · TOPIK I · B형</option></select>
+      </label><span>● LOCAL ONLY</span><span id="examBadge">35회 · I · B형</span><span id="connectionState">서버 확인 중</span></div>
     </div>
   </header>
 
@@ -363,7 +367,12 @@
       const AI_VERDICT_NAMES = { clear: '이상 없음', finding: '결함 발견', uncertain: '불확실' };
       const AI_ATTEMPT_NAMES = { succeeded: '성공', failed: '실패', timed_out: '시간 초과', invalid: '잘못된 응답' };
       const AI_RISK_NAMES = { none: '없음', low: '낮음', medium: '중간', high: '높음', critical: '매우 높음' };
+      const VALID_EXAMS = ['035-I-B', '036-I-B'];
+      // An explicit URL selection overrides the server's default. Without it,
+      // use the exam_id from the first list response (e.g. --exam-id 036-I-B).
+      const initialExam = new URLSearchParams(window.location.search).get('exam_id');
       const state = { items: [], detail: null, detailsCache: {}, questionNodes: new Map(), committedReviews: new Map(), bundleProtectedIds: new Set(), baseline: '', selectedId: null, visible: [], pdfTab: 'question', loading: false, saving: false, requestId: 0, csrfToken: null, aiAuditAvailable: false, independentAudits: null, independentAuditError: '', aiHistoryLoading: false, aiHistoryLoadedIds: new Set(), pendingReviews: new Map(), failedReviews: new Map(), readOnly: false,
+        examId: VALID_EXAMS.includes(initialExam) ? initialExam : null, examSwitchConfirmed: false,
         databaseBackend: 'sqlite', capabilities: { reviewWrite: true, audioSegmentWrite: true, clipExport: true, aiAuditWrite: false },
         audio: { available: false, saving: false, preview: null, heardSignature: null, durationMs: null, error: false } };
 
@@ -374,6 +383,41 @@
         $('reloadConflict').hidden = !conflict;
       }
       function clearNotice() { $('notification').hidden = true; $('reloadConflict').hidden = true; }
+      function syncExamHeading() {
+        const examId = state.examId || '035-I-B';
+        const session = Number(examId.slice(0, 3));
+        $('examSelector').value = examId;
+        $('examBadge').textContent = `${session}회 · I · B형`;
+        $('pageHeading').textContent = `${session}회 TOPIK I · 문항 검수실`;
+        document.title = `TOPIK ${session} · 문항 검수실`;
+      }
+      function switchExam(examId) {
+        if (!VALID_EXAMS.includes(examId)) return;
+        const previous = state.examId || '035-I-B';
+        if (examId === previous) return;
+        if (state.saving || state.audio.saving || state.pendingReviews.size || state.failedReviews.size) {
+          $('examSelector').value = previous;
+          notice('저장 중이거나 저장 결과를 확인해야 하는 문항이 있습니다. 완료한 뒤 회차를 바꾸세요.', 'info');
+          return;
+        }
+        if ((dirty() || audioDirty()) &&
+            !window.confirm('미저장 문항·음원 입력을 버리고 다른 회차로 이동할까요?')) {
+          $('examSelector').value = previous;
+          return;
+        }
+        // A new document is intentional: it disposes the entire detail cache,
+        // in-flight bundle/audit/list reads, review versions and media frames.
+        // Never reuse any state or CSRF-bearing request across exam contexts.
+        const next = new URL(window.location.href);
+        next.searchParams.set('exam_id', examId);
+        state.examSwitchConfirmed = true;
+        try { window.location.assign(next.href); }
+        catch (error) {
+          state.examSwitchConfirmed = false;
+          $('examSelector').value = previous;
+          notice('회차를 전환하지 못했습니다. 다시 시도하세요.', 'error');
+        }
+      }
       function sameOriginURL(value) {
         if (typeof value !== 'string' || !value.trim() || value.startsWith('//')) return null;
         try {
@@ -506,7 +550,10 @@
         node.classList.toggle('empty', !content.trim());
       }
       async function request(url, options = {}) {
-        const result = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...options });
+        const scoped = new URL(url, window.location.href);
+        if (scoped.pathname.startsWith('/api/') && state.examId)
+          scoped.searchParams.set('exam_id', state.examId);
+        const result = await fetch(scoped.pathname + scoped.search, { credentials: 'same-origin', cache: 'no-store', ...options });
         if (!result.ok) {
           let reason = '';
           try {
@@ -664,6 +711,10 @@
       async function loadList() {
         const data = await request('/api/questions-fast');
         if (!data || !Array.isArray(data.items)) throw new Error('문항 목록 응답 형식이 올바르지 않습니다.');
+        if (!VALID_EXAMS.includes(data.exam_id) || (state.examId && data.exam_id !== state.examId))
+          throw new Error('선택한 시험 회차와 서버 응답이 다릅니다.');
+        state.examId = data.exam_id;
+        syncExamHeading();
         if (typeof data.csrf_token !== 'string' || !data.csrf_token) throw new Error('검수 보안 토큰이 없습니다. 서버를 새로고침하세요.');
         state.csrfToken = data.csrf_token;
         state.readOnly = data.read_only === true;
@@ -1115,7 +1166,7 @@
         $('editorEmpty').hidden = true;
         $('editorContent').hidden = false;
         $('editorTitle').textContent = `${q.number}번 문항`;
-        $('questionSubtitle').textContent = `35회 · TOPIK I · ${SECTION_NAMES[q.section] || q.section}`;
+        $('questionSubtitle').textContent = `${Number((state.examId || '035-I-B').slice(0, 3))}회 · TOPIK I · ${SECTION_NAMES[q.section] || q.section}`;
         $('questionBadges').replaceChildren(
           badge(statusName(q.review_status), `status ${q.review_status}`),
           badge(q.id),
@@ -1630,6 +1681,7 @@
         else if (restoreFocus) $('toggleReference').focus();
       }
       function installHandlers() {
+        $('examSelector').addEventListener('change', event => switchExam(event.target.value));
         $('aiAuditSection').addEventListener('toggle', async () => {
           const section = $('aiAuditSection');
           const current = state.detail;
@@ -1756,6 +1808,7 @@
           }
         });
         window.addEventListener('beforeunload', event => {
+          if (state.examSwitchConfirmed) return; // Already confirmed discarding drafts.
           if (!(dirty() || audioDirty()) && !state.audio.saving &&
               state.pendingReviews.size === 0 && state.failedReviews.size === 0) return;
           event.preventDefault();
@@ -1812,6 +1865,7 @@
       }
       async function init() {
         installHandlers();
+        syncExamHeading();
         const host = location.hostname.toLowerCase();
         if (host !== '127.0.0.1' || location.protocol !== 'http:') {
           $('connectionState').textContent = '접속 차단';

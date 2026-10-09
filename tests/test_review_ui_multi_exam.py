@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import shutil
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -171,6 +173,92 @@ class MultiExamReviewTests(unittest.TestCase):
         self.assertEqual(status, 404)
         status, _ = request("/media/035-I-R-001/paper?exam_id=036-I-B")
         self.assertEqual(status, 404)
+        status, html = request("/")
+        self.assertEqual(status, 200)
+        self.assertIn(b'id="examSelector"', html)
+        self.assertIn(b'value="035-I-B"', html)
+        self.assertIn(b'value="036-I-B"', html)
+
+
+class ExamSelectorScriptTests(unittest.TestCase):
+    """Execute the actual inline browser script with a small DOM/fetch mock."""
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js needed for inline JavaScript test")
+    def test_selector_reload_and_api_query_scope_with_inflight_fetches(self):
+        harness = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const html = fs.readFileSync(process.argv[1], 'utf8');
+const code = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+
+function openPage(query) {
+  const requests = [];
+  const navigations = [];
+  const nodes = new Map();
+  function node(id) {
+    if (!nodes.has(id)) nodes.set(id, {
+      value: '', listeners: {}, hidden: false, style: {},
+      classList: { add(){}, remove(){}, toggle(){}, contains(){ return false; } },
+      addEventListener(event, callback) { this.listeners[event] = callback; },
+      setAttribute(){}, removeAttribute(){}, replaceChildren(){}, focus(){},
+      pause(){}, load(){}, getAttribute(){return null;},
+    });
+    return nodes.get(id);
+  }
+  const location = {
+    href: 'http://127.0.0.1:8765/' + query,
+    search: query,
+    hostname: '127.0.0.1',
+    protocol: 'http:',
+    origin: 'http://127.0.0.1:8765',
+    assign(url) { navigations.push(url); },
+  };
+  const document = {
+    title: '', getElementById: node,
+    querySelectorAll(){ return []; }, addEventListener(){},
+    body: {classList: {contains(){return false;}, toggle(){}}},
+  };
+  const window = {
+    location, addEventListener(){}, confirm(){ return true; },
+    matchMedia(){return {matches: false};},
+  };
+  const context = {
+    document, window, location, URL, URLSearchParams, console,
+    fetch(url) {requests.push(url); return new Promise(() => {});},
+  };
+  vm.runInNewContext(code, context, {filename:'review_ui_inline.js'});
+  return { requests, navigations, nodes };
+}
+
+const defaultPage = openPage('');
+assert.equal(defaultPage.nodes.get('examSelector').value, '035-I-B');
+assert.equal(defaultPage.requests.length, 3);
+assert(defaultPage.requests.every(url => !url.includes('exam_id=')));
+const selectDefault = defaultPage.nodes.get('examSelector');
+selectDefault.value = '036-I-B';
+selectDefault.listeners.change({target: selectDefault});
+assert.equal(defaultPage.navigations.length, 1);
+assert.equal(new URL(defaultPage.navigations[0]).searchParams.get('exam_id'), '036-I-B');
+
+// Fresh document = brand-new JS state and fetches, not reused bundle promises.
+const page36 = openPage('?exam_id=036-I-B');
+assert.equal(page36.nodes.get('examSelector').value, '036-I-B');
+assert.match(page36.nodes.get('pageHeading').textContent, /36회/);
+assert.equal(page36.requests.length, 3);
+for (const request of page36.requests) {
+  assert.equal(new URL(request, 'http://127.0.0.1:8765').searchParams.get('exam_id'), '036-I-B');
+}
+const select36 = page36.nodes.get('examSelector');
+select36.value = '035-I-B';
+select36.listeners.change({target: select36});
+assert.equal(new URL(page36.navigations[0]).searchParams.get('exam_id'), '035-I-B');
+"""
+        completed = subprocess.run(
+            ["node", "-e", harness, str(ROOT / "src" / "review_ui.html")],
+            capture_output=True, text=True, encoding="utf-8", timeout=15,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
 
 
 if __name__ == "__main__":
