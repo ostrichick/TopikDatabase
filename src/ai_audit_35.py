@@ -333,7 +333,8 @@ def _source_snapshot_payload(db: sqlite3.Connection) -> dict[str, Any]:
     source_paths: dict[int, str] = {}
     for row in db.execute(
         "SELECT id,relative_path,kind,sha256,byte_size,source_url,source_page "
-        "FROM source_files ORDER BY id"
+        "FROM source_files WHERE relative_path LIKE ? ORDER BY id",
+        ("topik-past-papers/35th/%",),
     ):
         source_paths[row[0]] = row[1]
         sources.append({
@@ -348,7 +349,10 @@ def _source_snapshot_payload(db: sqlite3.Connection) -> dict[str, Any]:
         }
         for row in db.execute(
             "SELECT id,section_id,first_exam_number,last_exam_number,instruction,passage_text,"
-            "points_each,passage_image_key FROM question_groups ORDER BY section_id,first_exam_number"
+            "points_each,passage_image_key FROM question_groups "
+            "WHERE section_id IN (SELECT id FROM sections WHERE exam_id=?) "
+            "ORDER BY section_id,first_exam_number",
+            (EXAM_ID,),
         )
     }
     image_assets = [
@@ -361,7 +365,11 @@ def _source_snapshot_payload(db: sqlite3.Connection) -> dict[str, Any]:
         }
         for row in db.execute(
             "SELECT DISTINCT i.key,i.sha256,i.mime_type,i.source_file_id,i.bytes "
-            "FROM question_images qi JOIN images i ON i.key=qi.image_key ORDER BY i.key"
+            "FROM question_images qi JOIN images i ON i.key=qi.image_key "
+            "JOIN questions q ON q.id=qi.question_id "
+            "JOIN sections s ON s.id=q.section_id "
+            "WHERE s.exam_id=? ORDER BY i.key",
+            (EXAM_ID,),
         )
     ]
     has_segments = "audio_segments" in _table_names(db)
