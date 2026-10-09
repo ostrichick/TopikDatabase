@@ -5,7 +5,7 @@
 - 범위: 원래 계획 `docs/review-approval-navigation-performance-plan-20261009.md`의 P0–P3.
 - 코드 커밋: `e73bd44 fix(topik): stabilize review advancement and reduce remote approval overhead`.
 - **P0/P1 기능 코드 및 회귀 테스트 완료.** P2 PostgreSQL 승인 저장 경로의 연결/SQL 왕복 최적화 코드 및 검증 완료.
-- **전체 유닛 테스트 238 PASS / 0 실패** (`py -3 -B -m unittest discover -s tests -q`, 실행 시간 약 239초). 관련 35개 통합 타깃 테스트 추가 재실행 PASS. `git diff --check` PASS.
+- **최종 커밋 상태 전체 유닛 테스트 240 PASS / 0 실패** (`py -3 -B -m unittest discover -s tests -q`, 실행 시간 약 152초). 관련 35개 통합 타깃 테스트 추가 재실행 PASS. `git diff --check` PASS.
 - **운영 승인 요청 POST 0회, 검수 기록·원본 PDF·MP3·DB 스키마 변경 0건.** SQLite 동작 및 35회/36회 검수 버전 안전장치 유지.
 
 ## 단계별 변경 및 확인
@@ -41,7 +41,7 @@
 
 | 검증 | 결과 |
 | --- | --- |
-| 기존 전체 테스트 (`discover -s tests -q`) | **238 PASS**, 0 실패 |
+| 최종 커밋 상태 전체 테스트 (`discover -s tests -q`) | **240 PASS**, 0 실패 |
 | 관련 PostgreSQL 쓰기/읽기·멀티회차·UI·미디어 35개 테스트 | **35 PASS**, 0 실패 |
 | 무결성/SQL 직접 확인 | 36회 read-only `_version` = 1, 원본 미디어 SHA 확인, joined `FOR UPDATE OF q`의 PostgreSQL `EXPLAIN` 14행 정상 |
 | 수정 전 실서버 GET `18736` | 36회 목록 약 2.18초, 상세 약 3.60초 (이번 검증 회차의 개별 표본) |
