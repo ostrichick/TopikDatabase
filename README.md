@@ -50,6 +50,11 @@ For the current 35/36-session work, Git branch transfer and the remaining
 production punctuation migration gate, see
 `docs/cross-device-handoff-2026-10-09.md`.
 
+For the 2026-10-09 project audit follow-up, F1's completed review-snapshot fix,
+and the F2–F5 work reserved for the other computer, start with
+`docs/audit-followup-handoff-2026-10-09.md`. It includes branch/pull instructions,
+reproduction steps, acceptance checks, and the local-media/production boundary.
+
 The 35th TOPIK I pilot also includes an append-only **multi-agent independent AI audit** layer. It creates frozen blind audit bundles, records checkpoints/results/findings separately from human review state, calculates deterministic consensus/risk/convergence, and exposes those results read-only in the local reviewer. See `docs/ai-audit-system-35.md` and run `py -3 src/ai_audit_35.py --help` for the local workflow. The audit runner does not call an AI provider by itself and can never promote a question, transcript, or audio segment to human `verified` status.
 
 The PostgreSQL migration foundation and central reviewer path are documented in
