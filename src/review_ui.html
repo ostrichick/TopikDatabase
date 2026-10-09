@@ -154,7 +154,10 @@
     .image-list img { display: block; max-width: 100%; height: auto; margin: auto; }
     .image-list figcaption { padding: 7px 4px 3px; font-size: .73rem; color: #6b7b6c; overflow-wrap: anywhere; }
     .flags { display: grid; gap: 6px; }
-    .flag { padding: 9px 10px; border-radius: 8px; color: #805b23; background: #fff4df; font-size: .78rem; line-height: 1.5; overflow-wrap: anywhere; }
+    .flag { min-width: 0; padding: 9px 10px; border-radius: 8px; color: #805b23; background: #fff4df; font-size: .78rem; line-height: 1.5; overflow-wrap: anywhere; }
+    .flag--strong { border-left: 3px solid #a53d32; color: #85382d; background: #fff1ed; }
+    .flag-meta { display: block; font-size: .73rem; font-weight: 750; overflow-wrap: anywhere; }
+    .flag-message { margin: 4px 0 0; font-size: inherit; line-height: inherit; overflow-wrap: anywhere; white-space: pre-wrap; }
     .ai-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 10px 0 12px; }
     .ai-metric { border: 1px solid #dce5eb; border-radius: 9px; background: #f7fafc; padding: 9px 10px; }
     .ai-metric span { display: block; color: #71808a; font-size: .7rem; margin-bottom: 3px; }
@@ -247,6 +250,7 @@
             <label id="aiFilterWrap" hidden><span class="control-label">AI 감사</span><select id="aiFilter" aria-label="AI 감사 필터"><option value="all">전체</option><option value="unresolved">미해결 발견</option><option value="finding">발견 있음</option><option value="disagreement">감사 불일치</option><option value="uncertain">불확실 있음</option><option value="high">고위험</option><option value="unaudited">미감사</option></select></label>
             <label id="sortOrderWrap" hidden><span class="control-label">정렬</span><select id="sortOrder" aria-label="문항 정렬"><option value="number">문항 번호</option><option value="risk">AI 위험 높은 순</option><option value="findings">미해결 발견 많은 순</option><option value="latest">최근 AI 감사 순</option></select></label>
           </div>
+          <p class="small-label" id="aiLoadStatus" role="status" aria-live="polite" hidden></p>
           <label class="comparison-filter"><input type="checkbox" id="comparisonDisagreement">Gemini·ChatGPT 판정 차이만 보기</label>
           <label><span class="control-label">문항 표시 상태</span><select id="indicatorFilter" aria-label="문항 표시 상태"><option value="all">전체</option><option value="problem">빨강 · 문제 발견</option><option value="pending">주황 · 검토 대기</option><option value="verified">초록 · 승인 완료</option></select></label>
           <div class="status-legend" aria-label="문항 상태 범례"><span><i class="state-dot verified"></i>승인 완료</span><span><i class="state-dot problem"></i>문제 발견</span><span><i class="state-dot"></i>검토 대기</span></div>
@@ -337,7 +341,7 @@
             <p class="hint" id="audioFullHint">전체 원본 음원도 위 재생기에서 언제든 들을 수 있습니다.</p>
           </div>
           <div class="media-card" id="imageSection" hidden><h3>원본 이미지</h3><div id="imageList" class="image-list"></div></div>
-          <div class="media-card"><h3>초기 미리보기의 추출 주의사항</h3><p class="hint">아래 표시는 최초 HTML 추출 시점의 기록입니다. 이후 대본·음원이 등록되었을 수 있으니 현재 자료 패널을 우선 확인하세요.</p><div id="flagList" class="flags"><p class="hint">문항을 선택하면 확인할 항목이 나타납니다.</p></div></div>
+          <div class="media-card"><h3>추출 주의사항</h3><p class="hint">문항 및 듣기 대본 추출 시 저장된 주의사항입니다. 이후 자료가 갱신되었을 수 있으니 현재 원본과 대조해 확인하세요.</p><div id="flagList" class="flags" role="list" aria-label="문항 및 듣기 대본 추출 주의사항"><p class="hint">문항을 선택하면 확인할 항목이 나타납니다.</p></div></div>
           <details class="media-card" id="aiAuditSection">
             <summary style="padding:14px 16px;cursor:pointer;font-weight:750">기존 AI 감사 상세 기록 펼치기</summary>
             <div style="padding:0 16px 16px">
@@ -719,10 +723,65 @@
         }
         return selectQuestion(next.id, { force: true });
       }
+      function setAiSummaryStatus(status) {
+        const available = status === 'ready' || (state.aiAuditAvailable && (status === 'loading' || status === 'error'));
+        state.aiAuditAvailable = available;
+        $('aiFilterWrap').hidden = !available;
+        $('sortOrderWrap').hidden = !available;
+        if (!available) {
+          $('aiFilter').value = 'all';
+          $('sortOrder').value = 'number';
+        }
+        const hints = {
+          loading: 'AI 감사 요약을 불러오는 중입니다. 일반 검수는 계속할 수 있습니다.',
+          error: 'AI 감사 요약을 불러오지 못했습니다. 일반 검수는 계속할 수 있습니다.',
+          unavailable: '', ready: ''
+        };
+        $('aiLoadStatus').textContent = hints[status] || '';
+        $('aiLoadStatus').hidden = !hints[status];
+      }
+      async function loadAiSummary(generation, retry = 0) {
+        let data;
+        try { data = await request('/api/questions-ai-summary'); }
+        catch (_) {
+          if (generation === state.listGeneration) setAiSummaryStatus('error');
+          return;
+        }
+        if (generation !== state.listGeneration || data?.exam_id !== state.examId) return;
+        if (data.state === 'loading') {
+          setAiSummaryStatus('loading');
+          // PostgreSQL summary preload is independent from the fast list. Give
+          // it a bounded opportunity to finish without blocking navigation.
+          if (retry < 18) setTimeout(() => loadAiSummary(generation, retry + 1), Math.min(500 + retry * 250, 3500));
+          else setAiSummaryStatus('error');
+          return;
+        }
+        if (data.state !== 'ready' || data.ai_audit_available !== true || !Array.isArray(data.items)) {
+          if (data.state === 'unavailable') {
+            for (const item of state.items) delete item.ai_audit;
+            setAiSummaryStatus('unavailable');
+            filterItems();
+          } else setAiSummaryStatus('error');
+          return;
+        }
+        const summaries = new Map(data.items.filter(item => item && typeof item.id === 'string' &&
+          item.ai_audit && typeof item.ai_audit === 'object')
+          .map(item => [item.id, item.ai_audit]));
+        for (const item of state.items) {
+          if (summaries.has(item.id)) item.ai_audit = summaries.get(item.id);
+          else delete item.ai_audit;
+        }
+        setAiSummaryStatus('ready');
+        filterItems();
+      }
       async function loadList() {
+        const generation = (state.listGeneration || 0) + 1;
+        state.listGeneration = generation;
+        const requestedExam = state.examId;
         const data = await request('/api/questions-fast');
+        if (generation !== state.listGeneration) return;
         if (!data || !Array.isArray(data.items)) throw new Error('문항 목록 응답 형식이 올바르지 않습니다.');
-        if (!VALID_EXAMS.includes(data.exam_id) || (state.examId && data.exam_id !== state.examId))
+        if (!VALID_EXAMS.includes(data.exam_id) || (requestedExam && data.exam_id !== requestedExam))
           throw new Error('선택한 시험 회차와 서버 응답이 다릅니다.');
         state.examId = data.exam_id;
         syncExamHeading();
@@ -737,30 +796,30 @@
           clipExport: caps.clip_export === true,
           aiAuditWrite: caps.ai_audit_write === true,
         };
-        state.aiAuditAvailable = data.ai_audit_available === true;
-        $('aiFilterWrap').hidden = !state.aiAuditAvailable;
-        $('sortOrderWrap').hidden = !state.aiAuditAvailable;
-        if (!state.aiAuditAvailable) {
-          $('aiFilter').value = 'all';
-          $('sortOrder').value = 'number';
-        }
+        const existingAudits = new Map(state.items.filter(item => item.ai_audit)
+          .map(item => [item.id, item.ai_audit]));
+        if (!state.aiAuditAvailable) setAiSummaryStatus('loading');
         // A delayed list response must not overwrite a newer locally confirmed
         // commit. Once the server's review version catches up, trust its data.
         state.items = data.items.map(item => {
           const confirmed = state.committedReviews?.get(item.id);
+          let updated = item;
           if (confirmed && (!Number.isSafeInteger(item.review_version) ||
               item.review_version < confirmed.version)) {
-            return { ...item, ...confirmed, review_version: confirmed.version };
+            updated = { ...item, ...confirmed, review_version: confirmed.version };
           }
           if (confirmed && Number.isSafeInteger(item.review_version) &&
               item.review_version >= confirmed.version) state.committedReviews.delete(item.id);
-          return item;
+          if (existingAudits.has(item.id)) updated.ai_audit = existingAudits.get(item.id);
+          return updated;
         }).sort((a, b) => Number(a.number) - Number(b.number));
         counts();
         filterItems();
         $('connectionState').textContent = state.databaseBackend === 'postgres'
           ? '중앙 PostgreSQL · 검수/로컬 클립 활성'
           : '로컬 SQLite · 편집 가능';
+        // Audit-only metadata may arrive later; never replace fast human rows.
+        void loadAiSummary(generation);
       }
       function draft() {
         if (!state.detail) return null;
@@ -1306,9 +1365,34 @@
         }
         const flags = $('flagList');
         flags.replaceChildren();
-        const warnings = Array.isArray(q.preview_flags) ? q.preview_flags : [];
+        const warnings = [
+          ...(Array.isArray(q.preview_flags) ? q.preview_flags.map(value => ({ value, source: '문항' })) : []),
+          ...(q.section === 'listening' && Array.isArray(q.transcript?.warnings)
+            ? q.transcript.warnings.map(value => ({ value, source: '듣기 대본' })) : []),
+        ];
+        const severityNames = {
+          info: '정보', review: '검토', low: '낮음', medium: '보통',
+          high: '높음', critical: '매우 높음', blocking: '처리 차단',
+        };
+        for (const { value, source } of warnings) {
+          const row = element('div', 'flag');
+          row.setAttribute('role', 'listitem');
+          const metadata = [source];
+          let message = '내용을 확인할 수 없는 추출 주의사항입니다.';
+          if (typeof value === 'string') {
+            if (value.trim()) message = value;
+          } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+            const severity = typeof value.severity === 'string' ? value.severity.trim().toLowerCase() : '';
+            const code = typeof value.code === 'string' ? value.code.trim() : '';
+            metadata.push(`중요도 ${severityNames[severity] || '미확인'}`, `코드 ${code || '없음'}`);
+            if (typeof value.message === 'string' && value.message.trim()) message = value.message;
+            if (['high', 'critical', 'blocking'].includes(severity)) row.className += ' flag--strong';
+          }
+          row.append(element('span', 'flag-meta', metadata.join(' · ')));
+          row.append(element('p', 'flag-message', message));
+          flags.append(row);
+        }
         if (!warnings.length) flags.append(element('p', 'hint', '제공된 추출 주의사항이 없습니다. 원본과 대조해 검수하세요.'));
-        else warnings.forEach(flag => flags.append(element('div', 'flag', flag)));
       }
       function renderHistory() {
         const history = $('historyList');

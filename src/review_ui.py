@@ -117,6 +117,8 @@ class ReviewStore:
         self._list_questions_cache: dict | None = None
         self._ai_summaries_cache: tuple[bool, dict] | None = None
         self._ai_summaries_loading: bool = False
+        self._ai_summaries_error: bool = False
+        self._ai_summaries_checked_at: float = 0.0
         self._exam_stores: dict[str, ReviewStore] = {}
         self._exam_stores_lock = threading.Lock()
         if self.backend == "sqlite" and not self.db_path.is_file():
@@ -378,6 +380,12 @@ class ReviewStore:
         return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
     def list_questions(self) -> dict:
+        if (self.exam_id == DEFAULT_EXAM_ID and self._ai_summaries_checked_at
+                and time.monotonic() - self._ai_summaries_checked_at > 60):
+            # External audit jobs may update summaries without a review write.
+            self._ai_summaries_cache = None
+            self._list_questions_cache = None
+            self._ai_summaries_checked_at = 0.0
         if self._list_questions_cache is not None:
             return self._list_questions_cache
         with closing(self._connect()) as db:
@@ -395,21 +403,29 @@ class ReviewStore:
                 ai_available, ai_summaries = self._ai_summaries_cache
             elif self.backend == "sqlite":
                 self._ai_summaries_cache = self._ai_audit_summaries(audit_target)
+                self._ai_summaries_checked_at = time.monotonic()
                 ai_available, ai_summaries = self._ai_summaries_cache
             else:
                 ai_available = self._has_ai_audit_tables(db)
                 ai_summaries = {}
-                if not self._ai_summaries_loading:
+                if not self._ai_summaries_loading and not (
+                    self._ai_summaries_error and time.monotonic() - self._ai_summaries_checked_at < 10
+                ):
                     self._ai_summaries_loading = True
                     def _preload():
                         try:
                             self._ai_summaries_cache = self._ai_audit_summaries(self.database_url)
-                            self._list_questions_cache = None
+                            self._ai_summaries_error = False
+                        except Exception:
+                            # AI audit failure must not interrupt human review.
+                            self._ai_summaries_error = True
                         finally:
+                            self._ai_summaries_checked_at = time.monotonic()
+                            self._list_questions_cache = None
                             self._ai_summaries_loading = False
                     import threading
                     threading.Thread(target=_preload, daemon=True).start()
-            if ai_available:
+            if ai_available and not self._ai_summaries_loading and not self._ai_summaries_error:
                 try:
                     from src.ai_audit_35 import audit_subject_ids
                 except ImportError:
@@ -436,7 +452,10 @@ class ReviewStore:
                         audit = self._ai_audit_list_summary(summary) if summary else {}
                         run_id = summary.get("run_id") if summary else None
                         if is_scoped:
-                            cache_key = run_id
+                            # Execution status is subject-scoped, even when
+                            # multiple questions belong to the same audit run.
+                            # None is a valid run selector (latest pending run).
+                            cache_key = (run_id, qid)
                             if cache_key not in exec_cache:
                                 exec_cache[cache_key] = self._ai_audit_execution(audit_exec_db, subject_id=qid, run_id=run_id)
                             execution = exec_cache[cache_key]
@@ -468,6 +487,27 @@ class ReviewStore:
             }
             self._list_questions_cache = result
             return result
+
+    def list_ai_audit_summary(self) -> dict:
+        """Optional AI metadata only; fast-list review status remains authoritative."""
+        if self.exam_id != DEFAULT_EXAM_ID:
+            return {"exam_id": self.exam_id, "state": "unavailable",
+                    "ai_audit_available": False, "items": []}
+        listing = self.list_questions()
+        if self._ai_summaries_loading:
+            status = "loading"
+        elif self._ai_summaries_error:
+            status = "error"
+        else:
+            status = "ready" if listing["ai_audit_available"] else "unavailable"
+        return {
+            "exam_id": self.exam_id,
+            "state": status,
+            "ai_audit_available": status == "ready",
+            "items": ([{"id": item["id"], "ai_audit": item["ai_audit"]}
+                       for item in listing["items"] if "ai_audit" in item]
+                      if status == "ready" else []),
+        }
 
     def list_questions_fast(self) -> dict:
         """Lightweight list with current human-review evidence in one bulk read."""
@@ -1894,6 +1934,8 @@ def make_handler(store: ReviewStore):
                     return self._json(200, {**active_store.list_questions(), "csrf_token": csrf_token})
                 if parts == ["api", "questions-fast"]:
                     return self._json(200, {**active_store.list_questions_fast(), "csrf_token": csrf_token})
+                if parts == ["api", "questions-ai-summary"]:
+                    return self._json(200, active_store.list_ai_audit_summary())
                 if parts == ["api", "questions-bundle"]:
                     return self._json(200, active_store.get_questions_bundle())
                 if parts == ["api", "independent-audits"]:
