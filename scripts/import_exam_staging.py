@@ -102,6 +102,8 @@ def validate(data):
                 f"question paper provenance invalid: {qid}")
         require(isinstance(q.get("stem"), str) and isinstance(q.get("raw_question_text"), str),
                 f"missing source question text: {qid}")
+        require(not re.search(r"[①②③④]\s*$", q["stem"]),
+                f"choice-number marker leaked into stem boundary: {qid}")
         choices = q.get("choices")
         require(isinstance(choices, list) and len(choices) == 4 and
                 {ch.get("number") for ch in choices if isinstance(ch, dict)} == {1, 2, 3, 4} and

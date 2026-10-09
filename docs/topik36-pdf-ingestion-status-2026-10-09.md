@@ -58,30 +58,88 @@ The later staging-v2 warnings contract and preview bit fix were tested through
 the validator, but the original disposable rehearsal was performed with the
 earlier staging payload. Do not call it v2 insertion evidence.
 
-## Remaining before live release
+## Source-fidelity corrections and final independent audit
 
-1. Initial independent 70-question original-PDF/source review is complete.
-   The report is in the ignored local file
-   topik-past-papers/derived/036-I-B/blind-audit-initial.json.
-   It records 60 clear / 10 finding / 0 uncertain, with 70 distinct subject IDs:
-   listening Q15 and Q16 image crops omit printed option labels ① and ③;
-   transcript L22 has an artificial word break (근처 에도);
-   shared transcript L25/26 has 방법 들이;
-   R48 stem has 좋아 했습니다;
-   R51/52 shared passage has 예약 하고;
-   R61/62 shared passage has 있습 니다.
-   All 70 official answer/point mappings and 30 source transcript contents
-   passed the auditor's comparison, but these whitespace/image findings
-   **block an unconditional content-accuracy release**.
-   Source-backed targeted corrections must create a new staging-v3,
-   preserving v1 and v2, and a new independent verification.
-2. Rehearse the accepted final staging revision, verify 35th baseline and
-   backups, then append only the 36th exam to production. Existing 35th
-   review records/AI audits must remain unchanged.
-3. Finish 36th append-only AI-audit integration if parity with the 35th
-   persisted audit workflow is required. Current audit runner is 35th-specific.
-4. Human review of 36th extracted content and image crops; MP3 audio segments
-   remain a separate future task.
+The initial independent blind report (ignored blind-audit-initial.json)
+identified 60 clear, 10 finding, 0 uncertain: missing PDF ① and ③
+option labels in L15 and L16 PNG crops and word-split artifacts in
+L22, L25/26, R48, R51/52 and R61/62. Exact original PDF page references
+were used to correct these rather than broad Korean text replacements.
 
-The production topik database has NOT been modified by this 36th work as of
-the latest operational query; only the disposable test database was changed.
+The historical intermediate staging-v3.json is preserved (raw SHA-256
+7687800bbbf5d0e1900b6d249ebeb4b535c7c3395e1cebf14c553f405ab94a2e).
+Its separate source audit was 69 clear / 1 finding for an erroneously
+appended first-choice glyph in R48. That error was fixed in v4 by applying
+the PDF word-wrap correction to the pre-choice text only.
+
+The accepted immutable output is
+topik-past-papers/derived/036-I-B/staging-v4.json (ignored locally):
+
+- extraction_version: pdf-first-36-v4
+- raw file SHA-256:
+  4c02c999b0fcbdaad48aaf9af6d0f5c754ca424f8a37885466a6704d90403684
+- canonical data SHA-256 in PostgreSQL import_metadata:
+  508713a63b5e005c3ea44f85631d797d67b776f827e6a4d30de1f08f91f8e2aa
+- v1/v2/v3 source evidence remains preserved; only the intended source
+  text, option-label crop bytes and extraction version differ in v4.
+
+The v4 independent source comparison, at ignored
+topik-past-papers/derived/036-I-B/blind-audit-v4.json, returned
+**70 clear / 0 finding / 0 uncertain** over 70 unique subject IDs.
+Its auditor was familiar with the preceding v3 R48 finding, so this is
+not represented as blind to that historical issue, but 70 records were
+rechecked against the original PDFs. Evidence includes 70 official
+answer/point mappings, 30 listening transcript links, 381 field
+checks, seven pixel-exact PNG crops, all visible ①②③④ for L15/16,
+six source SHA-256 matches and a fixed R48 first-choice boundary.
+No full MP3 playback or segment timing audit was conducted.
+
+## Production PostgreSQL append: completed 2026-10-09
+
+Immediately before the live insert a second, newer custom-format backup
+was saved outside Git:
+
+- C:\Projects\TopikDatabase-runtime\backups\topik-pre36-final-20261009-125825.dump
+- 4,718,964 bytes
+- SHA-256: 0e8ff93a66d239234f0d2103b58cdf5831f140072c1d498896c192df06440469
+- pg_restore archive listing succeeded.
+
+The backup was also restored into a fresh disposable database named
+topik_stage36_v4_20261009, where final staging-v4 was inserted successfully.
+Readback confirmed 35th 70 verified, 36th 70 pending, 36th 280 choices,
+30 pending transcripts and 7 image links; the frozen 35th v4 source
+hash remained unchanged.
+
+The exact immutable staging-v4 raw SHA and independent audit 70 clear
+were explicitly rechecked immediately before the live PostgreSQL
+--apply operation. The single atomic transaction committed successfully
+and returned status=applied, 35th_unchanged=true, 36th_pending_review=70.
+
+Independent production readback after commit:
+
+| Exam | Questions | Choices | Answers | Transcripts |
+| --- | --- | --- | --- | --- |
+| 035-I-B | 70 verified | 280 | 70 | 30 verified |
+| 036-I-B | 70 needs_manual_review | 280 | 70 | 30 needs_manual_review |
+
+The 36th has 7 image links, 0 audio segments, and all 70 answers have
+preview_and_pdf_agree=0 because this PDF-first run had no HTML preview.
+The old 35th source snapshot SHA-256 was recomputed from the **live**
+database after the new exam was added and matched exactly:
+631c4fb71784439961956b582d0e66847eb862e2c2370f49c89d5ca520057c35.
+
+Regression suite after source corrections: **200 tests, 0 failures,
+1 skipped**. The source extractor's 13 tests all passed.
+
+## Separately outstanding, not implied by DB ingestion
+
+1. The 36th questions and transcripts remain needs_manual_review.
+   A fresh source-checked AI audit does **not** automatically grant
+   human review approval.
+2. The 36th blind evidence is preserved as a local ignored JSON report.
+   Native append-only PostgreSQL AI audit persistence is still specific
+   to the 35th run and needs a separately generalized contract.
+3. Full MP3 listening, segment boundary approval and clip exports are a
+   separate later step. The original 35th audio candidates are unchanged.
+
+The user-authorized 36th PDF extraction and **database append** are done.

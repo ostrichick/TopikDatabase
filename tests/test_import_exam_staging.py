@@ -102,6 +102,11 @@ class ImportExamStagingTests(unittest.TestCase):
         with self.assertRaisesRegex(importer.ImportBlocked, "global"):
             importer.validate(self.staging)
 
+    def test_choice_marker_leak_into_stem_is_rejected(self):
+        self.staging["questions"][47]["stem"] = "Example stem ①"
+        with self.assertRaisesRegex(importer.ImportBlocked, "choice-number marker leaked"):
+            importer.validate(self.staging)
+
     def test_missing_question_or_duplicate_rejected(self):
         self.staging["questions"][69]["id"] = "036-I-R-069"
         with self.assertRaisesRegex(importer.ImportBlocked, "question IDs"):
