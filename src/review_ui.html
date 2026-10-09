@@ -429,10 +429,16 @@
       function sourceWithPage(value, page) {
         const url = sameOriginURL(value);
         if (!url) return null;
-        // The 35-I-B pilot uses one paper, answer PDF and transcript PDF for all
-        // questions. Keep the iframe on the same document URL while paging.
-        const shared = /^\/media\/035-I-[LR]-\d{3}\/(paper|answer|transcript)$/.exec(url.pathname);
-        if (shared) url.pathname = `/media/035-I-L-001/${shared[1]}`;
+        // Keep the PDF viewer on the same document when moving between
+        // questions sharing an immutable original. The 36th listening and
+        // reading *paper* files are different; their answer key is shared.
+        const shared = /^\/media\/(03[56])-I-([LR])-\d{3}\/(paper|answer|transcript)$/.exec(url.pathname);
+        if (shared) {
+          const [, exam, section, kind] = shared;
+          const canonicalSection = exam === '035' || kind !== 'paper' ? 'L' : section;
+          const canonicalNumber = canonicalSection === 'L' ? '001' : '031';
+          url.pathname = `/media/${exam}-I-${canonicalSection}-${canonicalNumber}/${kind}`;
+        }
         const n = Number(page);
         if (Number.isSafeInteger(n) && n > 0) url.hash = `page=${n}`;
         return url.href;
@@ -440,9 +446,10 @@
       function sourceWithSharedAudio(value) {
         const url = sameOriginURL(value);
         if (!url) return null;
-        // All 35th TOPIK I listening questions reference one section MP3.
-        if (/^\/media\/035-I-L-\d{3}\/audio$/.test(url.pathname))
-          url.pathname = '/media/035-I-L-001/audio';
+        // One local MP3 per TOPIK I listening section: retain the exam query
+        // when canonicalizing to avoid mixing the 35th and 36th media stores.
+        const shared = /^\/media\/(03[56])-I-L-\d{3}\/audio$/.exec(url.pathname);
+        if (shared) url.pathname = `/media/${shared[1]}-I-L-001/audio`;
         return url;
       }
       function statusName(value) { return STATUS_NAMES[value] || '상태 미확인'; }
@@ -1575,11 +1582,17 @@
           return;
         }
         if (status === 'rejected' && !window.confirm('이 문항을 반려 상태로 기록할까요?')) return;
-        const currentIndex = state.items.findIndex(item => item.id === state.detail.id);
-        const nextId = status === 'verified' ? state.items[currentIndex + 1]?.id : null;
+        // Follow the order the reviewer sees, including search/filter/sort.
+        // An intentionally selected question outside the filters can still use
+        // the complete list. Never wrap at the end or jump to a hidden item.
+        const visibleHasCurrent = state.visible?.some(item => item.id === state.detail.id);
+        const reviewOrder = visibleHasCurrent ? state.visible : state.items;
+        const currentIndex = reviewOrder.findIndex(item => item.id === state.detail.id);
+        const nextId = status === 'verified' && currentIndex >= 0 ? reviewOrder[currentIndex + 1]?.id : null;
         if (status === 'verified' && nextId && state.detailsCache?.[nextId] && !audioDirty()) {
           return sendOptimisticApproval(state.detail.id, input, nextId);
         }
+        const approvedId = state.detail.id;
         let nextQuestionId = null;
         let approvedNumber = null;
         state.saving = true;
@@ -1605,6 +1618,10 @@
             } : null,
           };
           state.detail = detail;
+          // The ACK confirms these fields were committed. Only the submitted
+          // snapshot becomes clean; edits made while the POST was in flight
+          // (and any unsaved audio boundaries) must still block navigation.
+          state.baseline = JSON.stringify(input);
           state.aiHistoryLoadedIds?.delete(id);
           state.bundleProtectedIds.add(id);
           if (state.detailsCache) state.detailsCache[id] = detail;
@@ -1616,10 +1633,11 @@
             version: updated.version, last_human_review: updated.last_human_review });
           if (status === 'verified') {
             approvedNumber = updated.number;
-            const index = state.items.findIndex(item => item.id === id);
-            nextQuestionId = state.items[index + 1]?.id || null;
+            nextQuestionId = nextId;
           }
-          if (!nextQuestionId) renderDetail();
+          // A user may keep editing text or an audio interval during the POST.
+          // Re-rendering here would silently discard those unsaved changes.
+          if (!nextQuestionId && !dirty() && !audioDirty()) renderDetail();
           notice(status === 'verified' ? '문항이 검수 승인되었습니다.' : status === 'rejected' ? '문항이 반려되었습니다.' : '수정 내용이 미검수 상태로 저장되었습니다.', 'success');
           // Render the next question as soon as commit is confirmed. Refresh
           // cross-tab status in the background without delaying navigation.
@@ -1643,6 +1661,8 @@
           await selectQuestion(nextQuestionId);
           if (state.detail?.id === nextQuestionId) {
             notice(`${approvedNumber}번 문항을 승인하고 다음 ${state.detail.number}번 문항으로 이동했습니다.`, 'success');
+          } else if (state.detail?.id === approvedId && (dirty() || audioDirty())) {
+            notice(`${approvedNumber}번 승인 저장은 완료됐습니다. 미저장 변경사항이 있어 현재 문항에 머뭅니다.`, 'info');
           }
         }
       }

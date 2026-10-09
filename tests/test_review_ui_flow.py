@@ -1,7 +1,7 @@
-"""Exercise the actual approval handler without editing the user's SQLite database.
+"""Exercise real frontend approval and navigation functions without DB writes.
 
-Node executes only the sendReview function extracted from the local HTML. All
-requests, fields and navigation are mocked; no browser or server is launched.
+Node extracts functions from the local HTML and runs them with mocked requests,
+editor elements and browser controls. No browser or server is launched.
 """
 
 import shutil
@@ -113,6 +113,169 @@ async function scenario(status, { fail = false, last = false, slowList = false }
   assert.equal(result.events.includes('navigate'), false);
   console.log('Approval flow: success, failed save, final question, draft, rejection PASS');
 })().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+
+NODE_REAL_NAVIGATION_CHECK = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const html = fs.readFileSync(process.argv[1], 'utf8');
+function source(from, until) {
+  const start = html.indexOf('      ' + from);
+  const end = html.indexOf('      ' + until, start);
+  assert.ok(start >= 0 && end > start, 'Missing real function: ' + from);
+  return html.slice(start, end);
+}
+const functions = [
+  source('function verifyReviewAck(', 'function matchesReviewInput('),
+  source('function draft() {', 'function audioSegment() {'),
+  source('function audioSegment() {', 'function seconds('),
+  source('function audioDirty() {', 'function audioFeedback('),
+  source('function canNavigate() {', 'function renderReviewSync() {'),
+  source('async function selectQuestion(', 'function badge('),
+  source('async function sendReview(status) {', 'function neighbor(')
+].join('\n');
+
+async function scenario({ listening = false, edited = true, post = 'ok',
+                          audioUnsaved = false, changeDuringPost = false,
+                          confirm = false, filtered = false, last = false } = {}) {
+  const q = (id, number) => ({
+    id, number, version:0, review_status:'needs_manual_review',
+    section:listening ? 'listening' : 'reading',
+    stem:'old', choices:['a','b','c','d'].map((text, index) => ({ number:index+1, text })),
+    transcript:listening ? { text:'transcript' } : null,
+    audio_segment:null
+  });
+  const rows = (last ? [1] : [1,2,3]).map(n => ({
+    id:'q'+n,number:n,status:'needs_manual_review',requires_image:false
+  }));
+  const detail = q('q1', 1);
+  const fields = Object.fromEntries([
+    'stemInput','choice1','choice2','choice3','choice4','transcriptInput',
+    'reviewNote','audioStart','audioEnd','audioPlayer','editorContent','editorEmpty'
+  ].map(id => [id, { value:'', hidden:false, pause() {} }]));
+  function setFields(item) {
+    fields.stemInput.value = item.stem;
+    for(let n=1;n<=4;n++) fields['choice'+n].value = item.choices[n-1].text;
+    fields.transcriptInput.value = item.transcript?.text || '';
+    fields.reviewNote.value = '';
+  }
+  setFields(detail);
+  const state = {
+    detail,selectedId:'q1',items:rows,visible:filtered ? [rows[0],rows[2]] : [...rows],
+    loading:false,saving:false,csrfToken:'test',baseline:'',
+    audio:{saving:false,available:listening},capabilities:{reviewWrite:true},
+    pendingReviews:new Map(),failedReviews:new Map(),detailsCache:{},
+    committedReviews:new Map(),bundleProtectedIds:new Set(),
+    aiHistoryLoadedIds:new Set(),requestId:0,pdfTab:'question'
+  };
+  const events = [];
+  const ctx = vm.createContext({
+    state,JSON,Number,
+    $:id=>fields[id] || { focus(){ events.push('focus'); } },
+    window:{confirm:()=>{events.push('confirm');return confirm;}},
+    notice:(text,type,conflict)=>events.push({notice:type,text,conflict}),
+    clearNotice:()=>{},
+    reviewWritesBlocked:()=>false,
+    aiAudit:()=>null,
+    setLoading:value=>{state.loading=value;events.push('loading:'+value);},
+    counts:()=>{},
+    filterItems:()=>{
+      if (filtered) state.visible=rows.filter(row =>
+        row.number !== 2 && row.status === 'needs_manual_review');
+    },
+    loadList:async()=>{},
+    renderDetail:()=>{
+      events.push('render:'+state.detail.id);
+      setFields(state.detail);
+      state.baseline=JSON.stringify(vm.runInContext('draft()',ctx));
+    },
+    keepSelectedQuestionVisible:()=>{},
+    request:async(url, options)=>{
+      if(options?.method === 'POST') {
+        events.push('post');
+        if(changeDuringPost) fields.stemInput.value = 'changed-again';
+        if(post !== 'ok') {
+          if(post === 'unknown') return {id:'wrong',review_status:'verified',saved:true,version:1};
+          const error=new Error('Mock '+post);
+          if(post === 'conflict') error.status=409;
+          throw error;
+        }
+        events.push('ack');
+        return {id:'q1',number:1,review_status:'verified',saved:true,
+          version:1,request_version:0,requires_image:false};
+      }
+      events.push('get:'+url);
+      const next = /q(\d+)/.exec(url);
+      assert.ok(next, 'Expected question-detail GET');
+      return q('q'+next[1],Number(next[1]));
+    }
+  });
+  vm.runInContext(functions,ctx);
+  state.baseline=JSON.stringify(vm.runInContext('draft()',ctx));
+  if(edited) fields.stemInput.value='edited';
+  if(audioUnsaved) {
+    fields.audioStart.value='1.000';
+    fields.audioEnd.value='3.000';
+  }
+  const before=state.baseline;
+  await vm.runInContext("sendReview('verified')",ctx);
+  return {state,events,fields,before,ctx};
+}
+
+(async()=>{
+  // No cached successor: submitted edits are committed, baseline must be
+  // clean before the REAL canNavigate()/selectQuestion() navigation guard.
+  let r=await scenario();
+  assert.equal(r.state.selectedId,'q2');
+  assert.equal(r.state.items[0].status,'verified');
+  assert.equal(r.events.includes('confirm'),false,'Committed text must not prompt');
+  assert.ok(r.events.indexOf('ack')<r.events.findIndex(e=>typeof e==='string'&&e.startsWith('get:')));
+
+  r=await scenario({filtered:true});
+  assert.equal(r.state.selectedId,'q3','Follow filtered visible order, skipping hidden q2');
+  assert.equal(r.events.includes('confirm'),false);
+
+  r=await scenario({listening:true,audioUnsaved:true,confirm:false});
+  assert.equal(r.state.items[0].status,'verified','Text approval committed');
+  assert.equal(r.state.selectedId,'q1','Unsaved audio must block auto-navigation');
+  assert.equal(r.events.includes('confirm'),true,'Real audioDirty gate must prompt');
+  assert.equal(r.fields.audioStart.value,'1.000','Keep unsaved audio boundaries');
+  assert.equal(vm.runInContext('dirty()',r.ctx),false,'Submitted text is clean');
+  assert.equal(vm.runInContext('audioDirty()',r.ctx),true);
+
+  r=await scenario({listening:true,audioUnsaved:true,confirm:true});
+  assert.equal(r.state.selectedId,'q2','Explicit consent may discard audio edits');
+
+  r=await scenario({changeDuringPost:true,confirm:false});
+  assert.equal(r.state.items[0].status,'verified');
+  assert.equal(r.state.selectedId,'q1','Unsubmitted edits must block auto-navigation');
+  assert.equal(r.fields.stemInput.value,'changed-again','Keep new unsaved draft');
+  assert.equal(vm.runInContext('dirty()',r.ctx),true);
+  assert.equal(r.events.includes('confirm'),true);
+
+  r=await scenario({last:true,listening:true,audioUnsaved:true});
+  assert.equal(r.state.selectedId,'q1');
+  assert.equal(r.fields.audioStart.value,'1.000','Final item must keep unsaved audio edits');
+  assert.equal(r.events.includes('render:q1'),false,'Do not rerender over unsaved audio');
+
+  r=await scenario({last:true,changeDuringPost:true});
+  assert.equal(r.state.selectedId,'q1');
+  assert.equal(r.fields.stemInput.value,'changed-again','Final item must keep new text edits');
+  assert.equal(r.events.includes('render:q1'),false,'Do not rerender over unsaved text');
+
+  for (const post of ['error','conflict','unknown']) {
+    r=await scenario({post});
+    assert.equal(r.state.selectedId,'q1',post+' must never advance');
+    assert.equal(r.state.items[0].status,'needs_manual_review',post+' must not claim approval');
+    assert.equal(r.state.baseline,r.before,post+' must preserve unsaved baseline');
+    assert.equal(r.fields.stemInput.value,'edited',post+' must preserve draft');
+    assert.equal(r.events.includes('confirm'),false);
+    assert.ok(r.events.some(e=>e.notice==='error'),post+' must explain error');
+    if (post==='conflict') assert.ok(r.events.some(e=>e.conflict===true),'409 recovery offered');
+  }
+  console.log('Real dirty/canNavigate/selectQuestion approval safety PASS');
+})().catch(error=>{console.error(error);process.exitCode=1});
 """
 
 NODE_AI_FILTER_CHECK = r"""
@@ -728,6 +891,16 @@ async function scenario(fail) {
     def test_approval_automatically_advances_only_after_success(self):
         result = subprocess.run(
             [shutil.which("node"), "-e", NODE_CHECK, str(HTML)],
+            capture_output=True, text=True, encoding="utf-8", timeout=15,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_real_approval_navigation_preserves_audio_drafts_and_failure_guards(self):
+        result = subprocess.run(
+            [shutil.which("node"), "-e", NODE_REAL_NAVIGATION_CHECK, str(HTML)],
             capture_output=True, text=True, encoding="utf-8", timeout=15,
             check=False,
         )

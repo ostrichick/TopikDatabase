@@ -25,6 +25,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -164,8 +165,8 @@ class ReviewStore:
         return connection
 
     @contextmanager
-    def _write_transaction(self, *, before_rollback=None):
-        db = self._connect(writable=True)
+    def _write_transaction(self, *, before_rollback=None, connection=None):
+        db = connection if connection is not None else self._connect(writable=True)
         try:
             if self.backend == "sqlite":
                 db.execute("BEGIN IMMEDIATE")
@@ -187,13 +188,99 @@ class ReviewStore:
                 pass
             raise
         finally:
-            db.close()
+            if connection is None:
+                db.close()
+
+    @contextmanager
+    def _review_write_transaction(self, question_id: str):
+        """Verify original media before locking, reusing one PostgreSQL session.
+
+        A rollback after source validation ends its read transaction before the
+        locked write begins. Version checks still run *after* acquiring the
+        question lock, so migrations or other reviews racing with preflight
+        cannot slip through the optimistic concurrency guard.
+        """
+        if self.backend == "postgres":
+            started = time.perf_counter()
+            connected_at = preflight_at = None
+            try:
+                with closing(self._connect(writable=True)) as db:
+                    connected_at = time.perf_counter()
+                    try:
+                        self._verify_review_media(db, question_id)
+                    except BaseException:
+                        db.rollback()
+                        raise
+                    # A new READ COMMITTED transaction starts for FOR UPDATE.
+                    db.rollback()
+                    preflight_at = time.perf_counter()
+                    with self._write_transaction(connection=db) as transaction:
+                        yield transaction
+            finally:
+                if os.environ.get("TOPIK_REVIEW_TIMING") == "1":
+                    finished_at = time.perf_counter()
+                    connect_ms = (connected_at - started) * 1000 if connected_at else -1
+                    preflight_ms = ((preflight_at - connected_at) * 1000
+                                    if preflight_at and connected_at else -1)
+                    write_ms = ((finished_at - preflight_at) * 1000
+                                if preflight_at else -1)
+                    print(f"review_pg_timing connect_ms={connect_ms:.1f} "
+                          f"preflight_ms={preflight_ms:.1f} write_ms={write_ms:.1f} "
+                          f"total_ms={(finished_at - started) * 1000:.1f}", file=sys.stderr)
+        else:
+            with closing(self._connect()) as preflight:
+                self._verify_review_media(preflight, question_id)
+            with self._write_transaction() as transaction:
+                yield transaction
+
+    def _verify_review_media(self, db, question_id: str) -> None:
+        if self.backend == "postgres":
+            # Fetch all 2-3 immutable source metadata rows in one SQL roundtrip.
+            # Keep full file SHA-256 verification, never trust a cached hash.
+            if not isinstance(question_id, str) or not QUESTION_ID.fullmatch(question_id) \
+                    or not question_id.startswith(self.question_prefix):
+                raise NotFound("Unknown question")
+            row = db.execute(
+                "SELECT sec.name AS section, "
+                "q.source_file_id AS paper_id, paper.relative_path AS paper_path, "
+                "paper.sha256 AS paper_hash, paper.byte_size AS paper_size, "
+                "a.source_file_id AS answer_id, ans.relative_path AS answer_path, "
+                "ans.sha256 AS answer_hash, ans.byte_size AS answer_size, "
+                "t.source_file_id AS transcript_id, trans.relative_path AS transcript_path, "
+                "trans.sha256 AS transcript_hash, trans.byte_size AS transcript_size "
+                "FROM questions q JOIN sections sec ON sec.id=q.section_id "
+                "JOIN answers a ON a.question_id=q.id "
+                "LEFT JOIN transcripts t ON t.question_id=q.id "
+                "LEFT JOIN source_files paper ON paper.id=q.source_file_id "
+                "LEFT JOIN source_files ans ON ans.id=a.source_file_id "
+                "LEFT JOIN source_files trans ON trans.id=t.source_file_id "
+                "WHERE q.id=? AND sec.exam_id=?",
+                (question_id, self.exam_id),
+            ).fetchone()
+            if row is None:
+                raise NotFound("Unknown question")
+            kinds = (("paper", "answer", "transcript") if row["section"] == "listening"
+                     else ("paper", "answer"))
+            for kind in kinds:
+                if row[f"{kind}_id"] is None:
+                    raise NotFound("This question has no such source")
+                if row[f"{kind}_path"] is None:
+                    raise NotFound("Source does not exist")
+                self._verify_media_source(
+                    row[f"{kind}_path"], row[f"{kind}_hash"], row[f"{kind}_size"], kind,
+                )
+            return
+        question = self._question(db, question_id)
+        kinds = (("paper", "answer", "transcript") if question["section"] == "listening"
+                 else ("paper", "answer"))
+        for kind in kinds:
+            self._media_path_with_connection(db, question, kind)
 
     def _lock_question(self, db, question_id: str):
         if self.backend == "postgres":
-            locked = db.execute("SELECT id FROM questions WHERE id=? FOR UPDATE", (question_id,)).fetchone()
-            if locked is None:
-                raise NotFound("Unknown question")
+            # Lock the question in the same query that loads its editor fields.
+            # OF q avoids locking nullable LEFT JOIN rows in PostgreSQL.
+            return self._question(db, question_id, for_update=True)
         return self._question(db, question_id)
 
     def _locked_audio_rows(self, db, qids: list[str]) -> dict[str, object]:
@@ -214,7 +301,7 @@ class ReviewStore:
             sql = f"SELECT * FROM audio_segments WHERE question_id IN ({placeholders}) ORDER BY question_id"
         return {item["question_id"]: item for item in db.execute(sql, ordered)}
 
-    def _question(self, db: sqlite3.Connection, question_id: str) -> sqlite3.Row:
+    def _question(self, db: sqlite3.Connection, question_id: str, *, for_update: bool = False) -> sqlite3.Row:
         if (not isinstance(question_id, str) or not QUESTION_ID.fullmatch(question_id)
                 or not question_id.startswith(self.question_prefix)):
             raise NotFound("Unknown question")
@@ -224,7 +311,8 @@ class ReviewStore:
             "a.source_file_id AS answer_file_id, a.source_pdf_page AS answer_pdf_page "
             "FROM questions q JOIN sections s ON s.id=q.section_id "
             "LEFT JOIN question_groups g ON g.id=q.group_id "
-            "JOIN answers a ON a.question_id=q.id WHERE q.id=? AND s.exam_id=?",
+            "JOIN answers a ON a.question_id=q.id WHERE q.id=? AND s.exam_id=?"
+            + (" FOR UPDATE OF q" if for_update and self.backend == "postgres" else ""),
             (question_id, self.exam_id),
         ).fetchone()
         if row is None:
@@ -245,6 +333,15 @@ class ReviewStore:
         ).fetchone() is not None)
 
     def _version(self, db, question_id: str) -> int:
+        if self.backend == "postgres" and self.exam_id == "036-I-B":
+            # One database roundtrip for both review count and migration marker.
+            row = db.execute(
+                "SELECT COUNT(*) + CASE WHEN EXISTS(SELECT 1 FROM import_metadata "
+                "WHERE key=?) THEN 1 ELSE 0 END AS review_count "
+                "FROM review_records WHERE subject_type='question' AND subject_id=?",
+                ("036-I-B:punctuation:v4-to-v5", question_id),
+            ).fetchone()
+            return row["review_count"]
         row = db.execute(
             "SELECT COUNT(*) AS review_count FROM review_records WHERE subject_type='question' "
             "AND subject_id=?",
@@ -1510,14 +1607,7 @@ class ReviewStore:
 
     def save_review(self, question_id: str, payload: dict, *, fast_response: bool = False) -> dict:
         self._list_questions_cache = None
-        # Validate the immutable local evidence before acquiring a central row lock.
-        with closing(self._connect()) as preflight:
-            preflight_question = self._question(preflight, question_id)
-            for kind in (("paper", "answer", "transcript") if preflight_question["section"] == "listening"
-                         else ("paper", "answer")):
-                self._media_path_with_connection(preflight, preflight_question, kind)
-
-        with self._write_transaction() as db:
+        with self._review_write_transaction(question_id) as db:
             question = self._lock_question(db, question_id)
             old_choices = [row["text"] for row in db.execute(
                 "SELECT text FROM choices WHERE question_id=? ORDER BY number", (question_id,)
@@ -1620,7 +1710,11 @@ class ReviewStore:
                             (source_id,)).fetchone()
         if record is None:
             raise NotFound("Source does not exist")
-        relative = record["relative_path"]
+        return self._verify_media_source(record["relative_path"], record["sha256"],
+                                         record["byte_size"], kind)
+
+    def _verify_media_source(self, relative: str, sha256: str, byte_size: int, kind: str) -> Path:
+        """Check one local original against DB metadata, with no integrity shortcuts."""
         if not relative or "\\" in relative or Path(relative).is_absolute():
             raise ReviewError("Unsafe stored source path")
         source = self._local_media_path(relative)
@@ -1630,13 +1724,13 @@ class ReviewStore:
             raise ReviewError("Source escapes the selected exam folder") from exc
         if not source.is_file() or source.suffix.lower() != (".mp3" if kind == "audio" else ".pdf"):
             raise NotFound("Source file unavailable or of unexpected type")
-        if source.stat().st_size != record["byte_size"]:
+        if source.stat().st_size != byte_size:
             raise Conflict("Original source file size changed; review is blocked")
         checksum = hashlib.sha256()
         with source.open("rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 checksum.update(chunk)
-        if checksum.hexdigest() != record["sha256"]:
+        if checksum.hexdigest() != sha256:
             raise Conflict("Original source file checksum changed; review is blocked")
         return source
 
