@@ -18,8 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIR = ROOT / "topik-past-papers" / "36th"
 MANIFEST = ROOT / "topik-past-papers" / "manifest_early.json"
-STAGING = ROOT / "topik-past-papers" / "derived" / "036-I-B" / "staging-v2.json"
-EXTRACTION_VERSION = "pdf-first-36-v2"
+STAGING = ROOT / "topik-past-papers" / "derived" / "036-I-B" / "staging-v4.json"
+EXTRACTION_VERSION = "pdf-first-36-v4"
 
 FILENAMES = {
     "test_paper": "36th-TOPIK-I-Combined-Test-Paper.pdf",
@@ -38,6 +38,17 @@ _QUESTION = re.compile(r"(?m)^\s*(\d{1,2})\s*\.\s*")
 _CHOICE = re.compile(r"[①②③④]")
 _MARKER = {"①": 1, "②": 2, "③": 3, "④": 4}
 _SPEAKER = re.compile(r"^(?:남자|여자)\s*:")
+
+# Source-verified PDF line-end splits. Each pair was checked against the
+# specific original PDF page. Do not normalize these phrases globally: the
+# expected line break must occur exactly once in the matching source block.
+_VERIFIED_LINE_WRAPS = {
+    ("transcript_question", 22): ("우리 집 근처", "에도 이런 곳이"),
+    ("transcript_group", 25): ("꽃을 키우는 방법", "들이 사진과 함께"),
+    ("reading_question", 48): ("혼자 있는 것을 좋아", "했습니다.그런데"),
+    ("reading_group", 51): ("호텔을 예약", "하고 싶은 외국인은"),
+    ("reading_group", 61): ("사 먹을 수도 있습", "니다.자유롭고"),
+}
 
 
 def dependencies():
@@ -69,6 +80,18 @@ def compact(text: str) -> str:
 def clean(text: str) -> str:
     """Preserve pypdf's Korean word spacing, only collapse PDF line wraps."""
     return re.sub(r"\s+", " ", text).strip()
+
+
+def join_verified_pdf_line_wrap(text: str, *, location: str, number: int) -> str:
+    """Join only one source-confirmed mid-word wrap in a named PDF block."""
+    before, after = _VERIFIED_LINE_WRAPS[(location, number)]
+    broken = f"{before}\n{after}"
+    if text.count(broken) != 1:
+        raise ValueError(
+            f"Source line-wrap evidence changed for {location} {number}; "
+            "manual PDF comparison required"
+        )
+    return text.replace(broken, before + after, 1)
 
 
 def source_documents():
@@ -186,6 +209,8 @@ def tokenize_paper(reader, section, source_relative):
                 lo, hi = int(match.group(1)), int(match.group(2))
                 if not first <= lo <= hi <= last or (groups and lo <= groups[-1]["last_exam_number"]):
                     raise ValueError(f"Invalid group range {lo}-{hi} on {section} page {page_no}")
+                if section == "reading" and lo in (51, 61):
+                    body = join_verified_pdf_line_wrap(body, location="reading_group", number=lo)
                 instr, passage, points_each = group_intro(body, number=lo)
                 group = {"id": f"036-I-{section[0].upper()}-{lo:02d}-{hi:02d}",
                          "section": section, "first_exam_number": lo,
@@ -201,7 +226,15 @@ def tokenize_paper(reader, section, source_relative):
             markers = list(_CHOICE.finditer(body))
             if len(markers) != 4 or [m.group() for m in markers] != list(_MARKER):
                 raise ValueError(f"Question {number}: require four ordered, distinct printed choice slots")
-            stem = clean(body[:markers[0].start()])
+            # Slice by the ORIGINAL PDF choice marker offset before joining
+            # source-confirmed line wraps; otherwise shortening the text may
+            # accidentally include a choice glyph at the end of the stem.
+            stem_source = body[:markers[0].start()]
+            if section == "reading" and number == 48:
+                stem_source = join_verified_pdf_line_wrap(
+                    stem_source, location="reading_question", number=number
+                )
+            stem = clean(stem_source)
             stem = re.sub(r"\(\s*[234]점\s*\)", "", stem).strip()
             choices = [{"number": i + 1, "text": clean(body[markers[i].end():markers[i + 1].start() if i < 3 else len(body)])}
                        for i in range(4)]
@@ -237,6 +270,10 @@ def transcript_entries(reader):
                 first = int(match.group(1))
                 if first in (25, 27, 29):
                     # These shared paragraphs precede the first numbered question.
+                    if first == 25:
+                        body = join_verified_pdf_line_wrap(
+                            body, location="transcript_group", number=first
+                        )
                     _, passage, _ = group_intro(body, number=first)
                     shared = clean(passage)
                     if not _SPEAKER.search(shared):
@@ -246,6 +283,10 @@ def transcript_entries(reader):
             if number not in range(1, 31) or number in entries:
                 raise ValueError(f"Invalid/duplicate transcript entry {number}")
             portion = body.split("①", 1)[0]
+            if number == 22:
+                portion = join_verified_pdf_line_wrap(
+                    portion, location="transcript_question", number=number
+                )
             portion = re.sub(r"\(\s*[234]점\s*\)", "", portion)
             lines = [line.strip() for line in portion.splitlines()]
             pos = next((i for i, line in enumerate(lines) if _SPEAKER.match(line)), None)
@@ -264,7 +305,7 @@ def transcript_entries(reader):
 
 
 def add_image_crops(questions, paths, pymupdf):
-    """Crop only actual visual question material using PyMuPDF's image block bboxes."""
+    """Crop source images plus all printed option glyphs for L15/L16."""
     per_number = {q["exam_number"]: q for q in questions}
     expected = {15: ("listening_paper", 4, (1, 2, 3, 4)),
                 16: ("listening_paper", 4, (5, 6, 7, 8)),
@@ -282,6 +323,28 @@ def add_image_crops(questions, paths, pymupdf):
             if max(indexes) >= len(blocks):
                 raise ValueError(f"Visual element positions changed for question {number}")
             bounds = [pymupdf.Rect(blocks[i]["bbox"]) for i in indexes]
+            if number in (15, 16):
+                # On page 4, ①/③ are printed to the LEFT of the bitmap, while
+                # ②/④ fall between columns. Image blocks alone truncate ①/③.
+                picture_top = min(rect.y0 for rect in bounds)
+                picture_bottom = max(rect.y1 for rect in bounds)
+                glyphs: dict[str, list] = {}
+                for block in page.get_text("rawdict")["blocks"]:
+                    if block["type"] != 0:
+                        continue
+                    for line in block["lines"]:
+                        for span in line["spans"]:
+                            for char in span["chars"]:
+                                if char["c"] not in _MARKER:
+                                    continue
+                                label = pymupdf.Rect(char["bbox"])
+                                if picture_top - 8 <= label.y0 <= picture_bottom + 8:
+                                    glyphs.setdefault(char["c"], []).append(label)
+                if set(glyphs) != set(_MARKER) or any(len(v) != 1 for v in glyphs.values()):
+                    raise ValueError(
+                        f"Listening image {number} must preserve four unique PDF option labels"
+                    )
+                bounds.extend(glyphs[key][0] for key in _MARKER)
             rect = pymupdf.Rect(min(r.x0 for r in bounds), min(r.y0 for r in bounds),
                                 max(r.x1 for r in bounds), max(r.y1 for r in bounds))
             rect += (-4, -4, 4, 4)
