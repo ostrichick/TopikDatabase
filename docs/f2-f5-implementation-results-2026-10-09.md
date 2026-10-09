@@ -32,8 +32,19 @@
 
 폐기 가능한 SQLite fixture에 2개 문항과 문항/대본 경고를 넣고 **별도의 `127.0.0.1` 임시 서버**에서 HTTP GET을 실행했다. `/api/questions-fast`의 2개 행, `/api/questions-ai-summary`의 `ready` 상태 및 인간 검수 status 필드가 없는 계약, `/api/questions/035-I-L-001`의 문항·대본 warning JSON을 확인했다. 이 경로는 `tests.test_review_ai_summary_http`에 재실행 가능한 회귀로 남겼다. 운영 서버·운영 PostgreSQL에는 연결하지 않았다.
 
-로컬 Microsoft Edge headless의 `--dump-dom` 검증은 프로세스 종료 코드 0에도 표준 출력에 DOM이 없어 실제 브라우저 화면·모바일 외관을 확정하지 못했다. 실제 브라우저 UX와 실제 PostgreSQL의 동시 요청/처리 시간은 미검증으로 남긴다. Node DOM 회귀와 임시 HTTP 테스트는 이 제한을 대체하는 테스트 결과로 구분한다.
+최초 headless Edge `--dump-dom` 방식에서는 프로세스 종료 코드 0에도 표준 출력이 비었다. **이후 기존 브라우저의 CDP 세션으로 실제 렌더링을 검증했으며, 아래 추가 검증 기록이 이 최초 한계를 갱신한다.**
 
 ## 적용 범위
 
 실행 중인 기존 검수 서버에는 아직 변경이 반영됐다고 확인하지 않았다. 서버를 강제로 재시작하지 않았다. F2–F5 수정에는 운영 DB 쓰기, `v6 --apply`, 승인 POST, PDF/MP3 원본 변경이 없었다. 신규 collector의 URL provenance 파일은 앞으로 실제 `--download`를 실행할 때 해당 수집 root의 `catalog/`에 기록된다.
+
+## 추가 검증 — 기존 브라우저와 중앙 PostgreSQL (2026-10-09)
+
+사용자 요청에 따라 최초 누락된 검증 경로를 다시 점검했다.
+
+1. **중앙 DB 접근 경로 확인:** 기존 환경변수의 `wordpress-blog:55432`는 SSH 로컬 포워드를 전제로 한 `sslmode=verify-full` 연결이다. 최초의 DNS 실패는 SSH 터널을 열지 않은 검증 절차 문제였다. 저장소의 `scripts/start_postgres_review.ps1`와 `docs/postgres-foundation.md`에서 `ssh -L 127.0.0.1:55432:127.0.0.1:5432 bloguito` 경로를 확인했다. 별도 테스트용 SSH 터널을 띄운 후 사용 중인 중앙 PostgreSQL에 정상 연결했다. 계정·인증서·설정 파일은 수정하지 않았다.
+2. **운영 DB 읽기 전용:** `transaction_read_only=on`, `REPEATABLE READ, READ ONLY`에서 35회 `verified=70`, 36회 `verified=9`, `needs_manual_review=61`을 조회했다. `ReviewStore.list_questions_fast()`의 35회/36회 각각 70행, AI 요약 응답의 스키마 및 `035-I-L-001`과 `035-I-R-031`의 `latest_run.subject_id`가 각각 원 문항과 일치함을 확인했다. 모두 읽기 전용이며 승인 POST와 데이터 변경은 없다.
+3. **실제 브라우저 검증 성공:** 이미 열려 있던 로컬 CDP 디버깅 포트 `127.0.0.1:9222`의 Edge 브라우저에 붙어, 별도 폐기 가능한 SQLite fixture를 제공하는 임시 로컬 검수 서버용 **새 테스트 탭 1개만 만들었다가 닫았다**. 실제 브라우저 DOM에서 390px 화면의 `2 / 2` 문항, AI 필터·정렬 표시, 문항/대본 경고 2건과 필터 선택을 확인했다. 320px 화면에서는 `clientWidth=scrollWidth=320`, 원본 대조 모바일 `role=dialog`, `aria-expanded=true`, 경고 2건 확인 및 스크린샷 육안 점검까지 완료했다. 테스트 fixture에 미디어 파일이 없어 원본 PDF iframe은 오류를 표시했으므로 PDF 뷰어 자체의 정상 렌더링 검증은 아니다. 현재 열린 사용자의 원래 탭은 조작하지 않았다.
+4. **새로 발견된 실제 성능 제약:** 동일 중앙 PostgreSQL에 접속한 35회 AI 요약의 백그라운드 조회가 **122초 관측 종료 시점까지 `loading`**이었다. F3 프런트엔드의 현재 재시도 예산(~44초) 안에 실데이터 요약이 완성되는지는 **검증 실패**이며, 실제 AI 필터 활성화까지의 지연이 남아 있다. 이는 초기 fast 목록 70행 조회와 분리된 경로다. 먼저 감사 집계 SQL/호출 횟수와 원격 왕복 시간을 계측하여 전용 요약 경로를 최적화해야 한다. 122초 후에도 항상 완료되지 않는다고 단정한 것은 아니며, 이번 계측에서 완료를 관측하지 못한 것이다.
+
+**결론:** 최초의 "브라우저 불가" 판단은 잘못된 검증 방법을 충분히 대체하지 못한 결과였다. 로컬 CDP를 통해 실제 브라우저 검증에 성공했다. 중앙 DB도 별도의 물리 서버 없이 읽기 전용으로 검증할 수 있었다. 단, 이전에 건너뛴 5개의 *실제 동시 쓰기·rollback* 테스트는 운영 DB에 적용하지 않는다. F3의 중앙 DB AI 요약 응답 지연은 후속 성능 개선 대상으로 남는다.
