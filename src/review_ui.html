@@ -7,7 +7,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self'; frame-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>TOPIK · 문항 검수실</title>
   <style>
-    :root { color-scheme: light; font-family: "Pretendard", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif; background: #f4f5f2; color: #24332c; font-size: 15px; }
+    :root { color-scheme: light; font-family: "Pretendard", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif; background: #f4f5f2; color: #24332c; font-size: 16px; }
     * { box-sizing: border-box; }
     body { margin: 0; min-width: 320px; }
     button, input, select, textarea { font: inherit; }
@@ -43,7 +43,7 @@
     .sidebar-top { padding: 0 6px 12px; }
     h2, h3, h4 { letter-spacing: -.035em; }
     .sidebar h2 { font-size: 1rem; margin: 0 0 14px; }
-    .control-label { font-size: .77rem; font-weight: 800; color: #536458; display: block; margin: 12px 0 6px; }
+    .control-label { font-size: .87rem; font-weight: 800; color: #536458; display: block; margin: 10px 0 5px; }
     .field, select, textarea { width: 100%; border: 1px solid #cad7cd; border-radius: 10px; padding: 10px 11px; background: #fff; color: #26392c; }
     .field:focus, select:focus, textarea:focus { border-color: #388266; outline: 2px solid #38826624; }
     textarea { line-height: 1.65; resize: vertical; min-height: 82px; }
@@ -55,7 +55,7 @@
     .question-item:hover { background: #f0f5ef; }
     .question-item.active { border-color: #39815f; background: #ecf5eb; box-shadow: inset 3px 0 #39815f; }
     .question-id { font-size: .87rem; font-weight: 750; }
-    .question-sub { display: block; color: #718075; font-size: .73rem; margin-top: 2px; }
+    .question-sub { display: block; color: #617367; font-size: .85rem; margin-top: 2px; }
     .item-right { display: inline-flex; align-items: center; gap: 6px; }
     .image-tag { color: #825c27; background: #fff1d8; font-size: .72rem; border-radius: 5px; padding: 3px 5px; }
     .ai-tag { color: #3d5c78; background: #eaf2fa; font-size: .68rem; border-radius: 5px; padding: 3px 5px; font-weight: 800; }
@@ -71,6 +71,23 @@
     .status-legend span { display:inline-flex; gap:5px; align-items:center; }
     .quick-controls { display:flex; gap:7px; flex-wrap:wrap; margin-bottom:12px; }
     .quick-controls .btn { flex:1 1 110px; }
+    .sidebar-quick { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 8px; align-items:end; }
+    .sidebar-quick label:first-child { min-width:0; }
+    .sidebar-quick .control-label { margin-top:7px; }
+    .advanced-filters { margin: 8px 0; border: 1px solid #e0e7dd; border-radius: 10px; }
+    .advanced-filters > summary { padding: 10px 12px; cursor: pointer; color: #295940; font-weight: 750; font-size: .9rem; min-height:44px; }
+    .advanced-filters .advanced-body { padding: 0 10px 12px; }
+    .filter-state { display:inline; color:#586b60; font-weight:600; }
+    .review-shortcuts { display:flex; flex-wrap:wrap; gap:8px; margin: -5px 0 14px; }
+    .review-shortcuts .btn { flex:1 1 108px; font-size: .9rem; }
+    #jumpWarnings { border-color:#dfbd78; color:#8a521e; background:#fff8e9; }
+    .raw-extraction { margin: 11px 0 12px; border-radius: 9px; background: #f7faf7; border:1px solid #e0e7df; }
+    .raw-extraction > summary { padding: 11px 12px; cursor:pointer; min-height:44px; color:#47644f; font-size:.89rem; font-weight:750; }
+    .raw-extraction .small-label { margin: 0 12px 5px; }
+    .raw-extraction .readonly { margin: 0 10px 10px; }
+    .reference .flags:focus-visible { outline-offset: 4px; }
+    #editorTitle { scroll-margin-top: 12px; }
+    #flagList { scroll-margin-top: 16px; }
     details#independentComparisonSection > summary { cursor:pointer; list-style-position:inside; min-height:46px; }
     .reference-close { margin-left:auto; }
     .reference-toggle { display:none; }
@@ -122,7 +139,7 @@
     .choice-number { display: grid; place-items: center; width: 28px; height: 38px; font-size: 1.1rem; color: #667b6a; }
     .choice-row.correct .choice-number { color: #208157; font-weight: 900; }
     .choice-row.correct input { border-color: #5ba47a; background: #f8fdf8; }
-    .hint { font-size: .79rem; line-height: 1.55; color: #718075; margin: 7px 0 0; }
+    .hint { font-size: .88rem; line-height: 1.6; color: #65776a; margin: 7px 0 0; }
     .answer-note { background: #eaf5ea; border: 1px solid #c9e3cb; border-radius: 11px; padding: 12px; color: #26583d; font-size: .86rem; line-height: 1.6; margin-top: 12px; }
     .action-bar { position: sticky; bottom: 0; margin: 20px -12px -15px; padding: 16px 12px 14px; background: #ffffffed; backdrop-filter: blur(12px); border-top: 1px solid #e1e8df; border-radius: 0 0 13px 13px; }
     .action-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -164,6 +181,8 @@
     .flag--strong { border-left: 3px solid #a53d32; color: #85382d; background: #fff1ed; }
     .flag-meta { display: block; font-size: .73rem; font-weight: 750; overflow-wrap: anywhere; }
     .flag-message { margin: 4px 0 0; font-size: inherit; line-height: inherit; overflow-wrap: anywhere; white-space: pre-wrap; }
+    .readonly, .flag, .comparison-card p, .ai-metric strong, .ai-log li, .history-list li { font-size: .91rem; }
+    .flag-meta, .ai-metric span, .ai-run-card .meta, .ai-log .meta, .comparison-card .meta { font-size: .82rem; }
     .ai-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 10px 0 12px; }
     .ai-metric { border: 1px solid #dce5eb; border-radius: 9px; background: #f7fafc; padding: 9px 10px; }
     .ai-metric span { display: block; color: #71808a; font-size: .7rem; margin-bottom: 3px; }
@@ -206,7 +225,7 @@
       .reference-open .reference { display:block; grid-column:2; position:sticky; top:12px; max-height:calc(100vh - 24px); overflow:auto; }
       .reference-open .reference-close { display:inline-flex; }
     }
-    @media (max-width: 760px) { .masthead { padding: 18px 16px; } .workspace { padding: 12px 10px 36px; } .progress-panel { padding: 14px; } .layout { display: flex; flex-direction: column; gap: 12px; } .layout > * { width: 100%; } .sidebar { position: static; max-height: none; padding: 12px; } .sidebar h2 { margin-bottom: 5px; } .sidebar-top { padding-bottom: 8px; } .sidebar .filter-grid { grid-template-columns: 1fr 1fr 1fr; } .sidebar .filter-grid label:first-child { grid-column: auto; } .question-list { display: flex; overflow-x: auto; overflow-y: hidden; min-height: 0; padding-bottom: 8px; } .question-item { min-width: 115px; flex-shrink: 0; } .question-sub { font-size: .67rem; } .editor { padding: 18px 15px; } .reference { grid-column: auto; } iframe { height: 500px; min-height: 370px; } .action-bar { margin-left: -3px; margin-right: -3px; padding-left: 3px; padding-right: 3px; } }
+    @media (max-width: 760px) { .masthead { padding: 12px 15px; } .masthead .eyebrow, .masthead p:last-child { display:none; } .masthead-inner { gap: 7px; } .masthead-badges { gap:6px; } .masthead-badges > span:not(#connectionState) { display:none; } .workspace { padding: 8px 10px 36px; } .progress-panel { padding: 10px 13px; margin-bottom: 10px; } .progress-track { margin: 8px 0; } .metrics { gap:5px 11px; } .layout { display: flex; flex-direction: column; gap: 10px; } .layout > * { width: 100%; } .sidebar { position: static; max-height: none; padding: 10px; } .sidebar h2 { margin-bottom: 5px; } .sidebar-top { padding-bottom: 5px; } .sidebar .filter-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } .sidebar .filter-grid label:first-child { grid-column: auto; } .question-list { display: flex; overflow-x: auto; overflow-y: hidden; min-height: 0; padding: 0 2px 3px; gap:5px; scroll-snap-type:x proximity; } .question-item { min-width: 112px; flex-shrink: 0; scroll-snap-align:start; min-height:44px; padding:7px 9px; } .question-sub { font-size: .8rem; } .sidebar-count { padding: 4px 7px; } .status-legend { font-size: .82rem; } .editor { padding: 15px 13px; } .editor-top { gap: 8px; } .editor h2 { font-size:1.3rem; } .quick-controls { margin: 8px 0 10px; } .quick-controls .btn { min-height:44px; } .badges { margin:9px 0 13px; gap:5px; } .badge { padding:5px 8px; } .review-shortcuts .btn { min-height:44px; } .reference { grid-column: auto; } iframe { height: 500px; min-height: 370px; } .action-bar { margin-left: -3px; margin-right: -3px; padding: 10px 3px; } .action-buttons { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); } .action-buttons #approveQuestion { grid-column: 1/-1; grid-row:1; min-height:48px; } .action-buttons .btn { min-height:44px; } .action-note { display:none; } .section-card { padding:14px 0; } }
     @media (max-width: 760px) {
       .reference-toggle { display:inline-flex; }
       .reference { display:none; }
@@ -216,7 +235,7 @@
       .reference-backdrop { display:none; }
       .reference-open .reference-backdrop { display:block; position:fixed; inset:0; background:#10251bc7; z-index:29; }
     }
-    @media (max-width: 420px) { .sidebar .filter-grid { grid-template-columns: 1fr; } .nav-controls { width: 100%; } .nav-controls button { flex: 1; } .reference-body { padding-left: 10px; padding-right: 10px; } iframe { height: 440px; } }
+    @media (max-width: 420px) { .nav-controls { width: 100%; } .nav-controls button { flex: 1; padding: 9px 8px; } .sidebar-quick { grid-template-columns: minmax(0,1.2fr) minmax(0,1fr); } .reference-body { padding-left: 10px; padding-right: 10px; } iframe { height: 440px; } }
     @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }
   </style>
 </head>
@@ -247,20 +266,26 @@
       <aside class="sidebar panel" aria-label="문항 목록 및 필터">
         <div class="sidebar-top">
           <h2>문항 탐색</h2>
-          <label class="control-label" for="questionSearch">문항 번호 또는 ID</label>
-          <input class="field" id="questionSearch" type="search" placeholder="예: 31 또는 035-I-L" autocomplete="off">
-          <div class="filter-grid">
-            <label><span class="control-label">영역</span><select id="sectionFilter" aria-label="영역 필터"><option value="all">전체 영역</option><option value="listening">듣기</option><option value="reading">읽기</option></select></label>
-            <label><span class="control-label">상태</span><select id="statusFilter" aria-label="상태 필터"><option value="all">전체 상태</option><option value="needs_manual_review">검토 필요</option><option value="verified">승인</option><option value="rejected">반려</option></select></label>
-            <label><span class="control-label">그림</span><select id="imageFilter" aria-label="그림 필터"><option value="all">전체 문항</option><option value="yes">그림 포함</option><option value="no">그림 없음</option></select></label>
-            <label id="aiFilterWrap" hidden><span class="control-label">AI 감사</span><select id="aiFilter" aria-label="AI 감사 필터"><option value="all">전체</option><option value="unresolved">미해결 발견</option><option value="finding">발견 있음</option><option value="disagreement">감사 불일치</option><option value="uncertain">불확실 있음</option><option value="high">고위험</option><option value="unaudited">미감사</option></select></label>
-            <label id="sortOrderWrap" hidden><span class="control-label">정렬</span><select id="sortOrder" aria-label="문항 정렬"><option value="number">문항 번호</option><option value="risk">AI 위험 높은 순</option><option value="findings">미해결 발견 많은 순</option><option value="latest">최근 AI 감사 순</option></select></label>
+          <div class="sidebar-quick">
+            <label><span class="control-label">문항 검색</span><input class="field" id="questionSearch" type="search" placeholder="번호 · 문항 ID" autocomplete="off"></label>
+            <label><span class="control-label">사람 검수 상태</span><select id="statusFilter" aria-label="상태 필터"><option value="all">전체 상태</option><option value="needs_manual_review">검토 필요</option><option value="verified">승인</option><option value="rejected">반려</option></select></label>
           </div>
+          <details class="advanced-filters" id="advancedFilters">
+            <summary>세부 필터·정렬 <span class="filter-state" id="activeFilterHint"></span></summary>
+            <div class="advanced-body">
+              <div class="filter-grid">
+                <label><span class="control-label">영역</span><select id="sectionFilter" aria-label="영역 필터"><option value="all">전체 영역</option><option value="listening">듣기</option><option value="reading">읽기</option></select></label>
+                <label><span class="control-label">그림</span><select id="imageFilter" aria-label="그림 필터"><option value="all">전체 문항</option><option value="yes">그림 포함</option><option value="no">그림 없음</option></select></label>
+                <label id="aiFilterWrap" hidden><span class="control-label">AI 감사</span><select id="aiFilter" aria-label="AI 감사 필터"><option value="all">전체</option><option value="unresolved">미해결 발견</option><option value="finding">발견 있음</option><option value="disagreement">감사 불일치</option><option value="uncertain">불확실 있음</option><option value="high">고위험</option><option value="unaudited">미감사</option></select></label>
+                <label id="sortOrderWrap" hidden><span class="control-label">정렬</span><select id="sortOrder" aria-label="문항 정렬"><option value="number">문항 번호</option><option value="risk">AI 위험 높은 순</option><option value="findings">미해결 발견 많은 순</option><option value="latest">최근 AI 감사 순</option></select></label>
+              </div>
+              <label class="comparison-filter"><input type="checkbox" id="comparisonDisagreement">Gemini·ChatGPT 판정 차이만 보기</label>
+              <label><span class="control-label">문항 표시 상태 · AI/인간 상태는 별개</span><select id="indicatorFilter" aria-label="문항 표시 상태"><option value="all">전체</option><option value="problem">빨강 · 문제 발견</option><option value="pending">주황 · 검토 대기</option><option value="verified">초록 · 승인 완료</option></select></label>
+              <div class="status-legend" aria-label="문항 상태 범례"><span><i class="state-dot verified"></i>사람 승인</span><span><i class="state-dot problem"></i>재확인 필요</span><span><i class="state-dot"></i>검토 대기</span></div>
+            </div>
+          </details>
           <p class="small-label" id="aiLoadStatus" role="status" aria-live="polite" hidden></p>
           <button class="btn" type="button" id="aiRetry" hidden>AI 감사 요약 다시 시도</button>
-          <label class="comparison-filter"><input type="checkbox" id="comparisonDisagreement">Gemini·ChatGPT 판정 차이만 보기</label>
-          <label><span class="control-label">문항 표시 상태</span><select id="indicatorFilter" aria-label="문항 표시 상태"><option value="all">전체</option><option value="problem">빨강 · 문제 발견</option><option value="pending">주황 · 검토 대기</option><option value="verified">초록 · 승인 완료</option></select></label>
-          <div class="status-legend" aria-label="문항 상태 범례"><span><i class="state-dot verified"></i>승인 완료</span><span><i class="state-dot problem"></i>문제 발견</span><span><i class="state-dot"></i>검토 대기</span></div>
         </div>
         <div class="sidebar-count" id="listCount">불러오는 중…</div>
         <nav class="question-list" id="questionList" aria-label="문항 선택"></nav>
@@ -270,25 +295,30 @@
         <div id="editorEmpty" class="empty-state">목록에서 검수할 문항을 선택하세요.</div>
         <div id="editorContent" hidden>
           <div class="editor-top">
-            <div><p class="subheading" id="questionSubtitle">35회 · TOPIK I</p><h2 id="editorTitle">문항 —</h2></div>
+            <div><p class="subheading" id="questionSubtitle">35회 · TOPIK I</p><h2 id="editorTitle" tabindex="-1">문항 —</h2></div>
             <div class="nav-controls"><button type="button" id="previousQuestion" class="btn" aria-label="이전 문항">← 이전</button><button type="button" id="nextQuestion" class="btn" aria-label="다음 문항">다음 →</button><button type="button" id="toggleReference" class="btn reference-toggle" aria-expanded="false" aria-controls="sourceReference">원본 대조</button></div>
           </div>
           <div class="quick-controls"><button class="btn" type="button" id="nextPending">다음 미검수</button><button class="btn" type="button" id="nextProblem">다음 문제 발견</button></div>
           <div class="badges" id="questionBadges"></div>
+          <nav class="review-shortcuts" aria-label="검수 근거 바로가기">
+            <button type="button" class="btn" id="jumpSource" aria-controls="sourceReference">원본 자료 보기</button>
+            <button type="button" class="btn" id="jumpAiEvidence" aria-controls="independentComparisonSection aiAuditSection">AI 판단 근거</button>
+            <button type="button" class="btn" id="jumpWarnings" aria-controls="flagList" hidden>추출 주의사항</button>
+          </nav>
           <section class="review-decision-cue" id="reviewDecisionCue" aria-labelledby="reviewDecisionHeading" hidden>
             <h3 id="reviewDecisionHeading">승인 상태와 AI 지적사항 확인</h3>
             <p id="reviewDecisionText"></p>
             <button type="button" class="btn" id="reviewDecisionEvidence">AI 근거 확인</button>
           </section>
-          <div class="section-card">
+          <div class="section-card" id="groupContextSection">
             <h3>공통 지시문 및 지문</h3>
-            <span class="small-label">공통 지시문</span><div class="readonly" id="groupInstruction"></div>
-            <span class="small-label">공통 지문</span><div class="readonly" id="groupPassage"></div>
+            <div id="groupInstructionRow"><span class="small-label">공통 지시문</span><div class="readonly" id="groupInstruction"></div></div>
+            <div id="groupPassageRow"><span class="small-label">공통 지문</span><div class="readonly" id="groupPassage"></div></div>
           </div>
           <div class="section-card">
             <h3>문항 내용 수정</h3>
             <label class="small-label" for="stemInput">문항 본문</label><textarea id="stemInput" rows="4" spellcheck="false" placeholder="원본 PDF와 대조해 문항 본문을 수정하세요."></textarea>
-            <label class="small-label" id="rawQuestionLabel">초기 추출 원문 · 공백 보정 전 기록 (읽기 전용)</label><div class="readonly" id="rawQuestion"></div>
+            <details class="raw-extraction" id="rawExtractionDetails"><summary>초기 추출 원문 비교 (읽기 전용)</summary><label class="small-label" id="rawQuestionLabel">초기 추출 원문 · 공백 보정 전 기록 (읽기 전용)</label><div class="readonly" id="rawQuestion"></div></details>
             <span class="small-label">선택지 ①–④</span>
             <div class="choice-row" id="choiceRow1"><label class="choice-number" for="choice1">①</label><input id="choice1" class="field" type="text" autocomplete="off" aria-label="선택지 1"></div>
             <div class="choice-row" id="choiceRow2"><label class="choice-number" for="choice2">②</label><input id="choice2" class="field" type="text" autocomplete="off" aria-label="선택지 2"></div>
@@ -353,7 +383,7 @@
             <p class="hint" id="audioFullHint">전체 원본 음원도 위 재생기에서 언제든 들을 수 있습니다.</p>
           </div>
           <div class="media-card" id="imageSection" hidden><h3>원본 이미지</h3><div id="imageList" class="image-list"></div></div>
-          <div class="media-card"><h3>추출 주의사항</h3><p class="hint">문항 및 듣기 대본 추출 시 저장된 주의사항입니다. 이후 자료가 갱신되었을 수 있으니 현재 원본과 대조해 확인하세요.</p><div id="flagList" class="flags" role="list" aria-label="문항 및 듣기 대본 추출 주의사항"><p class="hint">문항을 선택하면 확인할 항목이 나타납니다.</p></div></div>
+          <div class="media-card"><h3>추출 주의사항</h3><p class="hint">문항 및 듣기 대본 추출 시 저장된 주의사항입니다. 이후 자료가 갱신되었을 수 있으니 현재 원본과 대조해 확인하세요.</p><div id="flagList" class="flags" role="list" tabindex="-1" aria-label="문항 및 듣기 대본 추출 주의사항"><p class="hint">문항을 선택하면 확인할 항목이 나타납니다.</p></div></div>
           <details class="media-card" id="aiAuditSection">
             <summary style="padding:14px 16px;cursor:pointer;font-weight:750">기존 AI 감사 상세 기록 펼치기</summary>
             <div style="padding:0 16px 16px">
@@ -658,6 +688,11 @@
         const ai = $('aiFilter').value;
         const indicator = $('indicatorFilter')?.value || 'all';
         const sort = $('sortOrder').value;
+        const secondaryCount = [section !== 'all', image !== 'all', ai !== 'all',
+          indicator !== 'all', sort !== 'number', $('comparisonDisagreement')?.checked === true]
+          .filter(Boolean).length;
+        const hint = $('activeFilterHint');
+        if (hint) hint.textContent = secondaryCount ? `· ${secondaryCount}개 적용` : '';
         state.visible = state.items.filter(item =>
           (section === 'all' || item.section === section) &&
           (status === 'all' || item.status === status) &&
@@ -700,7 +735,7 @@
             button = element('button', 'question-item');
             button.type = 'button';
             button.dataset.questionId = item.id;
-            button.addEventListener('click', () => selectQuestion(item.id));
+            button.addEventListener('click', () => selectQuestion(item.id, { focusEditor: true }));
             cache.set(item.id, button);
           }
           button.classList.toggle('active', item.id === state.selectedId);
@@ -731,11 +766,33 @@
           if (root.children[index] !== button) root.insertBefore(button, root.children[index] || null);
         }
         while (root.children.length > state.visible.length) root.removeChild(root.lastElementChild);
+        state.lastMarkedQuestionId = state.selectedId;
         // insertBefore can detach a focused button when sorting; restore focus
         // without moving the document or the editor/PDF viewport.
         if (originallyFocused && cache.get(originallyFocused)?.isConnected &&
             document.activeElement !== cache.get(originallyFocused))
           cache.get(originallyFocused).focus({ preventScroll: true });
+      }
+      function markSelectedQuestion() {
+        // Opening a detail changes only the two selected rows, not all 70.
+        const cache = state.questionNodes;
+        if (!cache) return;
+        const previous = cache.get(state.lastMarkedQuestionId);
+        if (previous) { previous.classList.remove('active'); previous.setAttribute('aria-current', 'false'); }
+        const current = cache.get(state.selectedId);
+        if (current?.isConnected) { current.classList.add('active'); current.setAttribute('aria-current', 'true'); }
+        state.lastMarkedQuestionId = state.selectedId;
+      }
+      function initCompactExplorer() {
+        // Keep the question rail visible before secondary search controls on
+        // both desktop and mobile. Native details retains manual disclosure.
+        $('advancedFilters').open = false;
+      }
+      function focusEditorOnMobile(enabled) {
+        if (!enabled || !window.matchMedia('(max-width: 760px)').matches) return;
+        const heading = $('editorTitle');
+        heading.focus({ preventScroll: true });
+        heading.scrollIntoView({ block: 'start' });
       }
       function keepSelectedQuestionVisible() {
         // Only move the question list's own scroll position; scrolling the
@@ -1230,7 +1287,7 @@
       function refreshDirty() {
         const badge = $('dirtyBadge');
         if (badge) badge.hidden = !dirty();
-        document.title = `${dirty() || audioDirty() ? '● ' : ''}TOPIK 35 · 문항 검수실`;
+        document.title = `${dirty() || audioDirty() ? '● ' : ''}TOPIK ${Number((state.examId || '035-I-B').slice(0, 3))} · 문항 검수실`;
       }
       function canNavigate() {
         if (state.saving || state.audio.saving || state.loading) return false;
@@ -1253,9 +1310,10 @@
         return state.pendingReviews?.has(id) || state.failedReviews?.size > 0 || state.pendingReviews?.size >= 4;
       }
       function updateNavigation() {
-        const position = state.items.findIndex(item => item.id === state.selectedId);
+        const pool = state.visible?.some(item => item.id === state.selectedId) ? state.visible : state.items;
+        const position = pool.findIndex(item => item.id === state.selectedId);
         $('previousQuestion').disabled = state.saving || state.audio.saving || state.loading || position <= 0;
-        $('nextQuestion').disabled = state.saving || state.audio.saving || state.loading || position < 0 || position >= state.items.length - 1;
+        $('nextQuestion').disabled = state.saving || state.audio.saving || state.loading || position < 0 || position >= pool.length - 1;
       }
       function setLoading(value) {
         state.loading = value;
@@ -1266,15 +1324,13 @@
         updateNavigation();
         refreshAudioActions();
       }
-      async function selectQuestion(id, { force = false } = {}) {
+      async function selectQuestion(id, { force = false, focusEditor = false } = {}) {
         if (!force && id === state.selectedId && state.detail) return;
         if (!force && !canNavigate()) return;
         if (state.saving || state.audio.saving) return;
 
         const cached = state.detailsCache && state.detailsCache[id];
-        const listItem = state.items.find(item => item.id === id);
-        const needsFullAudit = !!aiAudit(listItem) && !aiAudit(cached);
-        if (!force && cached && !needsFullAudit) {
+        if (!force && cached) {
           state.selectedId = id;
           state.detail = cached;
           state.baseline = '';
@@ -1286,6 +1342,7 @@
           state.pdfTab = 'question';
           renderDetail();
           keepSelectedQuestionVisible();
+          focusEditorOnMobile(focusEditor);
           return;
         }
 
@@ -1312,6 +1369,7 @@
           state.pdfTab = 'question';
           renderDetail();
           keepSelectedQuestionVisible();
+          focusEditorOnMobile(focusEditor);
         } catch (error) {
           if (token !== state.requestId) return;
           $('editorEmpty').textContent = '문항을 불러오지 못했습니다. 목록에서 다시 선택하거나 새로고침하세요.';
@@ -1386,8 +1444,13 @@
         $('questionBadges').lastElementChild.id = 'dirtyBadge';
         renderReviewDecisionCue();
         renderIndependentComparison();
-        textBox('groupInstruction', q.group?.instruction_display ?? q.group?.instruction, '공통 지시문 없음');
-        textBox('groupPassage', q.group?.passage_text_display ?? q.group?.passage_text, '공통 지문 없음');
+        const groupInstruction = q.group?.instruction_display ?? q.group?.instruction;
+        const groupPassage = q.group?.passage_text_display ?? q.group?.passage_text;
+        $('groupContextSection').hidden = !String(groupInstruction || '').trim() && !String(groupPassage || '').trim();
+        $('groupInstructionRow').hidden = !String(groupInstruction || '').trim();
+        $('groupPassageRow').hidden = !String(groupPassage || '').trim();
+        textBox('groupInstruction', groupInstruction, '공통 지시문 없음');
+        textBox('groupPassage', groupPassage, '공통 지문 없음');
         $('rawQuestionLabel').textContent = q.exam_id === '036-I-B'
           ? '초기 추출 텍스트 · 문장부호 공백 표시 보정 (원본 보존 · 읽기 전용)'
           : '초기 추출 원문 · 공백 보정 전 기록 (읽기 전용)';
@@ -1419,7 +1482,7 @@
         renderReferences();
         renderAiAudit();
         renderHistory();
-        filterItems();
+        markSelectedQuestion();
         updateNavigation();
       }
       function renderPdf() {
@@ -1505,6 +1568,8 @@
           ...(q.section === 'listening' && Array.isArray(q.transcript?.warnings)
             ? q.transcript.warnings.map(value => ({ value, source: '듣기 대본' })) : []),
         ];
+        $('jumpWarnings').hidden = warnings.length === 0;
+        $('jumpWarnings').textContent = `추출 주의 ${warnings.length}건`;
         const severityNames = {
           info: '정보', review: '검토', low: '낮음', medium: '보통',
           high: '높음', critical: '매우 높음', blocking: '처리 차단',
@@ -1897,10 +1962,11 @@
         }
       }
       function neighbor(delta) {
-        const index = state.items.findIndex(item => item.id === state.selectedId);
+        const pool = state.visible?.some(item => item.id === state.selectedId) ? state.visible : state.items;
+        const index = pool.findIndex(item => item.id === state.selectedId);
         if (index < 0) return;
-        const item = state.items[index + delta];
-        if (item) selectQuestion(item.id);
+        const item = pool[index + delta];
+        if (item) selectQuestion(item.id, { focusEditor: true });
       }
       function jumpToNextReview(kind) {
         const pool = state.visible;
@@ -1910,11 +1976,30 @@
           if (!item || item.id === state.selectedId) continue;
           if ((kind === 'pending' && item.status === 'needs_manual_review') ||
               (kind === 'problem' && reviewIndicator(item).kind === 'problem')) {
-            return selectQuestion(item.id);
+            return selectQuestion(item.id, { focusEditor: true });
           }
         }
         notice(kind === 'pending' ? '현재 필터에서 이동할 다른 미검수 문항이 없습니다.' :
           '현재 필터에서 이동할 다른 문제 발견 문항이 없습니다.', 'info');
+      }
+      function jumpToEvidence(kind) {
+        if (!state.detail) return;
+        if (kind === 'ai') {
+          const row = state.items.find(item => item.id === state.detail.id);
+          const comparison = state.independentAudits?.questions?.[String(state.detail.number)];
+          const independentFinding = ['gemini', 'chatgpt'].some(key => comparison?.[key]?.verdict === 'finding');
+          const hasExisting = !!(aiAudit(state.detail) || aiAudit(row));
+          const section = hasExisting && !independentFinding ? $('aiAuditSection') : $('independentComparisonSection');
+          section.open = true;
+          section.scrollIntoView({ block: 'start' });
+          section.querySelector('summary')?.focus({ preventScroll: true });
+          return;
+        }
+        if (window.matchMedia('(max-width: 1250px)').matches) setReferenceOpen(true);
+        const target = kind === 'warnings' ? $('flagList') : $('sourceReference');
+        target.scrollIntoView({ block: 'start' });
+        if (kind === 'warnings') target.focus({ preventScroll: true });
+        else $('sourceReference').querySelector('.source-tab.active')?.focus({ preventScroll: true });
       }
       function setReferenceOpen(open, restoreFocus = false) {
         const enabled = open && window.matchMedia('(max-width: 1250px)').matches;
@@ -1935,6 +2020,9 @@
       }
       function installHandlers() {
         $('examSelector').addEventListener('change', event => switchExam(event.target.value));
+        $('jumpSource').addEventListener('click', () => jumpToEvidence('source'));
+        $('jumpAiEvidence').addEventListener('click', () => jumpToEvidence('ai'));
+        $('jumpWarnings').addEventListener('click', () => jumpToEvidence('warnings'));
         $('aiRetry').addEventListener('click', retryAiSummary);
         $('reviewDecisionEvidence').addEventListener('click', renderDecisionEvidence);
         $('aiAuditSection').addEventListener('toggle', async () => {
@@ -2078,7 +2166,7 @@
           if (document.body.classList.contains('reference-open') &&
               window.matchMedia('(max-width: 760px)').matches) {
             if (event.key === 'Tab') {
-              const focusable = [...$('sourceReference').querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), [tabindex]:not([tabindex="-1"])')]
+              const focusable = [...$('sourceReference').querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, iframe:not([hidden]), audio[controls]:not([hidden]), [tabindex]:not([tabindex="-1"])')]
                 .filter(node => node.getClientRects().length > 0);
               const first = focusable[0], last = focusable[focusable.length - 1];
               if (first && (event.shiftKey && document.activeElement === first)) {
@@ -2120,6 +2208,7 @@
       }
       async function init() {
         installHandlers();
+        initCompactExplorer();
         syncExamHeading();
         const host = location.hostname.toLowerCase();
         if (host !== '127.0.0.1' || location.protocol !== 'http:') {
@@ -2141,9 +2230,11 @@
             if (state.detail) renderIndependentComparison();
           });
           await loadList();
-          await bundlePromise;
+          // Bundle is a read-only navigation optimization, not a prerequisite
+          // for first detail. A slow 70-question bundle must not block review.
           if (state.items.length) await selectQuestion(state.items[0].id);
           else $('editorEmpty').textContent = '검수할 문항이 없습니다.';
+          void bundlePromise;
         } catch (error) {
           $('connectionState').textContent = '서버 연결 실패';
           $('listCount').textContent = '목록을 불러오지 못했습니다.';

@@ -43,7 +43,7 @@ class FakeElement {
 }
 
 function render(question) {
-  const ids = ['flagList','imageList','imageSection','audioSection','audioPlayer','audioFullHint'];
+  const ids = ['flagList','imageList','imageSection','audioSection','audioPlayer','audioFullHint','jumpWarnings'];
   const nodes = Object.fromEntries(ids.map(id => [id, new FakeElement()]));
   const createdTags = [];
   const context = {
