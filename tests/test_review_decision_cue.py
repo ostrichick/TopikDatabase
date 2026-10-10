@@ -32,12 +32,12 @@ const details={
 let state={items:[],detail:null,independentAudits:{questions:{}}};
 const context={state,$:id=>elements[id]||details[id],
   aiAudit:i=>i?.ai_audit||null,aiNumber:x=>Number(x)||0, Date, console};
-vm.runInNewContext(source('reviewIndicator','aiConvergenceText')+
+vm.runInNewContext(source('reviewEvidence','aiConvergenceText')+
   source('renderReviewDecisionCue','renderDecisionEvidence'), context);
 const decision=context.reviewIndicator;
 const render=context.renderReviewDecisionCue;
 const approved={id:'035-I-L-001',number:1,status:'verified',review_status:'verified',
-  last_human_review:{reviewed_at:'2026-10-08T10:00:00Z'},version:3};
+  last_human_review:{reviewed_at:'2026-10-08T10:00:00Z',status:'verified',is_current:true,approved:true},version:3};
 function expectCue(visible,term){
   render();
   assert.equal(elements.reviewDecisionCue.hidden,!visible);

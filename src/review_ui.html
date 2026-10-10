@@ -66,7 +66,9 @@
     .state-dot.verified { background: #2b9166; }
     .state-dot.rejected { background: #c45b52; }
     .state-dot.problem { background: #c43e39; }
-    .state-dot.unknown { background: #879399; }
+    .state-dot.unknown { background: #687782; border: 2px solid #fff; outline: 1px solid #687782; }
+    .evidence-tag { font-size: .76rem; font-weight: 750; color: #425c68; background: #eaf0f4; border-radius: 5px; padding: 3px 5px; }
+    .badge.status.unknown { background: #eaf0f4; color: #385268; }
     .status-legend { display:flex; align-items:center; flex-wrap:wrap; gap:11px; margin:10px 6px 0; color:#637369; font-size:.73rem; }
     .status-legend span { display:inline-flex; gap:5px; align-items:center; }
     .quick-controls { display:flex; gap:7px; flex-wrap:wrap; margin-bottom:12px; }
@@ -278,9 +280,9 @@
   <main class="workspace">
     <div id="notification" class="alert" role="status" aria-live="polite" hidden><span id="notificationText"></span><button type="button" id="reloadConflict" class="btn" hidden>서버 내용 다시 불러오기</button></div>
     <section class="progress-panel" aria-label="검수 진행 상황">
-      <div class="progress-top"><strong>전체 검수 진행률</strong><span class="progress-label" id="progressLabel">문항을 불러오는 중…</span></div>
-      <div class="progress-track" role="progressbar" aria-label="검증 완료 비율" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progressTrack"><div class="progress-fill" id="progressFill"></div></div>
-      <div class="metrics"><span>전체 <b id="countAll">—</b></span><span>승인 <b id="countVerified">—</b></span><span>검토 필요 <b id="countPending">—</b></span><span>반려 <b id="countRejected">—</b></span><span>그림 포함 <b id="countImages">—</b></span></div>
+      <div class="progress-top"><strong>검수 선언 근거 확인 진행률</strong><span class="progress-label" id="progressLabel">문항을 불러오는 중…</span></div>
+      <div class="progress-track" role="progressbar" aria-label="현재 승인 선언 근거 확인 비율" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progressTrack"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="metrics"><span>전체 <b id="countAll">—</b></span><span>승인 근거 확인 <b id="countVerified">—</b></span><span>검토 필요 <b id="countPending">—</b></span><span>반려 근거 확인 <b id="countRejected">—</b></span><span>검수 근거 미확정 <b id="countUnknown">—</b></span><span>그림 포함 <b id="countImages">—</b></span></div>
       <div class="review-sync" id="reviewSync" role="status" aria-live="polite" hidden><span id="reviewSyncText"></span><button type="button" class="btn" id="reviewFailureGo" hidden>실패 문항 확인</button></div>
     </section>
 
@@ -290,7 +292,7 @@
           <h2>문항 탐색</h2>
           <div class="sidebar-quick">
             <label><span class="control-label">문항 검색</span><input class="field" id="questionSearch" type="search" placeholder="번호 · 문항 ID" autocomplete="off"></label>
-            <label><span class="control-label">사람 검수 상태</span><select id="statusFilter" aria-label="상태 필터"><option value="all">전체 상태</option><option value="needs_manual_review">검토 필요</option><option value="verified">승인</option><option value="rejected">반려</option></select></label>
+            <label><span class="control-label">현재 검수 근거</span><select id="statusFilter" aria-label="사람 검수 선언 근거 필터"><option value="all">전체 상태</option><option value="needs_manual_review">검토 필요</option><option value="verified">승인 근거 확인</option><option value="rejected">반려 근거 확인</option><option value="unknown">상태·근거 미확정</option></select></label>
           </div>
           <details class="advanced-filters" id="advancedFilters">
             <summary>세부 필터·정렬 <span class="filter-state" id="activeFilterHint"></span></summary>
@@ -302,8 +304,8 @@
                 <label id="sortOrderWrap" hidden><span class="control-label">정렬</span><select id="sortOrder" aria-label="문항 정렬"><option value="number">문항 번호</option><option value="risk">AI 위험 높은 순</option><option value="findings">미해결 발견 많은 순</option><option value="latest">최근 AI 감사 순</option></select></label>
               </div>
               <label class="comparison-filter"><input type="checkbox" id="comparisonDisagreement">Gemini·ChatGPT 판정 차이만 보기</label>
-              <label><span class="control-label">문항 표시 상태 · AI/인간 상태는 별개</span><select id="indicatorFilter" aria-label="문항 표시 상태"><option value="all">전체</option><option value="problem">빨강 · 문제 발견</option><option value="pending">주황 · 검토 대기</option><option value="verified">초록 · 승인 완료</option></select></label>
-              <div class="status-legend" aria-label="문항 상태 범례"><span><i class="state-dot verified"></i>사람 승인</span><span><i class="state-dot problem"></i>재확인 필요</span><span><i class="state-dot"></i>검토 대기</span></div>
+              <label><span class="control-label">문항 표시 상태 · AI/인간 상태는 별개</span><select id="indicatorFilter" aria-label="문항 표시 상태"><option value="all">전체</option><option value="problem">빨강 · AI/반려 재확인</option><option value="pending">주황 · 검토 대기</option><option value="verified">초록 · 승인 선언 확인</option><option value="unknown">회색 · 검수 근거 미확정</option></select></label>
+              <div class="status-legend" aria-label="문항 상태 범례"><span><i class="state-dot verified"></i>승인 선언 확인</span><span><i class="state-dot problem"></i>재확인 필요</span><span><i class="state-dot"></i>검토 대기</span><span><i class="state-dot unknown"></i>근거 미확정</span></div>
             </div>
           </details>
           <p class="small-label" id="aiLoadStatus" role="status" aria-live="polite" hidden></p>
@@ -650,14 +652,34 @@
         const timestamp = Date.parse(raw);
         return Number.isFinite(timestamp) ? timestamp : 0;
       }
+      // A stored question status, an explicit local manual decision, an AI
+      // finding, and an authenticated reviewer identity are distinct claims.
+      // The backend provides the currentness of the latest manual decision.
+      // Never promote a status-only legacy row to an approved human decision.
+      function reviewEvidence(item) {
+        const status = item?.review_status || item?.status;
+        const event = item?.last_human_review;
+        const current = event?.is_current === true && event?.status === status;
+        const approved = status === 'verified' && current && event?.approved === true &&
+          (item?.human_review_evidence?.approved !== false);
+        if (approved) return { kind: 'verified', reason: '현재 로컬 사람 승인 선언 기록 확인 · 검수자 개인 신원 인증 없음' };
+        if (status === 'verified') return { kind: 'unknown', reason: '검수 근거 미확정 · DB 저장 상태는 승인이나 현재 사람 승인 선언 근거가 없거나 최신 이력과 불일치 · 기존 승인을 자동 취소하지 않음' };
+        if (status === 'rejected' && current) return { kind: 'rejected', reason: '현재 로컬 사람 반려 선언 기록 확인 · 검수자 개인 신원 인증 없음' };
+        if (status === 'rejected') return { kind: 'unknown', reason: '검수 근거 미확정 · DB 저장 상태는 반려이나 현재 사람 반려 선언 근거가 없거나 최신 이력과 불일치' };
+        return { kind: 'pending', reason: 'DB 검토 필요 상태 · 현재 승인 선언 없음' };
+      }
       function reviewIndicator(item) {
+        const human = reviewEvidence(item);
         const comparison = state.independentAudits?.questions?.[String(item.number)];
         const discoveries = ['gemini', 'chatgpt'].filter(key => comparison?.[key]?.verdict === 'finding');
         const names = { gemini: 'Gemini', chatgpt: 'ChatGPT' };
         const sources = discoveries.map(key => names[key]);
         if (aiNumber(aiAudit(item)?.unresolved_findings) > 0) sources.push('기존 AI 감사');
-        if (item.status === 'rejected') return { kind: 'problem', reason: '인간 검수자가 반려했습니다.' };
-        if (item.status === 'verified') {
+        if (human.kind === 'unknown') return { kind: 'unknown', reason: sources.length
+          ? `${human.reason} · 별도로 ${[...new Set(sources)].join('·')}의 AI 지적사항도 원본 대조 필요`
+          : human.reason };
+        if (human.kind === 'rejected') return { kind: 'problem', reason: human.reason };
+        if (human.kind === 'verified') {
           const approvedAt = Date.parse(item.last_human_review?.reviewed_at || '');
           const afterApproval = discoveries.filter(key => {
             const report = comparison[key];
@@ -669,12 +691,12 @@
           });
           if (afterApproval.length) return { kind: 'problem', reason: `인간 승인 후 ${afterApproval.map(key => names[key]).join('·')}의 새로운 문제 발견` };
           return { kind: 'verified', reason: sources.length
-            ? `인간 검수 승인 완료 · ${[...new Set(sources)].join('·')} 지적사항은 승인 기록만으로 확인 여부를 판단할 수 없습니다. 원본 및 검수 이력 대조 필요`
-            : '인간 검수 승인 완료' };
+            ? `${human.reason} · ${[...new Set(sources)].join('·')} 지적사항은 승인 기록만으로 검토 여부를 알 수 없습니다. 원본·이력 대조 필요`
+            : human.reason };
         }
         if (sources.length) return { kind: 'problem', reason: `${[...new Set(sources)].join('·')} 문제 발견 · 인간 재확인 필요` };
         return { kind: 'pending', reason: state.independentAudits
-          ? '인간 검토 대기 · 확인된 문제 발견 없음' : '인간 검토 대기 · AI 결과 확인 중 또는 사용할 수 없음' };
+          ? `${human.reason} · 확인된 AI 문제 발견 없음` : `${human.reason} · AI 결과 확인 중 또는 사용할 수 없음` };
       }
       function aiConvergenceText(value) {
         if (typeof value === 'string' && value.trim()) {
@@ -707,16 +729,19 @@
         const existingFinding = aiNumber(aiAudit(item)?.unresolved_findings) > 0;
         if (!independentFinding && !existingFinding) { cue.hidden = true; return; }
         const indicator = reviewIndicator(item);
-        const newer = indicator.kind === 'problem';
+        const proven = reviewEvidence(item).kind === 'verified';
+        const newer = proven && indicator.kind === 'problem';
         cue.hidden = false;
         cue.classList.toggle('newer', newer);
         $('reviewDecisionHeading').textContent = newer
           ? '승인 후 새 AI 지적사항 · 원본 재확인 필요'
-          : '승인된 문항에 AI 지적사항 · 검토 여부 미확정';
+          : proven ? '승인 선언이 있는 문항의 AI 지적사항 · 검토 여부 미확정'
+            : 'DB 승인 상태이나 사람 검수 근거 미확정 · AI 지적사항';
         const sourceLabel = q.section === 'listening' ? '원본 PDF·대본' : '원본 PDF';
         $('reviewDecisionText').textContent = newer
           ? `승인 이후 새 AI 지적이 기록됐습니다. 승인 상태는 유지되지만 ${sourceLabel}와 검수 이력을 다시 대조해야 합니다.`
-          : `사람 승인 기록만으로 AI 지적사항까지 검토했는지 알 수 없습니다. ${sourceLabel}와 검수 이력을 대조한 뒤 판단하세요.`;
+          : proven ? `현재 로컬 승인 선언이 있으나 AI 지적사항까지 검토했는지는 알 수 없습니다. ${sourceLabel}와 검수 이력을 대조하세요. 검수자 신원은 인증되지 않았습니다.`
+            : `저장된 승인 상태를 임의로 취소하지 않지만 현재 승인 선언이 확인되지 않습니다. ${sourceLabel}와 검수 이력을 대조하세요. AI 발견은 사람 승인과 별개입니다.`;
         const evidence = $('reviewDecisionEvidence');
         evidence.dataset.target = independentFinding ? 'independentComparisonSection' : 'aiAuditSection';
         evidence.textContent = independentFinding ? 'Gemini·ChatGPT 판단 근거 확인' : '기존 AI 감사 기록 확인';
@@ -883,18 +908,21 @@
       }
       function counts() {
         const list = state.items;
-        const verified = list.filter(item => item.status === 'verified').length;
-        const pending = list.filter(item => item.status === 'needs_manual_review').length;
-        const rejected = list.filter(item => item.status === 'rejected').length;
+        const verified = list.filter(item => reviewEvidence(item).kind === 'verified').length;
+        const pending = list.filter(item => reviewEvidence(item).kind === 'pending').length;
+        const rejected = list.filter(item => reviewEvidence(item).kind === 'rejected').length;
+        const unknown = list.filter(item => reviewEvidence(item).kind === 'unknown').length;
         $('countAll').textContent = list.length;
         $('countVerified').textContent = verified;
         $('countPending').textContent = pending;
         $('countRejected').textContent = rejected;
+        $('countUnknown').textContent = unknown;
         $('countImages').textContent = list.filter(item => item.requires_image).length;
-        $('progressLabel').textContent = `${verified} / ${list.length}문항 승인`;
+        $('progressLabel').textContent = `${verified} / ${list.length}문항 승인 선언 확인 · 미확정 ${unknown} · 신원 인증 별개`;
         const percent = list.length ? (verified / list.length) * 100 : 0;
         $('progressFill').style.width = `${percent}%`;
         $('progressTrack').setAttribute('aria-valuenow', String(Math.round(percent)));
+        $('progressTrack').setAttribute('aria-valuetext', `${list.length}문항 중 승인 선언 ${verified}건 확인, 검수 근거 미확정 ${unknown}건. 개인 신원 인증 여부와 별개`);
       }
       function filterItems() {
         const term = $('questionSearch').value.trim().toLowerCase();
@@ -911,7 +939,7 @@
         if (hint) hint.textContent = secondaryCount ? `· ${secondaryCount}개 적용` : '';
         state.visible = state.items.filter(item =>
           (section === 'all' || item.section === section) &&
-          (status === 'all' || item.status === status) &&
+          (status === 'all' || reviewEvidence(item).kind === (status === 'needs_manual_review' ? 'pending' : status)) &&
           (image === 'all' || Boolean(item.requires_image) === (image === 'yes')) &&
           (indicator === 'all' || reviewIndicator(item).kind === indicator) &&
           (!$('comparisonDisagreement')?.checked || state.independentAudits?.questions?.[String(item.number)]?.disagreement === true) &&
@@ -975,6 +1003,10 @@
           }
           if (audit?.has_partial_failures) right.append(element('span', 'ai-tag risk-medium', '실행경고'));
           if (audit?.disagreement) right.append(element('span', 'ai-tag risk-medium', '불일치'));
+          const visibleState = reviewEvidence(item).kind;
+          const label = visibleState === 'verified' ? '승인 선언 확인' : visibleState === 'unknown' ? '근거 미확정' :
+            visibleState === 'rejected' ? '반려 선언 확인' : '검토 필요';
+          right.append(element('span', 'evidence-tag', label));
           const dot = element('span', `state-dot ${indicatorState.kind === 'pending' ? '' : indicatorState.kind}`);
           dot.title = indicatorState.reason;
           right.append(dot);
@@ -1219,6 +1251,18 @@
           if (confirmed && Number.isSafeInteger(item.review_version) &&
               item.review_version >= confirmed.version) state.committedReviews.delete(item.id);
           if (existingAudits.has(item.id)) updated.ai_audit = existingAudits.get(item.id);
+          const cached = state.detailsCache?.[item.id];
+          if (cached && Number.isSafeInteger(item.review_version) &&
+              cached.version < item.review_version && !state.pendingReviews?.has(item.id)) {
+            delete state.detailsCache[item.id];
+            state.bundleProtectedIds.add(item.id);
+            state.aiHistoryLoadedIds.delete(item.id);
+            if (state.detail?.id === item.id && state.detail.version < item.review_version) {
+              // Never overwrite open edits with a background refresh. The old
+              // snapshot stays visible until an explicit reload / navigation.
+              notice('다른 검수 이력이 저장됐습니다. 현재 편집 내용을 유지했으니 서버 내용을 다시 불러와 비교하세요.', 'info', true);
+            }
+          }
           return updated;
         }).sort((a, b) => Number(a.number) - Number(b.number));
         counts();
@@ -1600,6 +1644,19 @@
         const id = state.detail?.id;
         return state.pendingReviews?.has(id) || state.failedReviews?.size > 0 || state.pendingReviews?.size >= 4;
       }
+      function applyReviewAck(detail, ack) {
+        // The server returns a transaction-bound audit event. Refresh the
+        // bounded history in memory instead of serving an old cached timeline
+        // after the user saves or immediately returns to this question.
+        const previous = Array.isArray(detail.history) ? detail.history : [];
+        const entry = ack.saved_review_event;
+        const history = Array.isArray(ack.history) ? ack.history :
+          ack.saved === true && entry && Number.isSafeInteger(entry.id)
+            ? [entry, ...previous.filter(item => item.id !== entry.id)].slice(0, 30)
+            : previous;
+        return { ...detail, history, last_human_review: ack.last_human_review ?? null,
+          human_review_evidence: ack.human_review_evidence ?? null };
+      }
       function updateNavigation() {
         const pool = state.visible?.some(item => item.id === state.selectedId) ? state.visible : state.items;
         const position = pool.findIndex(item => item.id === state.selectedId);
@@ -1627,14 +1684,19 @@
         return 'question';
       }
       async function selectQuestion(id, { force = false, focusEditor = false } = {}) {
-        if (!force && id === state.selectedId && state.detail) return;
+        const currentRow = state.items.find(item => item.id === id);
+        if (!force && id === state.selectedId && state.detail &&
+            (!Number.isSafeInteger(currentRow?.review_version) ||
+             state.detail.version >= currentRow.review_version)) return;
         if (!force && !canNavigate()) return;
         if (state.saving || state.audio.saving) return;
 
         const previousDetail = state.detail;
         const previousPdfTab = state.pdfTab;
         const cached = state.detailsCache && state.detailsCache[id];
-        if (!force && cached) {
+        const cacheCurrent = cached && (!Number.isSafeInteger(currentRow?.review_version) ||
+          cached.version >= currentRow.review_version);
+        if (!force && cacheCurrent) {
           state.selectedId = id;
           state.detail = cached;
           state.baseline = '';
@@ -1668,6 +1730,9 @@
           const detail = await request(`/api/questions/${encodeURIComponent(id)}?fast=1`);
           if (token !== state.requestId) return;
           if (!detail || detail.id !== id || !Array.isArray(detail.choices)) throw new Error('문항 상세 응답 형식이 올바르지 않습니다.');
+          const latestRow = state.items.find(item => item.id === id);
+          if (Number.isSafeInteger(latestRow?.review_version) && detail.version < latestRow.review_version)
+            throw new Error('목록보다 이전 버전의 상세 응답입니다. 새로고침하여 현재 검수 이력을 확인하세요.');
           if (state.detailsCache) state.detailsCache[id] = detail;
           state.detail = detail;
           state.pdfTab = retainedSourceTab(previousDetail, detail, previousPdfTab);
@@ -1728,13 +1793,18 @@
       function renderDetail() {
         const q = state.detail;
         const pendingOrFailed = state.pendingReviews?.has(q.id) || state.failedReviews?.has(q.id);
+        const human = reviewEvidence(q);
         $('aiAuditSection').open = false;
         $('editorEmpty').hidden = true;
         $('editorContent').hidden = false;
         $('editorTitle').textContent = `${q.number}번 문항`;
         $('questionSubtitle').textContent = `${Number((state.examId || '035-I-B').slice(0, 3))}회 · TOPIK I · ${SECTION_NAMES[q.section] || q.section}`;
         $('questionBadges').replaceChildren(
-          badge(statusName(q.review_status), `status ${q.review_status}`),
+          badge(`DB 상태: ${statusName(q.review_status)}`, 'status'),
+          badge(human.kind === 'verified' ? '현재 승인 선언 확인 · 신원 미인증' :
+            human.kind === 'unknown' ? '검수 근거 미확정' :
+            human.kind === 'rejected' ? '현재 반려 선언 확인 · 신원 미인증' : '승인 선언 없음 · 검토 필요',
+            `status ${human.kind === 'verified' ? 'verified' : human.kind === 'unknown' ? 'unknown' : human.kind === 'rejected' ? 'rejected' : ''}`),
           badge(q.id),
           badge(`${q.points}점`),
           badge(`원본 PDF ${q.source_pdf_page || '—'}쪽`),
@@ -1929,6 +1999,10 @@
           const line = element('li');
           line.append(element('strong', '', statusName(item.status) === '상태 미확인' ? (item.status || '기록') : statusName(item.status)));
           if (item.scope) line.append(element('span', '', ` · ${item.scope}`));
+          if (item.scope === 'manual_question_review') line.append(element('span', '', ' · 로컬 검수 선언 (검수자 신원 인증 없음)'));
+          if (item.id && state.detail.last_human_review?.record_id === item.id)
+            line.append(element('span', '', state.detail.last_human_review.is_current === true
+              ? ' · 현재 저장 상태와 이력 일치' : ' · 과거 선언 또는 현재 상태와 불일치'));
           if (item.note || item.evidence) line.append(element('p', '', item.note || item.evidence));
           if (item.reviewed_at) {
             const time = element('time', '', String(item.reviewed_at));
@@ -2157,17 +2231,19 @@
           await selectQuestion(nextId);
           renderReviewSync();
           const result = verifyReviewAck(await savePromise, id, 'verified', submitted);
-          state.detailsCache[id] = {
+          state.detailsCache[id] = applyReviewAck({
             ...draftDetail, review_status: result.review_status, version: result.version,
             transcript: draftDetail.transcript ? { ...draftDetail.transcript, review_status: result.review_status } : null,
-          };
+          }, result);
           state.aiHistoryLoadedIds?.delete(id);
           const row = state.items.find(item => item.id === id);
           const confirmed = { status: result.review_status, version: result.version,
-            last_human_review: result.last_human_review || row?.last_human_review };
+            last_human_review: result.last_human_review ?? null,
+            human_review_evidence: result.human_review_evidence ?? null };
           state.committedReviews?.set(id, confirmed);
           if (row) { row.status = confirmed.status; row.review_version = confirmed.version;
-            row.last_human_review = confirmed.last_human_review; }
+            row.last_human_review = confirmed.last_human_review;
+            row.human_review_evidence = confirmed.human_review_evidence; }
           if (state.detail?.id === id) {
             state.detail = state.detailsCache[id];
             renderDetail();
@@ -2262,14 +2338,14 @@
           invalidateSharedTranscriptCache(updated);
           // A short response is returned only after the database transaction
           // commits. Reuse the detailed question already in memory.
-          const detail = Array.isArray(updated.choices) ? updated : {
+          const detail = Array.isArray(updated.choices) ? updated : applyReviewAck({
             ...state.detail, ...updated,
             stem: input.stem,
             choices: input.choices.map((text, index) => ({ number: index + 1, text })),
             transcript: state.detail.transcript ? {
               ...state.detail.transcript, text: input.transcript_text, review_status: updated.review_status
             } : null,
-          };
+          }, updated);
           state.detail = detail;
           // The ACK confirms these fields were committed. Only the submitted
           // snapshot becomes clean; edits made while the POST was in flight
@@ -2281,9 +2357,11 @@
           const row = state.items.find(item => item.id === id);
           if (row) { row.status = updated.review_status; row.requires_image = updated.requires_image;
             row.review_version = updated.version;
-            row.last_human_review = updated.last_human_review || row.last_human_review; }
+            row.last_human_review = updated.last_human_review ?? null;
+            row.human_review_evidence = updated.human_review_evidence ?? null; }
           state.committedReviews?.set(id, { status: updated.review_status,
-            version: updated.version, last_human_review: updated.last_human_review });
+            version: updated.version, last_human_review: updated.last_human_review ?? null,
+            human_review_evidence: updated.human_review_evidence ?? null });
           if (status === 'verified') {
             approvedNumber = updated.number;
             nextQuestionId = nextId;
@@ -2343,12 +2421,12 @@
         for (let offset = 1; offset <= pool.length; offset++) {
           const item = pool[(index + offset + pool.length) % pool.length];
           if (!item || item.id === state.selectedId) continue;
-          if ((kind === 'pending' && item.status === 'needs_manual_review') ||
+          if ((kind === 'pending' && ['pending', 'unknown'].includes(reviewEvidence(item).kind)) ||
               (kind === 'problem' && reviewIndicator(item).kind === 'problem')) {
             return selectQuestion(item.id, { focusEditor: true });
           }
         }
-        notice(kind === 'pending' ? '현재 필터에서 이동할 다른 미검수 문항이 없습니다.' :
+        notice(kind === 'pending' ? '현재 필터에서 이동할 다른 검토 필요·근거 미확정 문항이 없습니다.' :
           '현재 필터에서 이동할 다른 문제 발견 문항이 없습니다.', 'info');
       }
       function jumpToEvidence(kind) {
@@ -2633,10 +2711,22 @@
         });
       }
       async function loadBundle() {
+        const requestedExam = state.examId;
+        const generation = state.listGeneration;
         try {
           const bundle = await request('/api/questions-bundle');
+          // On first page load the list generation legitimately advances from
+          // zero to one while the parallel bundle is pending.
+          if ((generation === 0 ? state.listGeneration > 1 : generation !== state.listGeneration) ||
+              (requestedExam && requestedExam !== state.examId) ||
+              !VALID_EXAMS.includes(bundle?.exam_id) ||
+              (state.examId && bundle.exam_id !== state.examId)) return;
           if (bundle && bundle.questions && typeof bundle.questions === 'object') {
+            const bundleExam = state.examId || requestedExam || bundle.exam_id;
             for (const [id, detail] of Object.entries(bundle.questions)) {
+              if (detail?.exam_id !== bundleExam) continue;
+              const latest = state.items.find(item => item.id === id);
+              if (Number.isSafeInteger(latest?.review_version) && detail.version < latest.review_version) continue;
               if (state.bundleProtectedIds.has(id) ||
                   Object.prototype.hasOwnProperty.call(state.detailsCache, id)) continue;
               state.detailsCache[id] = detail;

@@ -21,7 +21,10 @@ const html = fs.readFileSync(process.argv[1], 'utf8');
 const start = html.indexOf('      async function sendReview(status) {');
 const end = html.indexOf('      function neighbor(delta) {', start);
 assert.ok(start >= 0 && end > start, 'Could not locate the real approval handler');
-const handler = '(' + html.slice(start, end).trim() + ')';
+const ackStart = html.indexOf('      function applyReviewAck(');
+const ackEnd = html.indexOf('      function updateNavigation()',ackStart);
+assert.ok(ackStart>=0 && ackEnd>ackStart);
+const handler = html.slice(ackStart,ackEnd) + '\n' + html.slice(start,end) + '\nsendReview;';
 
 async function scenario(status, { fail = false, last = false, slowList = false } = {}) {
   const rows = last ? [{ id: 'q70', number: 70, status: 'needs_manual_review' }]
@@ -129,6 +132,7 @@ function source(from, until) {
   return html.slice(start, end);
 }
 const functions = [
+  source('function applyReviewAck(', 'function updateNavigation()'),
   source('function verifyReviewAck(', 'function matchesReviewInput('),
   source('function sharedTranscriptChanged(', 'function aiAudit('),
   source('function draft() {', 'function audioSegment() {'),
@@ -360,7 +364,7 @@ const context = {
   reviewIndicator: item => ({kind:item.status === 'verified'?'verified':'pending',reason:'test'}),
   selectQuestion: () => {},
 };
-const names = ['aiAudit', 'aiNumber', 'aiRisk', 'aiTimestamp', 'element', 'filterItems'];
+const names = ['reviewEvidence', 'aiAudit', 'aiNumber', 'aiRisk', 'aiTimestamp', 'element', 'filterItems'];
 const source = names.map(extractFunction).join('\n') + '\nfilterItems;';
 const filterItems = vm.runInNewContext(source, context);
 
@@ -601,7 +605,7 @@ const context = {
   notice:(msg,type)=>events.push(['notice',type,msg]),
   selectQuestion:async(id,opts)=>{events.push(['select',id,opts?.force]);state.selectedId=id;},
 };
-const source = extractFunction('filterItems') + '\n' + extractFunction('filterChanged') + '\nfilterChanged;';
+const source = extractFunction('reviewEvidence') + '\n' + extractFunction('filterItems') + '\n' + extractFunction('filterChanged') + '\nfilterChanged;';
 const filterChanged = vm.runInNewContext(source, context);
 (async()=>{
   await filterChanged();
@@ -648,6 +652,7 @@ function extractFunction(name) {
 }
 
 const state = {
+  examId: '035-I-B', listGeneration: 1,
   items: [
     { id: 'q25', number: 25, section: 'listening' },
     { id: 'q26', number: 26, section: 'listening' },
@@ -659,8 +664,9 @@ const state = {
 };
 const context = {
   state,
-  request: async () => ({ questions: {
-    q25: { version: 1 }, q2: { version: 1 }, q3: { version: 1 },
+  VALID_EXAMS: ['035-I-B', '036-I-B'],
+  request: async () => ({ exam_id:'035-I-B', questions: {
+    q25: { version: 1, exam_id:'035-I-B' }, q2: { version: 1, exam_id:'035-I-B' }, q3: { version: 1, exam_id:'035-I-B' },
   } }),
 };
 const source = extractFunction('invalidateSharedAudioCache') + '\n' +
@@ -677,6 +683,14 @@ const functions = vm.runInNewContext(source, context);
   assert.equal(state.detailsCache.q25.version, 5, 'current question cache remains authoritative');
   assert.equal(state.detailsCache.q26, undefined, 'shared-pair sibling cache must be invalidated');
   assert.equal(state.bundleProtectedIds.has('q26'), true, 'late bundle must not resurrect invalidated sibling');
+  // First-load bundle can finish before the fast list resolves exam_id. Keep
+  // the same-exam navigation cache rather than triggering redundant detail GETs.
+  state.examId=null;state.listGeneration=0;state.detailsCache={};state.bundleProtectedIds=new Set();
+  await functions.loadBundle();
+  assert.equal(state.detailsCache.q3.version,1,'early valid bundle must prefetch before first list');
+  state.examId='036-I-B';state.listGeneration=2;state.detailsCache={};
+  await functions.loadBundle();
+  assert.equal(state.detailsCache.q3,undefined,'cross-exam bundle must be rejected');
   console.log('Bundle cache race and shared-pair invalidation PASS');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """
@@ -735,13 +749,13 @@ function getFn(name, next) {
   return html.slice(start,end);
 }
 const approved = {id:'q1',number:1,status:'verified',last_human_review:{status:'verified',
-  reviewed_at:'2026-10-08T10:00:00+00:00',is_current:true}};
+  reviewed_at:'2026-10-08T10:00:00+00:00',is_current:true,approved:true}};
 const pending = {...approved,status:'needs_manual_review'};
 const state = {independentAudits:{questions:{'1':{gemini:{verdict:'finding',
   created_at:'2026-10-08T09:00:00+00:00', snapshot_created_at:'2026-10-08T08:00:00+00:00',
   timestamp_verified:true,snapshot_timestamp_verified:true}}}}};
 const context = {state,aiNumber:x=>Number(x)||0,aiAudit:i=>i.ai_audit||null,Date};
-const reviewIndicator = vm.runInNewContext('('+getFn('reviewIndicator','aiConvergenceText').trim()+')',context);
+const reviewIndicator = vm.runInNewContext(getFn('reviewEvidence','aiConvergenceText')+'\nreviewIndicator;',context);
 assert.equal(reviewIndicator(pending).kind,'problem','AI finding without human approval must be red');
 assert.equal(reviewIndicator(approved).kind,'verified','human approval after AI finding must be green');
 const report = state.independentAudits.questions['1'].gemini;
@@ -751,7 +765,7 @@ report.snapshot_created_at='2026-10-08T10:30:00+00:00';
 assert.equal(reviewIndicator(approved).kind,'problem','verified new finding and postapproval snapshot must reopen');
 report.snapshot_timestamp_verified=false;
 assert.equal(reviewIndicator(approved).kind,'verified','unverified snapshot time cannot reopen');
-assert.equal(reviewIndicator({...pending,status:'rejected'}).kind,'problem');
+assert.equal(reviewIndicator({...pending,status:'rejected',last_human_review:{status:'rejected',is_current:true,approved:false}}).kind,'problem');
 state.independentAudits.questions['1']={chatgpt:{verdict:'finding',created_at:'unknown',timestamp_verified:false}};
 assert.equal(reviewIndicator(approved).kind,'verified','unknown ChatGPT timestamp cannot reopen');
 assert.equal(reviewIndicator(pending).kind,'problem');
@@ -862,7 +876,9 @@ async function scenario(fail) {
     selectQuestion:async id=>{events.push('navigate');state.selectedId=id;state.detail=next;},
     renderReviewSync:()=>{}, filterItems:()=>{}, counts:()=>{}, setLoading:()=>{}, renderDetail:()=>{},
     notice:(m,t)=>events.push(['notice',t,m]), $:()=>({hidden:false})};
-  const submit = vm.runInNewContext(source, ctx);
+  const ackStart = html.indexOf('      function applyReviewAck(');
+  const ackEnd = html.indexOf('      function updateNavigation()',ackStart);
+  const submit = vm.runInNewContext(html.slice(ackStart,ackEnd) + '\n' + source.slice(1,-1) + '\nsendOptimisticApproval;', ctx);
   const input = {stem:'edited',choices:['a','b','c','d'],transcript_text:null,note:'my evidence'};
   const task = submit('q1',input,'q2');
   assert.equal(state.pendingReviews.has('q1'),true);

@@ -225,6 +225,257 @@ class TestReviewStore(unittest.TestCase):
         self.assertEqual(listing["items"], expected["items"])
         self.assertEqual(listing["counts"], expected["counts"])
 
+    def test_manual_approval_evidence_agrees_across_fast_list_detail_and_f3_bundle(self):
+        """Stored verified is not equivalent to current human approval."""
+        qid = self.reading_id
+
+        def surfaces():
+            row = next(item for item in self.store.list_questions_fast()["items"]
+                       if item["id"] == qid)
+            detail = self.store.get_question(qid, fast=True)
+            bundle = self.store.get_questions_bundle()["questions"][qid]
+            for item in (detail, bundle):
+                self.assertEqual(item["review_status"], row["status"])
+                self.assertEqual(item["last_human_review"], row["last_human_review"])
+                self.assertEqual(item["human_review_evidence"], row["human_review_evidence"])
+                self.assertEqual(item["version"], row["review_version"])
+            return row, detail, bundle
+
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("DELETE FROM review_records WHERE subject_type='question' AND subject_id=?", (qid,))
+            db.execute("UPDATE questions SET review_status='verified' WHERE id=?", (qid,))
+            db.commit()
+        row, _, _ = surfaces()
+        self.assertIsNone(row["last_human_review"])
+        self.assertEqual(row["human_review_evidence"]["reason"], "missing_manual_review")
+        self.assertFalse(row["human_review_evidence"]["approved"])
+
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute(
+                "INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
+                "VALUES('question',?,'verified',NULL,'manual_question_review','{}',?)",
+                (qid, "2026-10-10T01:00:00+00:00"),
+            )
+            db.commit()
+        row, _, _ = surfaces()
+        self.assertEqual(row["human_review_evidence"]["reason"], "incomplete_manual_review")
+        self.assertFalse(row["last_human_review"]["is_current"])
+
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute(
+                "INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
+                "VALUES('question',?,'verified','local_reviewer','manual_question_review','{}',?)",
+                (qid, "2026-10-10T02:00:00+00:00"),
+            )
+            db.commit()
+        row, detail, bundle = surfaces()
+        self.assertTrue(row["last_human_review"]["approved"])
+        self.assertTrue(row["last_human_review"]["is_current"])
+        self.assertEqual(row["human_review_evidence"]["approval_state"], "current_manual_approval")
+        self.assertFalse(row["last_human_review"]["identity_verified"])
+        self.assertFalse(row["human_review_evidence"]["identity_verified"])
+        self.assertEqual(detail["history"][0]["scope"], "manual_question_review")
+        self.assertEqual(bundle["history"][0]["id"], row["last_human_review"]["id"])
+
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute(
+                "INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
+                "VALUES('question',?,'verified','automated_extractor','automatic_correction','{}',?)",
+                (qid, "2026-10-10T03:00:00+00:00"),
+            )
+            db.commit()
+        row, _, _ = surfaces()
+        self.assertEqual(row["human_review_evidence"]["reason"], "superseded_manual_review")
+        self.assertFalse(row["last_human_review"]["approved"])
+        self.assertFalse(row["last_human_review"]["is_current"])
+
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("UPDATE questions SET review_status='needs_manual_review' WHERE id=?", (qid,))
+            db.commit()
+        row, _, _ = surfaces()
+        self.assertEqual(row["human_review_evidence"]["approval_state"], "not_verified")
+        self.assertFalse(row["human_review_evidence"]["approved"])
+
+    def test_fast_ack_contains_bounded_current_history_without_a_followup_get(self):
+        qid = self.reading_id
+        before = self.store.get_question(qid, fast=True)
+        payload = self._payload(qid, status="verified", note="Compared with the source PDF")
+        with patch.object(self.store, "get_question", side_effect=AssertionError("redundant detail GET")):
+            ack = self.store.save_review(qid, payload, fast_response=True)
+        self.assertTrue(ack["saved"])
+        self.assertEqual(ack["human_review_evidence"]["approval_state"], "current_manual_approval")
+        self.assertEqual(ack["saved_review_event"], ack["history"][0])
+        self.assertEqual(ack["saved_review_event"]["scope"], "manual_question_review")
+        self.assertEqual(ack["saved_review_event"]["id"], ack["saved_review_id"])
+        self.assertEqual(ack["saved_review_event"]["note"], "Compared with the source PDF")
+        self.assertEqual(ack["history"], self.store.get_question(qid, fast=True)["history"])
+        list_row = next(row for row in self.store.list_questions_fast()["items"] if row["id"] == qid)
+        self.assertEqual(ack["last_human_review"], list_row["last_human_review"])
+        self.assertEqual(ack["version"], before["version"] + 1)
+        no_op = dict(payload, version=ack["version"], note="")
+        again = self.store.save_review(qid, no_op, fast_response=True)
+        self.assertFalse(again["saved"])
+        self.assertIsNone(again["saved_review_event"])
+        self.assertEqual(again["history"], ack["history"])
+        self.assertEqual(again["last_human_review"], ack["last_human_review"])
+
+    def test_older_manual_event_stays_visible_as_stale_beyond_history_limit(self):
+        qid = self.reading_id
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("DELETE FROM review_records WHERE subject_type='question' AND subject_id=?", (qid,))
+            db.execute("UPDATE questions SET review_status='verified' WHERE id=?", (qid,))
+            original_manual = db.execute(
+                "INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
+                "VALUES('question',?,'verified','local_reviewer','manual_question_review','{}',?)",
+                (qid, "2026-10-09T12:00:00+00:00"),
+            ).lastrowid
+            for i in range(35):
+                db.execute(
+                    "INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
+                    "VALUES('question',?,'verified',NULL,'automatic_correction','{}',?)",
+                    (qid, f"2026-10-10T12:{i:02d}:00+00:00"),
+                )
+            db.commit()
+        list_row = next(row for row in self.store.list_questions_fast()["items"] if row["id"] == qid)
+        detail = self.store.get_question(qid, fast=True)
+        bundle = self.store.get_questions_bundle()["questions"][qid]
+        payload = self._payload(qid, status="verified", note="")
+        ack = self.store.save_review(qid, payload, fast_response=True)
+        self.assertFalse(ack["saved"])
+        for row in (list_row, detail, bundle, ack):
+            self.assertEqual(row["last_human_review"]["id"], original_manual)
+            self.assertFalse(row["last_human_review"]["approved"])
+            self.assertEqual(row["human_review_evidence"]["reason"], "superseded_manual_review")
+        for row in (detail, bundle, ack):
+            self.assertEqual(len(row["history"]), 30)
+            self.assertTrue(all(entry["scope"] != "manual_question_review" for entry in row["history"]))
+
+    def test_fast_review_conflict_and_rollback_cannot_fabricate_human_approval(self):
+        qid = self.reading_id
+        before = self.store.get_question(qid, fast=True)
+        proposed = self._payload(qid, status="verified", note="Checked registered PDF")
+        stale = dict(proposed)
+        saved = self.store.save_review(qid, proposed, fast_response=True)
+        self.assertTrue(saved["last_human_review"]["approved"])
+        snapshot = (self._row(qid), self._history(qid), self.store.get_question(qid, fast=True))
+        with self.assertRaises(review_ui.Conflict):
+            self.store.save_review(qid, stale, fast_response=True)
+        self.assertEqual((self._row(qid), self._history(qid),
+                          self.store.get_question(qid, fast=True)), snapshot)
+
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("CREATE TRIGGER private_fail_manual_evidence BEFORE INSERT ON review_records "
+                       "WHEN NEW.scope='manual_question_review' BEGIN "
+                       "SELECT RAISE(ABORT,'private injected review-record failure'); END")
+            db.commit()
+        rejected = self._payload(qid, status="rejected", note="Source contradicted earlier approval")
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.store.save_review(qid, rejected, fast_response=True)
+        self.assertEqual((self._row(qid), self._history(qid),
+                          self.store.get_question(qid, fast=True)), snapshot)
+        self.assertEqual(self.store.get_question(qid, fast=True)["version"], before["version"] + 1)
+
+    def test_manual_status_mismatch_and_rejected_status_remain_nonapproved(self):
+        qid = self.reading_id
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("DELETE FROM review_records WHERE subject_type='question' AND subject_id=?", (qid,))
+            db.execute("UPDATE questions SET review_status='verified' WHERE id=?", (qid,))
+            db.execute(
+                "INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
+                "VALUES('question',?,'rejected','local_reviewer','manual_question_review','{}',?)",
+                (qid, "2026-10-10T03:00:00+00:00"),
+            )
+            db.commit()
+        for item in (
+            next(item for item in self.store.list_questions_fast()["items"] if item["id"] == qid),
+            self.store.get_question(qid, fast=True),
+            self.store.get_questions_bundle()["questions"][qid],
+        ):
+            self.assertEqual(item["human_review_evidence"]["reason"], "manual_status_mismatch")
+            self.assertFalse(item["last_human_review"]["is_current"])
+            self.assertFalse(item["last_human_review"]["approved"])
+
+        payload = self._payload(qid, status="rejected", note="Explicit rejection note")
+        ack = self.store.save_review(qid, payload, fast_response=True)
+        self.assertEqual(ack["last_human_review"]["status"], "rejected")
+        self.assertTrue(ack["last_human_review"]["is_current"])
+        self.assertFalse(ack["last_human_review"]["approved"])
+        self.assertEqual(ack["human_review_evidence"]["approval_state"], "not_verified")
+        self.assertEqual(ack["history"][0], ack["saved_review_event"])
+        self.assertEqual(ack["history"][0]["note"], "Explicit rejection note")
+
+    def test_human_evidence_does_not_leak_between_actual_35_and_36_exam_sources(self):
+        """Private SQLite adds a 36th fixture linked to an immutable real 36th PDF."""
+        pdf = ROOT / "topik-past-papers" / "36th" / "36th-TOPIK-I-Reading-Test-Paper.pdf"
+        if not pdf.is_file():
+            self.skipTest("Real 36th reading PDF not installed")
+        qid_36 = "036-I-R-031"
+        exam = "036-I-B"
+        section = "036-I-B-reading"
+        group = "036-I-R-31"
+        logical = "topik-past-papers/36th/36th-TOPIK-I-Reading-Test-Paper.pdf"
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute(
+                "INSERT INTO source_files(relative_path,kind,sha256,byte_size) VALUES(?,?,?,?)",
+                (logical, "test_paper", _digest(pdf), pdf.stat().st_size),
+            )
+            source_id = db.execute(
+                "SELECT id FROM source_files WHERE relative_path=?", (logical,)
+            ).fetchone()[0]
+            db.execute("INSERT INTO exams(id,session,level,booklet) VALUES(?,36,'I','B')", (exam,))
+            db.execute(
+                "INSERT INTO sections(id,exam_id,name,first_exam_number,last_exam_number) "
+                "VALUES(?,?,'reading',31,70)", (section, exam),
+            )
+            db.execute(
+                "INSERT INTO question_groups(id,section_id,first_exam_number,last_exam_number,instruction) "
+                "VALUES(?,?,31,31,'36 reading source')", (group, section),
+            )
+            db.execute(
+                "INSERT INTO questions(id,section_id,group_id,source_file_id,exam_number,"
+                "answer_key_number,source_pdf_page,points,stem,raw_question_text,extraction_origin,review_status) "
+                "VALUES(?,?,?,?,31,31,1,2,'36 test item','36 raw','source_pdf','verified')",
+                (qid_36, section, group, source_id),
+            )
+            db.executemany(
+                "INSERT INTO choices(question_id,number,text) VALUES(?,?,?)",
+                [(qid_36, number, f"36 option {number}") for number in range(1, 5)],
+            )
+            db.execute(
+                "INSERT INTO answers(question_id,choice_number,source_file_id,source_pdf_page,"
+                "preview_and_pdf_agree) VALUES(?,1,?,1,1)", (qid_36, source_id),
+            )
+            db.commit()
+
+        store_36 = self.store.for_exam(exam)
+        default_before = self.store.get_question(self.reading_id, fast=True)
+        for item in (
+            store_36.list_questions_fast()["items"][0],
+            store_36.get_question(qid_36, fast=True),
+            store_36.get_questions_bundle()["questions"][qid_36],
+        ):
+            self.assertFalse(item["human_review_evidence"]["approved"])
+            self.assertEqual(item["human_review_evidence"]["reason"], "missing_manual_review")
+            self.assertIsNone(item["last_human_review"])
+
+        payload = {
+            "version": 0, "status": "verified", "stem": "36 test item",
+            "choices": [f"36 option {number}" for number in range(1, 5)],
+            "transcript_text": None, "note": "Reviewed the actual 36th reading PDF",
+        }
+        ack = store_36.save_review(qid_36, payload, fast_response=True)
+        self.assertTrue(ack["last_human_review"]["approved"])
+        self.assertEqual(ack["version"], 1)
+        self.assertEqual(ack["human_review_evidence"]["reason"], "latest_manual_review")
+        self.assertEqual(self.store.list_questions_fast()["counts"]["total"], 70)
+        self.assertEqual(store_36.list_questions_fast()["counts"]["total"], 1)
+        self.assertEqual(self.store.get_question(self.reading_id, fast=True)["version"],
+                         default_before["version"])
+        self.assertEqual(self.store.get_question(self.reading_id, fast=True)["last_human_review"],
+                         default_before["last_human_review"])
+        with self.assertRaises(review_ui.NotFound):
+            self.store.get_question(qid_36, fast=True)
+
     def test_fast_review_commit_ack_preserves_version_and_source_validation(self):
         qid = self.listening_id
         before = self.store.get_question(qid, fast=True)

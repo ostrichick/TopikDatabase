@@ -603,6 +603,64 @@ class ReviewStore:
 
         threading.Thread(target=compute, name="topik-ai-summary", daemon=True).start()
 
+    @staticmethod
+    def _question_history_item(record) -> dict:
+        """A bounded, factual review event; never synthesize approval from status."""
+        item = {key: record[key] for key in ("id", "status", "scope", "reviewer", "reviewed_at")}
+        try:
+            parsed = json.loads(record["evidence"])
+            item["note"] = parsed.get("note", "") if isinstance(parsed, dict) else ""
+        except (TypeError, ValueError):
+            item["note"] = ""
+        return item
+
+    @classmethod
+    def _question_human_evidence(cls, status: str, latest, manual) -> tuple[dict | None, dict]:
+        """Separate stored decision, latest manual event, and unknown actor identity.
+
+        Freshness is established by the latest *question* review record, not
+        by a matching status or a timestamp alone. Older approvals can remain
+        in append-only history but must never be represented as current.
+        """
+        if manual is None:
+            last_human = None
+            reason = "missing_manual_review" if status == "verified" else "status_not_verified"
+        else:
+            same_event = latest is not None and manual["id"] == latest["id"]
+            same_status = manual["status"] == status
+            has_reviewer = isinstance(manual["reviewer"], str) and bool(manual["reviewer"].strip())
+            has_timestamp = cls._audit_timestamp_verified(manual["reviewed_at"])
+            current = same_event and same_status and has_reviewer and has_timestamp
+            last_human = {
+                "id": manual["id"], "record_id": manual["id"],
+                "status": manual["status"], "reviewer": manual["reviewer"],
+                "reviewed_at": manual["reviewed_at"],
+                "is_current": bool(current),
+                "approved": bool(current and status == "verified"),
+                # The local reviewer string is a declaration, not an authenticated person.
+                "identity_verified": False,
+            }
+            if status != "verified":
+                reason = "status_not_verified"
+            elif not same_event:
+                reason = "superseded_manual_review"
+            elif not same_status:
+                reason = "manual_status_mismatch"
+            elif not has_reviewer or not has_timestamp:
+                reason = "incomplete_manual_review"
+            else:
+                reason = "latest_manual_review"
+        approved = bool(last_human and last_human["approved"])
+        evidence = {
+            "approval_state": ("current_manual_approval" if approved else
+                               "verified_without_current_manual_approval" if status == "verified" else
+                               "not_verified"),
+            "reason": reason,
+            "approved": approved,
+            "identity_verified": False,
+        }
+        return last_human, evidence
+
     def list_questions_fast(self) -> dict:
         """Lightweight list with current human-review evidence in one bulk read."""
         with closing(self._connect()) as db:
@@ -637,21 +695,11 @@ class ReviewStore:
             reviewer = item.pop("manual_reviewer")
             reviewed_at = item.pop("manual_reviewed_at")
             latest_id = item.pop("latest_review_id")
-            if record_id is None:
-                item["last_human_review"] = None
-            else:
-                # A later question review record may supersede the last manual
-                # decision. Never infer a current approval from q.review_status alone.
-                is_current = (record_id == latest_id and record_status == item["status"])
-                item["last_human_review"] = {
-                    "id": record_id,
-                    "record_id": record_id,
-                    "status": record_status,
-                    "reviewer": reviewer,
-                    "reviewed_at": reviewed_at,
-                    "is_current": is_current,
-                    "approved": is_current and record_status == "verified",
-                }
+            manual = ({"id": record_id, "status": record_status, "reviewer": reviewer,
+                       "reviewed_at": reviewed_at} if record_id is not None else None)
+            latest = {"id": latest_id} if latest_id is not None else None
+            item["last_human_review"], item["human_review_evidence"] = (
+                self._question_human_evidence(item["status"], latest, manual))
         counts = {status: sum(item["status"] == status for item in items) for status in STATUSES}
         counts["total"] = len(items)
         return {"exam_id": self.exam_id, "items": items, "counts": counts, "ai_audit_available": False,
@@ -1659,17 +1707,23 @@ class ReviewStore:
             )]
             history = []
             records = db.execute(
-                "SELECT status, scope, evidence, reviewed_at FROM review_records "
+                "SELECT id, status, scope, reviewer, evidence, reviewed_at FROM review_records "
                 "WHERE subject_type='question' AND subject_id=? ORDER BY id DESC LIMIT 30", (question_id,)
             ).fetchall()
             for record in records:
-                item = dict(record)
-                try:
-                    item["note"] = json.loads(item["evidence"]).get("note", "")
-                except (ValueError, TypeError):
-                    item["note"] = ""
-                item.pop("evidence")
-                history.append(item)
+                history.append(self._question_history_item(record))
+            manual = next((r for r in records if r["scope"] == "manual_question_review"), None)
+            if manual is None and len(records) == 30:
+                # Preserve provenance even when the latest manual action is
+                # older than the bounded visible history.
+                manual = db.execute(
+                    "SELECT id,status,reviewer,reviewed_at FROM review_records "
+                    "WHERE subject_type='question' AND subject_id=? "
+                    "AND scope='manual_question_review' ORDER BY id DESC LIMIT 1",
+                    (question_id,),
+                ).fetchone()
+            last_human, human_evidence = self._question_human_evidence(
+                question["review_status"], records[0] if records else None, manual)
             version = (len(records) + self._punctuation_revision(db)
                        if len(records) < 30 else self._version(db, question_id))
             result = {
@@ -1707,6 +1761,8 @@ class ReviewStore:
                 "requires_image": bool(question["requires_image"]),
                 "preview_flags": json.loads(question["preview_flags_json"]),
                 "history": history,
+                "last_human_review": last_human,
+                "human_review_evidence": human_evidence,
             }
             shared_state = self._shared_transcript_state(db, question["exam_number"])
             if shared_state:
@@ -1794,7 +1850,7 @@ class ReviewStore:
                 images_by_qid[img["question_id"]].append(img["image_key"])
 
             record_rows = db.execute(
-                "SELECT subject_type,subject_id,status,scope,evidence,reviewed_at FROM review_records "
+                "SELECT id,subject_type,subject_id,status,scope,reviewer,evidence,reviewed_at FROM review_records "
                 "WHERE subject_type IN ('question','audio_segment') AND subject_id IN ("
                 "SELECT q.id FROM questions q JOIN sections s ON s.id=q.section_id "
                 "WHERE s.exam_id=?) ORDER BY id DESC", (self.exam_id,)
@@ -1802,6 +1858,8 @@ class ReviewStore:
             records_by_qid: dict[str, list[dict]] = defaultdict(list)
             audio_history_by_qid: dict[str, list[dict]] = defaultdict(list)
             count_by_qid: dict[str, int] = defaultdict(int)
+            latest_by_qid = {}
+            manual_by_qid = {}
             for r in record_rows:
                 qid = r["subject_id"]
                 if r["subject_type"] == "audio_segment":
@@ -1809,15 +1867,12 @@ class ReviewStore:
                         audio_history_by_qid[qid].append(self._audio_history_item(r))
                     continue
                 count_by_qid[qid] += 1
+                if qid not in latest_by_qid:
+                    latest_by_qid[qid] = r
+                if r["scope"] == "manual_question_review" and qid not in manual_by_qid:
+                    manual_by_qid[qid] = r
                 if len(records_by_qid[qid]) < 30:
-                    item = dict(r)
-                    try:
-                        item["note"] = json.loads(item["evidence"]).get("note", "")
-                    except (ValueError, TypeError):
-                        item["note"] = ""
-                    item.pop("evidence", None)
-                    item.pop("subject_id", None)
-                    records_by_qid[qid].append(item)
+                    records_by_qid[qid].append(self._question_history_item(r))
 
             has_audio = self._has_audio_segments(db)
             assets_by_sec = {}
@@ -1867,6 +1922,8 @@ class ReviewStore:
                 image_keys = images_by_qid.get(qid, [])
                 history = records_by_qid.get(qid, [])
                 version = count_by_qid.get(qid, 0) + punctuation_revision
+                last_human, human_evidence = self._question_human_evidence(
+                    question["review_status"], latest_by_qid.get(qid), manual_by_qid.get(qid))
 
                 audio_segment = None
                 if question["section"] == "listening" and has_audio:
@@ -1959,6 +2016,8 @@ class ReviewStore:
                     "requires_image": bool(question["requires_image"]),
                     "preview_flags": json.loads(question["preview_flags_json"]),
                     "history": history,
+                    "last_human_review": last_human,
+                    "human_review_evidence": human_evidence,
                 }
                 if qid in shared_states:
                     q_data["shared_transcript_state"] = shared_states[qid]
@@ -2172,29 +2231,27 @@ class ReviewStore:
                      datetime.now(timezone.utc).isoformat(timespec="seconds")),
                 )
             last_human = None
+            human_evidence = None
+            history = None
             if fast_response:
-                # Read the latest human evidence in the same locked transaction
-                # for both a new save and an idempotent no-op acknowledgment.
-                # A subsequent concurrent writer cannot alter this ACK.
-                record = db.execute(
-                    "SELECT m.id, m.status, m.reviewer, m.reviewed_at, "
-                    "(SELECT id FROM review_records WHERE subject_type='question' "
-                    "AND subject_id=? ORDER BY id DESC LIMIT 1) AS latest_review_id "
-                    "FROM review_records m WHERE m.subject_type='question' "
-                    "AND m.subject_id=? AND m.scope='manual_question_review' "
-                    "ORDER BY m.id DESC LIMIT 1",
-                    (question_id, question_id),
-                ).fetchone()
-                if record:
-                    is_current = (record["id"] == record["latest_review_id"]
-                                  and record["status"] == new["status"])
-                    last_human = {
-                        "id": record["id"], "record_id": record["id"],
-                        "status": record["status"], "reviewer": record["reviewer"],
-                        "reviewed_at": record["reviewed_at"],
-                        "is_current": is_current,
-                        "approved": is_current and record["status"] == "verified",
-                    }
+                # The exact committed snapshot, not a subsequent detail GET,
+                # must drive the optimistic UI's approval and visible history.
+                records = db.execute(
+                    "SELECT id,status,scope,reviewer,evidence,reviewed_at "
+                    "FROM review_records WHERE subject_type='question' AND subject_id=? "
+                    "ORDER BY id DESC LIMIT 30", (question_id,),
+                ).fetchall()
+                history = [self._question_history_item(r) for r in records]
+                manual = next((r for r in records if r["scope"] == "manual_question_review"), None)
+                if manual is None and len(records) == 30:
+                    manual = db.execute(
+                        "SELECT id,status,reviewer,reviewed_at FROM review_records "
+                        "WHERE subject_type='question' AND subject_id=? "
+                        "AND scope='manual_question_review' ORDER BY id DESC LIMIT 1",
+                        (question_id,),
+                    ).fetchone()
+                last_human, human_evidence = self._question_human_evidence(
+                    new["status"], records[0] if records else None, manual)
         if fast_response:
             # The transaction has committed. This exact version is authoritative;
             # a second full detail read is unnecessary for ordinary navigation.
@@ -2203,6 +2260,9 @@ class ReviewStore:
                     "review_status": new["status"], "version": final_version,
                     "request_version": payload["version"], "saved_version": final_version,
                     "last_human_review": last_human,
+                    "human_review_evidence": human_evidence,
+                    "history": history,
+                    "saved_review_event": history[0] if saved and history else None,
                     "saved_review_id": last_human["id"] if saved and last_human else None,
                     "saved_reviewed_at": last_human["reviewed_at"] if saved and last_human else None,
                     "requires_image": bool(question["requires_image"]), "saved": saved,
