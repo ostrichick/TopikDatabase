@@ -116,6 +116,15 @@
     .review-decision-cue.newer h3 { color: #873c33; }
     .review-decision-cue p { margin: 0 0 10px; font-size: .94rem; line-height: 1.65; color: #544b3c; }
     .review-decision-cue .btn { min-height: 44px; font-size: .94rem; }
+    .ai-decision-panel { margin: 0 0 18px; border: 1px solid #cbd9e3; border-left: 4px solid #547a95; border-radius: 11px; padding: 14px 16px; background: #f6f9fc; }
+    .ai-decision-panel.attention { border-color: #ddbc89; border-left-color: #ae6e29; background: #fffaf2; }
+    .ai-decision-panel h3 { margin: 0 0 5px; font-size: 1.04rem; line-height: 1.5; color: #28455b; }
+    .ai-decision-panel.attention h3 { color: #79491f; }
+    .ai-decision-panel p { font-size: .94rem; line-height: 1.65; margin: 7px 0; overflow-wrap: anywhere; }
+    .ai-decision-panel .ai-decision-meta { color: #536576; font-size: .88rem; }
+    .ai-decision-panel .ai-decision-findings { margin: 7px 0 8px; padding-left: 21px; display: grid; gap: 5px; line-height: 1.58; font-size: .93rem; overflow-wrap: anywhere; }
+    .ai-decision-panel .ai-decision-source { padding: 9px 11px; background: #fff; border: 1px solid #e0e7ef; border-radius: 8px; font-size: .9rem; }
+    .ai-decision-panel .btn { min-height: 44px; font-size: .93rem; }
     .section-card { padding: 17px 0; border-top: 1px solid #e9eee9; }
     .section-card h3 { font-size: .98rem; margin: 0 0 11px; }
     .comparison-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
@@ -198,6 +207,9 @@
     .ai-attempt:first-of-type { margin-top: 5px; }
     .ai-attempt.failed, .ai-attempt.timed_out, .ai-attempt.invalid { color: #8a493f; }
     .ai-evidence { margin-top: 6px; }
+    .ai-technical { border-top: 1px solid #dce5eb; margin-top: 15px; padding-top: 6px; }
+    .ai-technical > summary { padding: 10px 4px; cursor: pointer; min-height: 44px; color: #355974; font-size: .9rem; font-weight: 750; line-height: 1.5; }
+    .ai-technical > summary:focus-visible, .ai-decision-panel .btn:focus-visible { outline: 3px solid #246a9a; outline-offset: 3px; }
     .ai-evidence summary { cursor: pointer; color: #526d80; font-weight: 750; }
     .ai-json { margin: 6px 0 0; padding: 8px 9px; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 6px; background: #edf3f6; color: #334b5d; font: .68rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
     .ai-history { display: grid; gap: 7px; margin-top: 8px; }
@@ -298,6 +310,14 @@
             <div><p class="subheading" id="questionSubtitle">35회 · TOPIK I</p><h2 id="editorTitle" tabindex="-1">문항 —</h2></div>
             <div class="nav-controls"><button type="button" id="previousQuestion" class="btn" aria-label="이전 문항">← 이전</button><button type="button" id="nextQuestion" class="btn" aria-label="다음 문항">다음 →</button><button type="button" id="toggleReference" class="btn reference-toggle" aria-expanded="false" aria-controls="sourceReference">원본 대조</button></div>
           </div>
+          <section class="ai-decision-panel" id="aiDecisionPanel" aria-labelledby="aiDecisionHeading">
+            <h3 id="aiDecisionHeading">검수 판단에 필요한 근거</h3>
+            <p id="aiDecisionStatus" class="ai-decision-meta">AI 참고 정보 확인 중 · 사람 검수 상태와 별개</p>
+            <p id="aiDecisionSummary"></p>
+            <ul id="aiDecisionChecks" class="ai-decision-findings"></ul>
+            <p id="aiDecisionSource" class="ai-decision-source"></p>
+            <button type="button" class="btn" id="aiDecisionOpenEvidence" aria-controls="independentComparisonSection aiAuditSection">상세 AI 근거 확인</button>
+          </section>
           <div class="quick-controls"><button class="btn" type="button" id="nextPending">다음 미검수</button><button class="btn" type="button" id="nextProblem">다음 문제 발견</button></div>
           <div class="badges" id="questionBadges"></div>
           <nav class="review-shortcuts" aria-label="검수 근거 바로가기">
@@ -388,7 +408,11 @@
             <summary style="padding:14px 16px;cursor:pointer;font-weight:750">기존 AI 감사 상세 기록 펼치기</summary>
             <div style="padding:0 16px 16px">
             <p class="ai-disclaimer">AI 감사 결과는 사람의 검수 상태·검수 이력·음원 검증 상태를 변경하지 않습니다. 사람 검수 시 우선 확인할 단서로만 사용하세요.</p>
-            <div id="aiAuditSummary" class="ai-summary"></div>
+            <h4 class="ai-subhead">문항별 AI 판단 · 발견 근거 (원본 확인 필요)</h4>
+            <ol id="aiAuditLog" class="ai-log"></ol>
+            <details class="ai-technical" id="aiTechnicalDetails">
+              <summary>실행 통계 · 과거 run/pass · 재시도 기록 보기</summary>
+              <div id="aiAuditSummary" class="ai-summary"></div>
             <div id="aiHistorySection" hidden>
               <h4 class="ai-subhead">감사 회차 이력</h4>
               <div id="aiHistorySummary" class="ai-summary"></div>
@@ -396,8 +420,7 @@
             </div>
             <h4 class="ai-subhead">실행 시도 · 재시도 기록</h4>
             <ol id="aiAttemptLog" class="ai-log"></ol>
-            <h4 class="ai-subhead">완료된 문항 verdict · 발견 근거</h4>
-            <ol id="aiAuditLog" class="ai-log"></ol>
+            </details>
             </div>
           </details>
           <div class="media-card"><h3>검수 이력</h3><ol id="historyList" class="history-list"><li>기록을 불러오면 여기에 표시됩니다.</li></ol></div>
@@ -623,6 +646,115 @@
         target.open = true;
         target.scrollIntoView({ block: 'start' });
         target.querySelector('summary')?.focus({ preventScroll: true });
+      }
+      function renderAiDecisionPanel() {
+        const q = state.detail;
+        if (!q) return;
+        const row = state.items.find(item => item.id === q.id);
+        const auditScope = state.examId === '035-I-B' && q.exam_id === '035-I-B';
+        // The old independent-audit data has no per-question exam_id. Never
+        // apply its number-only 35th findings to a 36th question.
+        const detailAudit = aiAudit(q);
+        const listAudit = aiAudit(row);
+        const sameRun = detailAudit && listAudit && detailAudit.run_id &&
+          detailAudit.run_id === listAudit.run_id;
+        // F3 updates the current list asynchronously. If it selects another
+        // run, old detailed findings must not be presented as the new run's.
+        const audit = auditScope ? (listAudit
+          ? { ...(sameRun ? detailAudit : {}), ...listAudit } : detailAudit) : null;
+        const comparison = auditScope ? state.independentAudits?.questions?.[String(q.number)] || {} : {};
+        const reports = ['gemini', 'chatgpt'].map(key => ({ name: key === 'gemini' ? 'Gemini' : 'ChatGPT', value: comparison[key] }))
+          .filter(report => report.value && typeof report.value === 'object');
+        const independentFindings = reports.filter(report => report.value.verdict === 'finding');
+        const independentUncertain = reports.filter(report => report.value.verdict === 'uncertain');
+        const flags = [
+          ...(Array.isArray(q.preview_flags) ? q.preview_flags : []),
+          ...(q.section === 'listening' && Array.isArray(q.transcript?.warnings) ? q.transcript.warnings : []),
+        ];
+        const count = aiNumber(audit?.unresolved_findings);
+        const uncertain = aiNumber(audit?.uncertain);
+        const failures = audit?.has_partial_failures === true || aiNumber(audit?.incomplete_passes) > 0;
+        const needsAttention = count > 0 || uncertain > 0 || independentFindings.length > 0 ||
+          independentUncertain.length > 0 || flags.length > 0 || failures;
+        const panel = $('aiDecisionPanel');
+        panel.classList.toggle('attention', needsAttention);
+        $('aiDecisionHeading').textContent = needsAttention ? '검수 전에 확인할 근거' : 'AI 감사 및 원본 확인 상태';
+
+        const human = statusName(q.review_status);
+        const auditCreated = audit?.latest_at || audit?.latest_run?.created_at;
+        const recordedAt = typeof auditCreated === 'string' && auditCreated.trim()
+          ? ` · AI 기록 시각: ${auditCreated} (최신성·승인과의 선후 관계 미확정)`
+          : auditScope ? ' · AI 기록 최신성: 확인할 시각/실행 정보 없음' : '';
+        const score = audit && aiNumber(audit.total) > 0
+          ? ` · AI 참고 위험 지표 ${aiRisk(audit).score}/100` : '';
+        const coverage = auditScope ? '' : ' · 기존 AI 감사: 이 회차에 제공되지 않음';
+        $('aiDecisionStatus').textContent = `사람 검수: ${human} · AI 지적 검토 완료 여부: 승인만으로 판단 불가${coverage}${score}${recordedAt}`;
+        const summary = $('aiDecisionSummary');
+        if (needsAttention) {
+          const signals = [];
+          if (count > 0) signals.push(`기존 AI 감사 미해결 발견 ${count}건`);
+          if (independentFindings.length) signals.push(`${independentFindings.map(report => report.name).join('·')} 문제 지적`);
+          if (uncertain || independentUncertain.length) signals.push('AI 판단 불확실');
+          if (failures) signals.push('AI 실행 일부 미완료·실패');
+          if (flags.length) signals.push(`추출 주의 ${flags.length}건`);
+          summary.textContent = `확인이 필요한 단서: ${signals.join(' · ')}. AI 지적은 확정 오류가 아니므로 원본과 비교한 후 수정·반려 여부를 판단하세요.${auditScope ? '' : ' 36회에는 기존 35회 AI 감사가 제공되지 않습니다.'}`;
+        } else if (state.examId === '036-I-B') {
+          summary.textContent = '36회에 적용된 기존 35회 AI 감사 기록은 제공되지 않습니다. AI 검토 완료 또는 이상 없음으로 해석하지 마세요.';
+        } else if (audit && aiNumber(audit.total) > 0) {
+          summary.textContent = `제공된 최근 AI verdict ${aiNumber(audit.total)}건에서 발견·불확실 신호가 보고되지 않았습니다. 사람의 원본 검수 완료를 의미하지 않습니다.`;
+        } else if (reports.length) {
+          summary.textContent = '제공된 독립 AI 결과에서 발견·불확실 신호가 보고되지 않았습니다. 누락된 출처나 시점은 확인되지 않았습니다.';
+        } else {
+          summary.textContent = state.independentAudits === null && state.examId === '035-I-B'
+            ? 'AI 참고 기록을 확인 중입니다. 결과가 없어도 원본 검수를 진행할 수 있습니다.'
+            : '이 문항에서 확인 가능한 AI 결과가 없습니다. 미감사·조회 불가와 이상 없음을 구분하세요.';
+        }
+
+        const checks = $('aiDecisionChecks');
+        checks.replaceChildren();
+        const notes = [];
+        for (const report of independentFindings) {
+          const detail = [report.value.summary, report.value.detail].filter(value => typeof value === 'string' && value.trim());
+          notes.push(`${report.name}: ${detail.length ? detail[0] : '문제 지적됨 · 구체적인 근거 설명 미제공'}`);
+        }
+        for (const report of independentUncertain) notes.push(`${report.name}: 불확실 · 원본 대조 필요`);
+        // The fast F3 summary contains counts, not source-level finding text.
+        // Never invent a finding from a score or promise its location.
+        const entries = Array.isArray(audit?.entries) ? audit.entries : [];
+        for (const entry of entries) {
+          if (!entry || !['finding', 'uncertain'].includes(entry.verdict)) continue;
+          const descriptions = Array.isArray(entry.findings)
+            ? entry.findings.filter(value => value && typeof value.summary === 'string' && value.summary.trim())
+                .map(value => value.summary) : [];
+          if (!descriptions.length && typeof entry.summary === 'string' && entry.summary.trim())
+            descriptions.push(entry.summary);
+          if (!descriptions.length && typeof entry.rationale === 'string' && entry.rationale.trim())
+            descriptions.push(entry.rationale);
+          for (const description of descriptions) notes.push(`기존 AI 감사: ${description}`);
+        }
+        for (const note of [...new Set(notes)].slice(0, 3)) checks.append(element('li', '', note));
+        if (!notes.length && count > 0) checks.append(element('li', '',
+          `미해결 ${count}건의 상세 지적 내용은 아직 표시되지 않았습니다. 아래에서 기존 AI 감사 기록을 펼쳐 근거를 확인하세요.`));
+        const seriousWarnings = flags.filter(flag => flag && typeof flag === 'object' &&
+          ['high', 'critical', 'blocking'].includes(flag.severity));
+        const warningLabels = { high: '높음', critical: '매우 높음', blocking: '처리 차단 표시' };
+        for (const warning of seriousWarnings.slice(0, 2)) {
+          const message = typeof warning.message === 'string' && warning.message.trim()
+            ? warning.message : '주의사항의 구체적인 설명은 제공되지 않았습니다.';
+          checks.append(element('li', '', `추출 경고 ${warningLabels[warning.severity]}: ${message}`));
+        }
+        if (flags.length) checks.append(element('li', '',
+          `추출 주의 ${flags.length}건은 상단 '추출 주의' 버튼에서 원문 경고를 확인하세요.`));
+        if (failures) checks.append(element('li', '', 'AI 실행 실패·미완료는 문제 없음 판정이 아닙니다. 실행 이력을 확인하세요.'));
+        if (notes.length > 3) checks.append(element('li', '', `그 밖의 ${notes.length - 3}개 근거는 상세 감사 기록에서 확인하세요.`));
+        if (!checks.children.length) checks.append(element('li', '', '특정 오류 위치나 수정 지시가 확인되지 않았습니다. 원본을 직접 대조하세요.'));
+
+        const page = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? `${Number(value)}쪽` : '페이지 미기록';
+        const locations = [`시험지 ${page(q.source_pdf_page)}`, `정답표 ${page(q.answer?.source_pdf_page)}`];
+        if (q.section === 'listening') locations.push(`대본 ${page(q.transcript?.source_pdf_page)}`, '음원 구간은 별도 청취로 확인');
+        $('aiDecisionSource').textContent = `원본 대조 시작 위치: ${locations.join(' · ')}. 이는 AI가 결함 위치를 지정했다는 뜻이 아닙니다.`;
+        $('aiDecisionOpenEvidence').textContent = audit || independentFindings.length || independentUncertain.length
+          ? 'AI 판단의 상세 근거 확인' : 'AI 결과 제공 상태 확인';
       }
       function element(tag, className, text) {
         const node = document.createElement(tag);
@@ -963,6 +1095,7 @@
         setAiSummaryStatus('ready');
         filterItems();
         if (state.detail) renderReviewDecisionCue();
+        if (state.detail) renderAiDecisionPanel();
       }
       async function loadList() {
         const generation = (state.listGeneration || 0) + 1;
@@ -1444,6 +1577,7 @@
         $('questionBadges').lastElementChild.id = 'dirtyBadge';
         renderReviewDecisionCue();
         renderIndependentComparison();
+        renderAiDecisionPanel();
         const groupInstruction = q.group?.instruction_display ?? q.group?.instruction;
         const groupPassage = q.group?.passage_text_display ?? q.group?.passage_text;
         $('groupContextSection').hidden = !String(groupInstruction || '').trim() && !String(groupPassage || '').trim();
@@ -1620,7 +1754,11 @@
         const historyRoot = $('aiRunHistory');
         const attemptLog = $('aiAttemptLog');
         const log = $('aiAuditLog');
-        const audit = aiAudit(state.detail);
+        const detailed = aiAudit(state.detail);
+        const listAudit = aiAudit(state.items?.find(item => item.id === state.detail?.id));
+        const staleDetails = !!(detailed && listAudit && detailed.run_id && listAudit.run_id &&
+          detailed.run_id !== listAudit.run_id);
+        const audit = staleDetails ? null : detailed;
         const total = aiNumber(audit?.total);
         const execution = audit?.execution && typeof audit.execution === 'object' ? audit.execution : {};
         const latest = audit?.latest_run && typeof audit.latest_run === 'object'
@@ -1635,8 +1773,10 @@
         log.replaceChildren();
         historySection.hidden = true;
         if (!audit) {
-          summary.append(element('p', 'hint', state.aiHistoryLoading ? '상세 감사 기록 조회 중…' :
-            state.aiHistoryLoadedIds.has(state.detail.id) ? '저장된 상세 감사 기록이 없습니다.' : '상세 기록을 펼치면 해당 문항의 감사 이력을 불러옵니다.'));
+          summary.append(element('p', 'hint', staleDetails
+            ? '최근 AI 요약의 실행이 변경됐습니다. 이전 상세 근거는 최신 근거로 표시하지 않으며, 상세 기록을 다시 열면 갱신합니다.'
+            : state.aiHistoryLoading ? '상세 감사 기록 조회 중…' :
+              state.aiHistoryLoadedIds.has(state.detail.id) ? '저장된 상세 감사 기록이 없습니다.' : '상세 기록을 펼치면 해당 문항의 감사 이력을 불러옵니다.'));
           return;
         }
         const risk = aiRisk(audit);
@@ -2025,6 +2165,7 @@
       }
       function installHandlers() {
         $('examSelector').addEventListener('change', event => switchExam(event.target.value));
+        $('aiDecisionOpenEvidence').addEventListener('click', () => jumpToEvidence('ai'));
         $('jumpSource').addEventListener('click', () => jumpToEvidence('source'));
         $('jumpAiEvidence').addEventListener('click', () => jumpToEvidence('ai'));
         $('jumpWarnings').addEventListener('click', () => jumpToEvidence('warnings'));
@@ -2033,7 +2174,16 @@
         $('aiAuditSection').addEventListener('toggle', async () => {
           const section = $('aiAuditSection');
           const current = state.detail;
-          if (!section.open || !current || aiAudit(current) || state.aiHistoryLoading || state.aiHistoryLoadedIds.has(current.id)) return;
+          // The fast list/bundle can carry counts without item-level findings.
+          // Only an explicit evidence request loads detailed audit history.
+          const existing = aiAudit(current);
+          const rowAudit = aiAudit(state.items.find(item => item.id === current?.id));
+          const outdated = !!(existing && rowAudit && existing.run_id && rowAudit.run_id &&
+            existing.run_id !== rowAudit.run_id);
+          const hasDetails = !outdated && !!existing && (Array.isArray(existing.entries) ||
+            !!existing.history || Array.isArray(existing.execution?.passes));
+          if (!section.open || !current || hasDetails || state.aiHistoryLoading ||
+              (!outdated && state.aiHistoryLoadedIds.has(current.id))) return;
           const id = current.id;
           state.aiHistoryLoading = true;
           renderAiAudit();
@@ -2043,6 +2193,7 @@
             if (state.detail?.id === id) {
               state.detail.ai_audit = full.ai_audit || null;
               renderAiAudit();
+              renderAiDecisionPanel();
             }
           } catch (error) {
             if (state.detail?.id === id) $('aiAuditSummary').textContent = `상세 기록 조회 실패: ${error.message}`;
@@ -2229,10 +2380,10 @@
           request('/api/independent-audits').then(data => {
             state.independentAudits = data;
             filterItems();
-            if (state.detail) { renderIndependentComparison(); renderReviewDecisionCue(); }
+            if (state.detail) { renderIndependentComparison(); renderReviewDecisionCue(); renderAiDecisionPanel(); }
           }).catch(error => {
             state.independentAuditError = error.message;
-            if (state.detail) renderIndependentComparison();
+            if (state.detail) { renderIndependentComparison(); renderAiDecisionPanel(); }
           });
           await loadList();
           // Bundle is a read-only navigation optimization, not a prerequisite
