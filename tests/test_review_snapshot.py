@@ -262,7 +262,7 @@ class SnapshotScenarios:
     def test_stale_http_save_returns_409_without_extra_history(self):
         with self.fixture(listening=True) as (reader, writer, qid, _):
             before, detail = self.read_during_commit(reader, writer, qid)
-            server = review_ui.ThreadingHTTPServer(("127.0.0.1", 0), review_ui.make_handler(writer))
+            server = review_ui.ThreadingHTTPServer(("127.0.0.1", 0), review_ui.make_handler(writer, access_key=None, allow_unauthenticated_test_fixture=True))
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:

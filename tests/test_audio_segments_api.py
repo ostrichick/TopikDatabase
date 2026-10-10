@@ -60,7 +60,7 @@ class TestAudioSegmentsAPI(unittest.TestCase):
             db.commit()
 
         self.store = review_ui.ReviewStore(self.db_path, root=ROOT)
-        self.server = review_ui.ThreadingHTTPServer(("127.0.0.1", 0), review_ui.make_handler(self.store))
+        self.server = review_ui.ThreadingHTTPServer(("127.0.0.1", 0), review_ui.make_handler(self.store, access_key=None, allow_unauthenticated_test_fixture=True))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.addCleanup(self._stop_server)

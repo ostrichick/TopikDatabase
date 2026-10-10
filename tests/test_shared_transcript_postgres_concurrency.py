@@ -344,7 +344,7 @@ class DisposablePostgres17Concurrency(unittest.TestCase):
         # Also verify the actual HTTP boundary maps the losing CAS to 409,
         # never silently retries it as a second accepted review.
         server = review_ui.ThreadingHTTPServer(
-            ("127.0.0.1", 0), review_ui.make_handler(self.new_store())
+            ("127.0.0.1", 0), review_ui.make_handler(self.new_store(), access_key=None, allow_unauthenticated_test_fixture=True)
         )
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()

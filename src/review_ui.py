@@ -13,6 +13,7 @@ their canonical logical path and checksum.
 from __future__ import annotations
 
 import argparse
+import base64
 from collections import defaultdict
 import errno
 import hashlib
@@ -2349,7 +2350,26 @@ class ReviewStore:
             return payload, result["mime_type"]
 
 
-def make_handler(store: ReviewStore):
+def make_handler(store: ReviewStore, *, access_key: str | None,
+                 allow_unauthenticated_test_fixture: bool = False):
+    """Build a loopback HTTP handler with per-process operator-key protection.
+
+    The explicitly insecure test-fixture switch exists for legacy integration
+    tests only; the real launcher and ordinary calls never enable it. An
+    operator key authorizes a browser session, NOT a verified human identity.
+    """
+    if allow_unauthenticated_test_fixture:
+        if access_key is not None:
+            raise ValueError("Test fixture mode must not specify an access key")
+    else:
+        if access_key is None:
+            raise ValueError("Operator access key must be explicitly supplied")
+        if not isinstance(access_key, str) or len(access_key) < 32:
+            raise ValueError("Operator access key must have at least 32 characters")
+    basic_header = ("Basic " + base64.b64encode(
+        f"operator:{access_key}".encode("utf-8")).decode("ascii")
+        if not allow_unauthenticated_test_fixture else None)
+    basic_header_bytes = basic_header.encode("ascii") if basic_header is not None else None
     csrf_token = secrets.token_urlsafe(32)
 
     class Handler(BaseHTTPRequestHandler):
@@ -2400,6 +2420,20 @@ def make_handler(store: ReviewStore):
 
         def _host_valid(self) -> bool:
             return self.headers.get("Host") == f"127.0.0.1:{self.server.server_port}"
+
+        def _operator_access_valid(self) -> bool:
+            if basic_header is None:
+                return True  # Explicit private, disposable HTTP test fixture.
+            supplied = self.headers.get("Authorization", "")
+            return isinstance(supplied, str) and secrets.compare_digest(
+                supplied.encode("utf-8"), basic_header_bytes)
+
+        def _operator_required(self):
+            self._drain_body()
+            payload = b'{"error":"Operator access required"}'
+            self._headers(401, "application/json; charset=utf-8", len(payload),
+                          WWW_Authenticate='Basic realm="TOPIK local operator", charset="UTF-8"')
+            self.wfile.write(payload)
 
         def _error(self, exc: Exception):
             code = 404 if isinstance(exc, NotFound) else 409 if isinstance(exc, Conflict) else 400
@@ -2456,6 +2490,8 @@ def make_handler(store: ReviewStore):
         def do_GET(self):
             if not self._host_valid():
                 return self._json(403, {"error": "Only 127.0.0.1 is allowed"})
+            if not self._operator_access_valid():
+                return self._operator_required()
             parts = [unquote(piece) for piece in urlsplit(self.path).path.split("/") if piece]
             try:
                 active_store = self._request_store()
@@ -2491,7 +2527,11 @@ def make_handler(store: ReviewStore):
                 return self._json(500, {"error": "Local file or database unavailable"})
 
         def do_POST(self):
-            if not self._host_valid() or self.headers.get("Origin") != self._origin():
+            if not self._host_valid():
+                return self._json(403, {"error": "Only 127.0.0.1 is allowed"})
+            if not self._operator_access_valid():
+                return self._operator_required()
+            if self.headers.get("Origin") != self._origin():
                 return self._json(403, {"error": "Cross-origin requests are not allowed"})
             if not secrets.compare_digest(self.headers.get("X-Review-Token", ""), csrf_token):
                 return self._json(403, {"error": "Invalid review token; reload the page"})
@@ -2542,7 +2582,8 @@ def main():
     if args.port is not None and not 0 <= args.port <= 65535:
         parser.error("--port must be between 0 and 65535")
     store = ReviewStore(exam_id=args.exam_id)
-    handler = make_handler(store)
+    operator_key = secrets.token_urlsafe(32)
+    handler = make_handler(store, access_key=operator_key)
     requested = 8765 if args.port is None else args.port
     try:
         server = ThreadingHTTPServer(("127.0.0.1", requested), handler)
@@ -2560,6 +2601,9 @@ def main():
             raise SystemExit(f"Cannot bind a local review server: {fallback_error}") from fallback_error
     with server:
         print(f"TOPIK {getattr(store, 'exam_id', DEFAULT_EXAM_ID)} review: http://127.0.0.1:{server.server_port}/")
+        print("Operator access: username operator")
+        print(f"Operator access: password {operator_key}")
+        print("The browser will request this per-launch password. Keep it private; it proves possession only, not reviewer identity.")
         if getattr(store, "backend", "sqlite") == "postgres":
             print("Central PostgreSQL review mode. Source PDFs/audio and exported clips stay device-local; review/audio/clip workflows are enabled.")
         else:

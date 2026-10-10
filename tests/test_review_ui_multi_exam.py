@@ -243,7 +243,7 @@ class MultiExamReviewTests(unittest.TestCase):
             self.other.save_review("035-I-R-001", {})
 
     def test_http_explicit_exam_selection_and_media(self):
-        server = review_ui.ThreadingHTTPServer(("127.0.0.1", 0), review_ui.make_handler(self.default))
+        server = review_ui.ThreadingHTTPServer(("127.0.0.1", 0), review_ui.make_handler(self.default, access_key=None, allow_unauthenticated_test_fixture=True))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         def stop_server():

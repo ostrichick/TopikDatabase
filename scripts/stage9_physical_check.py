@@ -7,10 +7,12 @@ Never accepts the operational database as a mutation target.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import http.client
 import json
 import os
+import secrets
 import socket
 import sys
 import threading
@@ -55,7 +57,12 @@ def run(action: str, runtime: Path) -> dict:
         _materialize_media_root(media)
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
     store = ReviewStore(root=ROOT, database_url=url, media_root=media)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(store))
+    # This physical smoke targets a disposable database but still exercises
+    # the protected HTTP contract. Never leave a no-auth server behind.
+    operator_key = secrets.token_urlsafe(32)
+    authorization = "Basic " + base64.b64encode(
+        f"operator:{operator_key}".encode("utf-8")).decode("ascii")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(store, access_key=operator_key))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     origin = f"http://127.0.0.1:{server.server_port}"
@@ -63,7 +70,7 @@ def run(action: str, runtime: Path) -> dict:
     def request(method, path, payload=None):
         conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=60)
         try:
-            headers = {"Origin": origin}
+            headers = {"Origin": origin, "Authorization": authorization}
             body = None
             if payload is not None:
                 headers.update({"Content-Type": "application/json", "X-Review-Token": token})

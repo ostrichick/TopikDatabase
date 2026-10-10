@@ -13,6 +13,8 @@ powershell -NoProfile -File scripts/start_postgres_review.ps1
 
 실행된 터미널은 그대로 두고 **PowerShell에 출력된 주소**를 브라우저에서 여세요. 기본적으로 `http://127.0.0.1:8765/`를 사용하지만, 해당 포트가 이미 다른 프로그램에서 사용 중이거나 Windows에서 연결을 거부하면 사용 가능한 로컬 포트를 자동으로 선택해 다른 주소를 출력합니다. 예를 들어 `http://127.0.0.1:53124/`처럼 나타날 수 있습니다. 주소의 포트 번호를 임의로 8765로 바꾸지 마세요. 언제나 사용 가능한 포트를 선택하려면 `py -3 src/review_ui.py --port 0`을 실행할 수 있습니다. 종료하려면 터미널에서 `Ctrl+C`를 누릅니다. 추가 웹 패키지/CDN은 필요 없습니다.
 
+**로컬 서버 접근 비밀번호(2026-10-10 이후):** 서버를 시작할 때마다 터미널에 `Operator access: username operator`와 일회성 `Operator access: password ...`가 출력됩니다. 브라우저에서 주소를 열면 나타나는 로그인 창에 사용자 이름 `operator`와 해당 실행의 비밀번호를 입력하세요. 이 비밀번호는 `/`, 검수 API, PDF·MP3·클립 요청 전체를 보호합니다. 서버 재시작 시 새 비밀번호가 생성됩니다. 비밀번호를 URL에 붙이거나 공유·캡처·Git에 저장하지 마세요. 잘못된 비밀번호는 HTTP 401로 거절됩니다. **이 비밀번호는 로컬 도구 접근 권한을 뜻할 뿐, 특정 검수자의 실명이나 실제 청취·검수 사실을 인증하지 않습니다.** 자세한 보안 범위와 테스트 한계는 `docs/local-review-operator-access-2026-10-10.md`를 참고하세요.
+
 기존 SQLite DB `topik-past-papers/derived/035-I-B.sqlite`는 Stage 10 이후
 읽기 전용 rollback/reference archive로 동결되어 있습니다. 운영 검토 상태는
 중앙 PostgreSQL `topik`에 기록되며 SQLite로 자동 fallback하지 않습니다.

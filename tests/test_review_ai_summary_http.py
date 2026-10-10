@@ -27,7 +27,7 @@ class AuditSummaryHttpTests(unittest.TestCase):
                 fixtures.Q1,
             ))
             db.commit()
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(ReviewStore(db_path=self.fixture.db_path)))
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(ReviewStore(db_path=self.fixture.db_path), access_key=None, allow_unauthenticated_test_fixture=True))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.addCleanup(self._stop_server)

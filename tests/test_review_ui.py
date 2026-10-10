@@ -1288,7 +1288,7 @@ class TestReviewHTTP(unittest.TestCase):
             with closing(sqlite3.connect(self.db_path)) as destination:
                 original.backup(destination)
         self.store = review_ui.ReviewStore(self.db_path, root=ROOT)
-        self.server = review_ui.ThreadingHTTPServer(("127.0.0.1", 0), review_ui.make_handler(self.store))
+        self.server = review_ui.ThreadingHTTPServer(("127.0.0.1", 0), review_ui.make_handler(self.store, access_key=None, allow_unauthenticated_test_fixture=True))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         # Shutdown before deleting the temp DB, including when an assertion fails.

@@ -646,7 +646,7 @@ class Disposable35ReviewTests(unittest.TestCase):
         ids = (qid(number), qid(sibling))
         before = self.snapshot(ids)
         listener = review_ui.ThreadingHTTPServer(
-            ("127.0.0.1", 0), review_ui.make_handler(self.store)
+            ("127.0.0.1", 0), review_ui.make_handler(self.store, access_key=None, allow_unauthenticated_test_fixture=True)
         )
         thread = threading.Thread(target=listener.serve_forever, daemon=True)
         thread.start()
@@ -690,7 +690,7 @@ class Disposable35ReviewTests(unittest.TestCase):
         initial = self.snapshot(ids)
         payload = self.pair_correction(selected, sibling, status="verified")
         listener = review_ui.ThreadingHTTPServer(
-            ("127.0.0.1", 0), review_ui.make_handler(self.store)
+            ("127.0.0.1", 0), review_ui.make_handler(self.store, access_key=None, allow_unauthenticated_test_fixture=True)
         )
         thread = threading.Thread(target=listener.serve_forever, daemon=True)
         thread.start()
