@@ -123,6 +123,15 @@ class TestAudioSegmentsAPI(unittest.TestCase):
         return {"version": segment["version"] if segment else 0,
                 "start_ms": start, "end_ms": end, "status": status}
 
+    @staticmethod
+    def _human_evidence(shared=True):
+        # A test-only attestation; this does not claim that a real person has
+        # acoustically certified the historical source recording.
+        return {"listened_to_source": True, "checked_start": True,
+                "checked_end": True, "checked_transcript": True,
+                "other_question_confirmed": shared,
+                "note": "Disposable fixture: source, boundaries and transcript explicitly attested"}
+
     def _rows(self, *numbers):
         with closing(sqlite3.connect(self.db_path)) as db:
             return {number: db.execute(
@@ -223,11 +232,15 @@ class TestAudioSegmentsAPI(unittest.TestCase):
                 # Reviewing from either member must update both, and invalidate
                 # the version held by the first tab.
                 verified = {"version": b["version"], "start_ms": 21000,
-                            "end_ms": 27500, "status": "verified"}
+                            "end_ms": 27500, "status": "verified",
+                            "human_evidence": self._human_evidence()}
+                code, _, _ = self._post(right, verified)
+                self.assertEqual(code, 409, "Changed boundaries must not be verified without a fresh candidate")
+                verified.update(start_ms=20000, end_ms=27000)
                 code, _, data = self._post(right, verified)
                 self.assertEqual(code, 200, data)
-                self.assertEqual(self._rows(left, right)[left][:3], (21000, 27500, "verified"))
-                self.assertEqual(self._rows(left, right)[right][:3], (21000, 27500, "verified"))
+                self.assertEqual(self._rows(left, right)[left][:3], (20000, 27000, "verified"))
+                self.assertEqual(self._rows(left, right)[right][:3], (20000, 27000, "verified"))
                 code, _, _ = self._post(left, candidate)
                 self.assertEqual(code, 409)
                 self.assertEqual((self._unchanged_content(left), self._unchanged_content(right)), original)
@@ -256,7 +269,7 @@ class TestAudioSegmentsAPI(unittest.TestCase):
         candidate = self._detail(1)["audio_segment"]
         code, _, data = self._post(1, {"version": candidate["version"],
                                       "start_ms": 10000, "end_ms": 13000,
-                                      "status": "verified"})
+                                      "status": "verified", "human_evidence": self._human_evidence(shared=False)})
         self.assertEqual(code, 200, data)
         with closing(sqlite3.connect(self.db_path)) as db:
             source = db.execute(
@@ -276,7 +289,7 @@ class TestAudioSegmentsAPI(unittest.TestCase):
         segment = self._detail(26)["audio_segment"]
         code, _, data = self._post(26, {"version": segment["version"],
                                        "start_ms": 20000, "end_ms": 27000,
-                                       "status": "verified"})
+                                       "status": "verified", "human_evidence": self._human_evidence()})
         self.assertEqual(code, 200, data)
         self.assertIsNone(self._detail(25)["audio_segment"]["clip_url"])
 

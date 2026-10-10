@@ -547,6 +547,45 @@ class DisposablePostgres17Concurrency(unittest.TestCase):
             ).fetchone()["n"], 70)
         self.assertEqual(self.store.get_question("035-I-L-025", fast=True), before)
 
+    def test_70_audio_verified_requires_matching_candidate_and_atomic_human_evidence(self):
+        # 29/30 remains candidate after test_30 forced rollback. Here and in
+        # all other tests the evidence is a SIMULATED human declaration on
+        # disposable PG, not a claim that anyone listened to the real MP3.
+        a, b = (question_id(29), question_id(30))
+        before = self.facts((a, b))
+        audio = self.store.get_question(a, fast=True)["audio_segment"]
+        self.assertEqual(audio["status"], "candidate")
+        evidence = {"listened_to_source": True, "checked_start": True,
+                    "checked_end": True, "checked_transcript": True,
+                    "other_question_confirmed": True,
+                    "note": "Simulated person confirmed boundaries and transcript only in test DB"}
+        payload = {"version": audio["version"], "start_ms": audio["start_ms"],
+                   "end_ms": audio["end_ms"], "status": "verified"}
+        with self.assertRaises(review_ui.ReviewError):
+            self.new_store().save_audio_segment(a, payload)
+        with self.assertRaises(review_ui.Conflict):
+            self.new_store().save_audio_segment(a, {**payload,
+                "start_ms": payload["start_ms"] + 300, "human_evidence": evidence})
+        self.assertEqual(self.facts((a, b)), before)
+        ack = self.new_store().save_audio_segment(a, {**payload, "human_evidence": evidence})
+        self.assertEqual(ack["audio_segment"]["status"], "verified")
+        self.assertEqual(ack["audio_segment"]["human_evidence"]["note"], evidence["note"])
+        after = self.facts((a, b))
+        for qid in (a, b):
+            self.assertEqual(after[qid]["audio"]["status"], "verified")
+            self.assertEqual(after[qid]["audio"]["version"], before[qid]["audio"]["version"] + 1)
+            self.assertEqual(after[qid]["question"], before[qid]["question"])
+            self.assertEqual(after[qid]["transcript"], before[qid]["transcript"])
+            last = after[qid]["history"][-1]
+            self.assertEqual(last["subject_type"], "audio_segment")
+            self.assertEqual(last["scope"], "manual_audio_boundary_35")
+            self.assertEqual(__import__('json').loads(last["evidence"])["human_evidence"], evidence)
+        with self.assertRaises(review_ui.Conflict):
+            self.new_store().save_audio_segment(b, {**payload, "human_evidence": evidence})
+        bundle = self.new_store().get_questions_bundle()["questions"]
+        self.assertEqual(bundle[a]["audio_segment"]["human_evidence"]["note"], evidence["note"])
+        self.assertEqual(bundle[b]["audio_segment"]["human_evidence"]["note"], evidence["note"])
+
 
 if __name__ == "__main__":
     unittest.main()

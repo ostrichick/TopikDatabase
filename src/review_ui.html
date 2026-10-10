@@ -183,6 +183,14 @@
     .audio-feedback { font-size: .8rem; line-height: 1.55; color: #486554; min-height: 1.3em; }
     .audio-feedback.error { color: #ab4436; }
     .audio-feedback.success { color: #176445; }
+    .audio-evidence { padding: 12px; margin: 12px 0; border: 1px solid #cddfcf; border-radius: 9px; background: #fff; }
+    .audio-evidence label { display: flex; align-items: start; gap: 9px; margin: 9px 0; line-height: 1.55; font-size: 1rem; }
+    .audio-evidence input[type="checkbox"] { width: 19px; height: 19px; flex-shrink: 0; margin-top: 2px; }
+    .audio-evidence textarea { width: 100%; min-height: 100px; font-size: 1rem; line-height: 1.5; }
+    .audio-evidence .hint { font-size: .9rem; line-height: 1.6; }
+    .audio-evidence .history-list li { font-size: 1rem; line-height: 1.6; }
+    .audio-evidence button, .audio-actions button, #audioSiblingJump { min-height: 44px; }
+    .audio-status, .audio-shared, .audio-feedback { font-size: 1rem; }
     .image-list { display: grid; gap: 10px; }
     .image-list figure { margin: 0; border: 1px solid #e0e9df; border-radius: 10px; padding: 7px; background: #f7faf6; }
     .image-list img { display: block; max-width: 100%; height: auto; margin: auto; }
@@ -400,11 +408,30 @@
               </div>
               <p id="audioDurationHint" class="hint">원본 길이를 확인하는 중…</p>
               <p id="audioSharedNote" class="audio-shared" hidden></p>
+              <button type="button" class="btn" id="audioSiblingJump" hidden>짝 문항 대본·검수 상태 확인</button>
               <div class="audio-actions">
                 <button type="button" class="btn" id="audioPreview">설정 구간 듣기</button>
+                <button type="button" class="btn" id="audioReplay">같은 구간 다시 듣기</button>
+                <button type="button" class="btn" id="audioCheckStart">시작 경계 전후 3초 듣기</button>
+                <button type="button" class="btn" id="audioCheckEnd">종료 경계 전후 3초 듣기</button>
                 <button type="button" class="btn" id="audioSaveCandidate">후보 구간 저장</button>
-                <button type="button" class="btn primary" id="audioVerify" disabled>청취 후 구간 검증</button>
                 <button type="button" class="btn" id="audioExport" disabled>검증 구간 MP3 추출</button>
+              </div>
+              <div class="audio-evidence" id="audioEvidencePanel" role="group" aria-label="사람 음원 검증 근거">
+                <strong>사람 확인 근거 · 구간 승인과 문항 승인은 별개</strong>
+                <p class="hint">아래 항목은 실제로 직접 청취·대조한 후에만 체크하세요. 재생기에서 끝까지 들었다는 사실만으로 경계가 옳거나 대본이 일치한다고 판단하지 않습니다.</p>
+                <label><input type="checkbox" id="audioConfirmListen">원본 음원을 직접 듣고 구간 전체를 대조했습니다.</label>
+                <label><input type="checkbox" id="audioConfirmStart">시작 경계 전후를 듣고 대화 시작점을 확인했습니다.</label>
+                <label><input type="checkbox" id="audioConfirmEnd">종료 경계 전후를 듣고 대화 종료점을 확인했습니다.</label>
+                <label><input type="checkbox" id="audioConfirmTranscript">원본 대본 PDF와 이 구간의 발화를 대조했습니다.</label>
+                <label id="audioSiblingConfirmLabel"><input type="checkbox" id="audioConfirmSibling">공유 구간을 사용하는 짝 문항을 확인했으며 문항별 검수·승인은 별도임을 이해했습니다.</label>
+                <label for="audioEvidenceNote" class="small-label">청취 근거 메모 (필수, 20~2000자)</label>
+                <textarea class="field" id="audioEvidenceNote" maxlength="2000" placeholder="예: 25·26번 공통 대본 PDF 10쪽과 음원을 대조함. 시작 전 문장과 종료 후 다음 문장의 경계를 확인했고, 사람 청취 결과..." spellcheck="true"></textarea>
+                <button type="button" class="btn primary" id="audioVerify" disabled>위 내용을 직접 확인하고 공유 음원 구간 검증</button>
+                <p class="hint" id="audioStoredEvidence" role="status">기존 저장된 사람 청취 근거: 미기록·미확인</p>
+                <details id="audioReviewHistory"><summary>음원 구간 변경·사람 검증 기록 보기 (문항 승인 이력과 별개)</summary>
+                  <ol id="audioReviewHistoryList" class="history-list"><li>기록 없음</li></ol>
+                </details>
               </div>
               <p class="audio-feedback" id="audioFeedback" role="status" aria-live="polite">구간을 설정하고 처음부터 끝까지 재생해야 검증할 수 있습니다.</p>
               <a id="audioClipLink" class="btn" target="_blank" rel="noopener noreferrer" hidden>검증된 문항 음원 열기 ↗</a>
@@ -1242,6 +1269,7 @@
       function audioSignature(interval) { return `${state.detail?.id}:${interval.start_ms}-${interval.end_ms}`; }
       function audioDirty() {
         if (!state.detail || state.detail.section !== 'listening' || !state.audio.available) return false;
+        if ($('audioEvidenceNote')?.value?.trim() || audioEvidenceChecks().some(id => $('' + id)?.checked)) return true;
         const segment = audioSegment();
         const start = $('audioStart').value.trim();
         const end = $('audioEnd').value.trim();
@@ -1254,6 +1282,18 @@
       function audioFeedback(message, kind = '') {
         $('audioFeedback').textContent = message;
         $('audioFeedback').className = `audio-feedback ${kind}`;
+      }
+      function audioEvidenceChecks() { return ['audioConfirmListen', 'audioConfirmStart', 'audioConfirmEnd', 'audioConfirmTranscript', 'audioConfirmSibling']; }
+      function resetAudioEvidence() {
+        audioEvidenceChecks().forEach(id => { $(id).checked = false; });
+        $('audioEvidenceNote').value = '';
+      }
+      function humanAudioEvidence() {
+        return { listened_to_source: $('audioConfirmListen').checked,
+          checked_start: $('audioConfirmStart').checked, checked_end: $('audioConfirmEnd').checked,
+          checked_transcript: $('audioConfirmTranscript').checked,
+          other_question_confirmed: $('audioConfirmSibling').checked,
+          note: $('audioEvidenceNote').value.trim() };
       }
       function audioSharedNumbers(q) {
         // Only the 35th corpus has source-validated shared-dialogue pairs.
@@ -1287,10 +1327,15 @@
         const same = !!interval && !!segment && interval.start_ms === segment.start_ms && interval.end_ms === segment.end_ms;
         const heard = !!interval && state.audio.heardSignature === audioSignature(interval);
         $('audioPreview').disabled = !enabled || !interval;
+        $('audioReplay').disabled = !enabled || !interval || !!state.audio.preview;
+        ['audioCheckStart', 'audioCheckEnd'].forEach(id => { $(id).disabled = !enabled || !interval || !!state.audio.preview; });
         $('audioPreview').textContent = state.audio.preview ? '구간 듣기 중단' : '설정 구간 듣기';
         $('audioSaveCandidate').disabled = state.capabilities?.audioSegmentWrite === false || !enabled || !interval || (same && segment.status === 'candidate');
         if (same && segment?.status === 'verified') $('audioSaveCandidate').disabled = true;
-        $('audioVerify').disabled = state.capabilities?.audioSegmentWrite === false || !enabled || !interval || !same || segment.status !== 'candidate' || !heard || !!state.audio.preview;
+        const evidence = humanAudioEvidence();
+        $('audioVerify').disabled = state.capabilities?.audioSegmentWrite === false || !enabled || !interval || !same || segment.status !== 'candidate' || !heard || !!state.audio.preview ||
+          !Object.entries(evidence).every(([key, value]) => key === 'note' ? value.length >= 20 && value.length <= 2000 :
+            key === 'other_question_confirmed' ? value === (audioSharedNumbers(q).length === 2) : value === true);
         $('audioExport').disabled = state.capabilities?.clipExport === false || !enabled || !segment || segment.status !== 'verified' || !!segment.clip_url || audioDirty();
         ['audioStart', 'audioEnd'].forEach(id => { $(id).disabled = state.capabilities?.audioSegmentWrite === false || state.audio.saving || state.saving || state.loading || !state.audio.available; });
       }
@@ -1298,16 +1343,44 @@
         const q = state.detail;
         if (!q || q.section !== 'listening') return;
         const segment = audioSegment();
-        const names = { candidate: '후보 구간 · 청취 검증 전', verified: '검증 완료 구간' };
+        const names = { candidate: '후보 구간 · 청취 검증 전',
+          verified: segment?.human_evidence?.explicit_declaration === true
+            ? '사람 검증 선언이 기록된 구간' : '기존 검증 표시 · 사람 청취 근거 미확정' };
         $('audioSegmentStatus').textContent = !state.audio.available
           ? '현재 서버에서 문항별 음원 구간 기능을 제공하지 않습니다. 서버를 다시 실행하세요.'
           : segment ? `${names[segment.status] || '상태 미확인'} · 구간 버전 ${segment.version}` : '설정된 구간 없음 · 시작·종료 시각을 직접 입력하세요.';
+        const savedEvidence = segment?.human_evidence;
+        $('audioStoredEvidence').textContent = segment?.status !== 'verified'
+          ? '현재 후보 상태입니다. 사람 청취 검증 근거 없음 · 문항 승인과 무관합니다.'
+          : savedEvidence?.explicit_declaration === true
+            ? `사람이 입력한 검증 선언 (청취 사실은 독립 검증되지 않음) · ${savedEvidence.declared_at || '시각 미기록'} · 근거: ${savedEvidence.note}`
+            : '기존 검증 상태이지만 사람이 직접 청취했다는 명시적 근거가 기록되지 않았거나 확인되지 않았습니다.';
+        const history = $('audioReviewHistoryList');
+        history.replaceChildren();
+        const records = Array.isArray(segment?.review_history) ? segment.review_history : [];
+        for (const record of records) {
+          const li = document.createElement('li');
+          const kind = record.scope === 'audio_export_35' ? 'MP3 클립 추출 (청취 검증 아님)' :
+            record.human_declaration === true ? '사람 검증 선언' :
+              record.scope === 'automatic_audio_candidate_35' ? '자동 추정 후보 · 사람 미확인' :
+                '음원 구간 상태 변경 (청취 근거 미확인)';
+          li.textContent = `${kind} · ${record.status || '상태 미기록'} · ${record.at || '시각 미기록'}${record.note ? ` · ${record.note}` : ''}`;
+          history.appendChild(li);
+        }
+        if (!records.length) { const li = document.createElement('li'); li.textContent = '음원 구간 이력이 기록되지 않았거나 상세 조회 전입니다.'; history.appendChild(li); }
         const duration = audioDurationMs();
         $('audioDurationHint').textContent = Number.isSafeInteger(duration) && duration > 0
           ? `전체 원본 길이: ${seconds(duration)}초 · 시작과 종료는 소수 셋째 자리까지 입력` : '전체 원본 길이를 확인하는 중입니다. 재생기에서 음원을 로드하세요.';
         const shared = audioSharedNumbers(q);
         $('audioSharedNote').hidden = shared.length < 2;
-        if (shared.length >= 2) $('audioSharedNote').textContent = `${shared.join('·')}번은 동일한 대화 원본을 공유합니다. 음원 구간을 저장·검증하면 두 문항에 함께 반영되지만, 대본 수정·사람의 승인 기록은 다른 문항으로 자동 전파되지 않습니다. 두 대본을 각각 대조하고 구간은 직접 청취하세요.`;
+        $('audioSiblingJump').hidden = shared.length !== 2;
+        $('audioSiblingConfirmLabel').hidden = shared.length !== 2;
+        if (shared.length >= 2) {
+          const sibling = shared.find(number => number !== q.number);
+          $('audioSiblingJump').dataset.siblingId = `035-I-L-${String(sibling).padStart(3, '0')}`;
+          $('audioSiblingJump').textContent = `${sibling}번 대본·검수 상태 확인`;
+          $('audioSharedNote').textContent = `${shared.join('·')}번 공유 대화 · 원본 대본 ${Number.isSafeInteger(q.transcript?.source_pdf_page) ? `${q.transcript.source_pdf_page}쪽` : '페이지 미기록'} · 음원 구간만 함께 반영됩니다. 대본 수정·문항별 승인은 별개이며 후보 시각은 검증된 경계가 아닙니다.`;
+        }
         const clip = segment?.status === 'verified' ? sameOriginURL(segment.clip_url) : null;
         $('audioClipLink').hidden = !clip;
         if (clip) $('audioClipLink').href = clip.href;
@@ -1322,6 +1395,7 @@
           Object.prototype.hasOwnProperty.call(q, 'audio_segment');
         state.audio.preview = null;
         state.audio.heardSignature = null;
+        resetAudioEvidence();
         state.audio.durationMs = null;
         state.audio.error = false;
         const segment = audioSegment();
@@ -1345,11 +1419,13 @@
         if (!preview || preview.questionId !== state.detail?.id) return;
         state.audio.preview = null;
         $('audioPlayer').pause();
-        state.audio.heardSignature = preview.signature;
-        audioFeedback('설정한 구간을 끝까지 들었습니다. 후보 저장 후 별도로 검증할 수 있습니다.', 'success');
+        if (preview.mode === 'full') state.audio.heardSignature = preview.signature;
+        audioFeedback(preview.mode === 'full'
+          ? '재생기에서 설정 구간이 끝까지 재생됐습니다. 경계와 대본은 사람이 별도로 판단하세요.'
+          : '경계 전후 재생이 끝났습니다. 시작·종료점을 직접 판단해 주세요.', 'success');
         refreshAudioActions();
       }
-      function previewAudio() {
+      function previewAudio(which = 'full') {
         if (state.audio.preview) { stopAudioPreview(); return; }
         if (!state.audio.available || !state.detail || state.audio.saving || state.saving) return;
         let interval;
@@ -1361,14 +1437,17 @@
           return;
         }
         player.pause();
-        state.audio.heardSignature = null;
-        const preview = { ...interval, questionId: state.detail.id, signature: audioSignature(interval),
-          lastSecond: interval.start_ms / 1000, playedMs: 0, allowInitialSeek: true };
+        if (which === 'full') state.audio.heardSignature = null;
+        const point = which === 'start' ? interval.start_ms : interval.end_ms;
+        const audition = which === 'full' ? interval : {
+          start_ms: Math.max(0, point - 1500), end_ms: Math.min(audioDurationMs(), point + 1500) };
+        const preview = { ...audition, mode: which, questionId: state.detail.id, signature: audioSignature(interval),
+          lastSecond: audition.start_ms / 1000, playedMs: 0, allowInitialSeek: true };
         state.audio.preview = preview;
         try {
-          player.currentTime = interval.start_ms / 1000;
+          player.currentTime = audition.start_ms / 1000;
           if (!player.seeking) preview.allowInitialSeek = false;
-          audioFeedback(`${seconds(interval.start_ms)}초부터 ${seconds(interval.end_ms)}초까지 재생 중입니다.`);
+          audioFeedback(`${seconds(audition.start_ms)}초부터 ${seconds(audition.end_ms)}초까지 ${which === 'full' ? '구간' : '경계 대조'} 재생 중입니다.`);
           refreshAudioActions();
           player.play().catch(error => {
             if (state.audio.preview === preview) stopAudioPreview(`음원을 재생하지 못했습니다: ${error.message}`);
@@ -1394,6 +1473,7 @@
       function audioInputChanged() {
         if (state.audio.preview) stopAudioPreview();
         state.audio.heardSignature = null;
+        audioEvidenceChecks().forEach(id => { $(id).checked = false; });
         audioFeedback('구간이 바뀌었습니다. 새 구간을 듣고 후보로 저장해야 검증할 수 있습니다.');
         refreshAudioActions();
         refreshDirty();
@@ -1411,6 +1491,13 @@
           audioFeedback('먼저 동일한 구간을 후보로 저장하고 처음부터 끝까지 들은 후 검증하세요.', 'error');
           return;
         }
+        const humanEvidence = humanAudioEvidence();
+        if (status === 'verified' && !Object.entries(humanEvidence).every(([key, value]) =>
+            key === 'note' ? value.length >= 20 && value.length <= 2000 :
+            key === 'other_question_confirmed' ? value === (audioSharedNumbers(state.detail).length === 2) : value === true)) {
+          audioFeedback('실제 청취·시작·종료·대본·짝 문항을 확인하고 구체적인 근거 메모를 기록하세요.', 'error');
+          return;
+        }
         if (status === 'candidate' && segment?.status === 'verified' &&
             segment.start_ms === interval.start_ms && segment.end_ms === interval.end_ms) return;
         if (state.audio.preview) stopAudioPreview();
@@ -1423,7 +1510,8 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Review-Token': state.csrfToken },
             body: JSON.stringify({ version: Number.isSafeInteger(segment?.version) ? segment.version : 0,
-              start_ms: interval.start_ms, end_ms: interval.end_ms, status })
+              start_ms: interval.start_ms, end_ms: interval.end_ms, status,
+              ...(status === 'verified' ? { human_evidence: humanEvidence } : {}) })
           });
           if (!updated || updated.id !== id || updated.audio_segment?.status !== status ||
               updated.audio_segment.start_ms !== interval.start_ms || updated.audio_segment.end_ms !== interval.end_ms) {
@@ -1438,7 +1526,10 @@
             if (Number.isSafeInteger(updated.version)) state.detailsCache[id].version = updated.version;
           }
           invalidateSharedAudioCache(updated, id);
-          audioFeedback(status === 'verified' ? '청취 확인 후 해당 음원 구간이 검증되었습니다.' : '후보 구간을 저장했습니다. 검증하려면 해당 구간을 끝까지 들어야 합니다.', 'success');
+          if (status === 'verified') resetAudioEvidence();
+          audioFeedback(status === 'verified'
+            ? '명시적 사람 검증 선언과 근거가 저장됐습니다. 공유 음원 구간만 검증되며 문항별 승인은 별개입니다.'
+            : '후보 구간을 저장했습니다. 경계·대본을 직접 대조하고 근거를 입력해야 검증할 수 있습니다.', 'success');
           updateAudioSummary();
         } catch (error) {
           audioFeedback(error.status === 409
@@ -2366,7 +2457,16 @@
         ['questionSearch', 'sectionFilter', 'statusFilter', 'imageFilter', 'aiFilter', 'sortOrder', 'comparisonDisagreement', 'indicatorFilter'].forEach(id => $(id).addEventListener('input', filterChanged));
         ['stemInput', 'transcriptInput', 'reviewNote', 'choice1', 'choice2', 'choice3', 'choice4'].forEach(id => $(id).addEventListener('input', refreshDirty));
         ['audioStart', 'audioEnd'].forEach(id => $(id).addEventListener('input', audioInputChanged));
-        $('audioPreview').addEventListener('click', previewAudio);
+        $('audioPreview').addEventListener('click', () => previewAudio('full'));
+        $('audioReplay').addEventListener('click', () => previewAudio('full'));
+        $('audioCheckStart').addEventListener('click', () => previewAudio('start'));
+        $('audioCheckEnd').addEventListener('click', () => previewAudio('end'));
+        $('audioSiblingJump').addEventListener('click', () => {
+          const id = $('audioSiblingJump').dataset.siblingId;
+          if (id) selectQuestion(id, { focusEditor: true });
+        });
+        audioEvidenceChecks().forEach(id => $(id).addEventListener('change', () => { refreshAudioActions(); refreshDirty(); }));
+        $('audioEvidenceNote').addEventListener('input', () => { refreshAudioActions(); refreshDirty(); });
         $('audioSaveCandidate').addEventListener('click', () => saveAudioSegment('candidate'));
         $('audioVerify').addEventListener('click', () => saveAudioSegment('verified'));
         $('audioExport').addEventListener('click', exportAudioClip);

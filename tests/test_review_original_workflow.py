@@ -159,6 +159,7 @@ class FakeElement {
   setAttribute(k,v){this.attrs[k]=String(v);}
   removeAttribute(k){delete this.attrs[k];}
   append(...values){this.children.push(...values);}
+  appendChild(value){this.children.push(value);return value;}
   replaceChildren(...values){this._text='';this.children=[...values];}
   addEventListener(k,cb){(this.listeners[k]??=[]).push(cb);}
   async click(){assert(!this.disabled,'Disabled control clicked: '+this.id);

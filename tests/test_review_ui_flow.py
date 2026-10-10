@@ -155,7 +155,9 @@ async function scenario({ listening = false, edited = true, post = 'ok',
   const detail = q('q1', 1);
   const fields = Object.fromEntries([
     'stemInput','choice1','choice2','choice3','choice4','transcriptInput',
-    'reviewNote','audioStart','audioEnd','audioPlayer','editorContent','editorEmpty'
+    'reviewNote','audioStart','audioEnd','audioPlayer','editorContent','editorEmpty',
+    'audioEvidenceNote','audioConfirmListen','audioConfirmStart','audioConfirmEnd',
+    'audioConfirmTranscript','audioConfirmSibling'
   ].map(id => [id, { value:'', hidden:false, pause() {} }]));
   function setFields(item) {
     fields.stemInput.value = item.stem;
@@ -175,6 +177,8 @@ async function scenario({ listening = false, edited = true, post = 'ok',
   const events = [];
   const ctx = vm.createContext({
     state,JSON,Number,
+    audioEvidenceChecks:()=>['audioConfirmListen','audioConfirmStart','audioConfirmEnd',
+      'audioConfirmTranscript','audioConfirmSibling'],
     $:id=>fields[id] || { focus(){ events.push('focus'); } },
     window:{confirm:()=>{events.push('confirm');return confirm;}},
     notice:(text,type,conflict)=>events.push({notice:type,text,conflict}),

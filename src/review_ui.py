@@ -988,10 +988,59 @@ class ReviewStore:
                 clip_url = f"/media/{question['id']}/clip"
             except ReviewError:
                 pass
+        # A stored status alone never proves human listening. The evidence is
+        # the reviewer's explicit declaration, not the playback UI telemetry.
+        records = db.execute(
+            "SELECT scope,status,evidence,reviewed_at FROM review_records "
+            "WHERE subject_type='audio_segment' AND subject_id=? ORDER BY id DESC LIMIT 8",
+            (question["id"],),
+        ).fetchall()
+        human_evidence = None
+        for record in records:
+            if segment["status"] == "verified" and human_evidence is None and \
+                    record["scope"] == "manual_audio_boundary_35" and record["status"] == "verified":
+                human_evidence = self._audio_attestation(
+                    record["evidence"], record["reviewed_at"], segment, asset["sha256"])
+                break
         return {"start_ms": segment["start_ms"], "end_ms": segment["end_ms"],
                 "status": segment["status"], "version": segment["version"],
                 "source_duration_ms": round(asset["duration_seconds"] * 1000),
-                "shared_questions": pair, "clip_url": clip_url}
+                "shared_questions": pair, "clip_url": clip_url,
+                "human_evidence": human_evidence,
+                "review_history": [self._audio_history_item(r) for r in records]}
+
+    @staticmethod
+    def _audio_history_item(record):
+        try:
+            evidence = json.loads(record["evidence"])
+            if not isinstance(evidence, dict):
+                evidence = {}
+        except (ValueError, TypeError):
+            evidence = {}
+        declared = evidence.get("human_evidence")
+        return {"status": record["status"], "scope": record["scope"],
+                "at": record["reviewed_at"],
+                "human_declaration": evidence.get("verified_by_human_declaration") is True,
+                "note": declared.get("note", "") if isinstance(declared, dict) and
+                isinstance(declared.get("note", ""), str) else ""}
+
+    @staticmethod
+    def _audio_attestation(raw, timestamp, segment, source_sha):
+        try:
+            recorded = json.loads(raw)
+            attest = recorded.get("human_evidence")
+            after = recorded.get("after")
+            if recorded.get("verified_by_human_declaration") is True and \
+                    isinstance(attest, dict) and isinstance(after, dict) and \
+                    (after.get("start_ms"), after.get("end_ms")) == \
+                    (segment["start_ms"], segment["end_ms"]) and \
+                    recorded.get("source_sha256") == source_sha and \
+                    isinstance(attest.get("note"), str):
+                return {"note": attest["note"], "declared_at": timestamp,
+                        "explicit_declaration": True}
+        except (TypeError, ValueError, AttributeError, KeyError):
+            pass
+        return None
 
     def _shared_transcript_state(self, db, number: int) -> dict | None:
         """Actual 35th shared-source identity, never inferred for 36th."""
@@ -1117,13 +1166,26 @@ class ReviewStore:
 
         This NEVER modifies question/text approval or silently verifies the audio.
         """
-        if not isinstance(payload, dict) or set(payload) != {"version", "start_ms", "end_ms", "status"}:
-            raise ReviewError("Expected version, start_ms, end_ms and status only")
+        ordinary_fields = {"version", "start_ms", "end_ms", "status"}
+        if not isinstance(payload, dict) or set(payload) not in (ordinary_fields, ordinary_fields | {"human_evidence"}):
+            raise ReviewError("Expected audio version, start_ms, end_ms, status and optional human_evidence")
         version, start, end, status = (payload[k] for k in ("version", "start_ms", "end_ms", "status"))
         if type(version) is not int or version < 0 or type(start) is not int or type(end) is not int:
             raise ReviewError("Audio boundaries and version must be integer milliseconds")
         if status not in ("candidate", "verified") or not 0 <= start < end or end - start < 500:
             raise ReviewError("Audio segment must have a valid status and be at least 0.5 seconds long")
+        evidence = payload.get("human_evidence")
+        if status == "verified":
+            required = {"listened_to_source", "checked_start", "checked_end", "checked_transcript",
+                        "other_question_confirmed", "note"}
+            if not isinstance(evidence, dict) or set(evidence) != required or \
+                    any(evidence[name] is not True for name in required - {"note", "other_question_confirmed"}) or \
+                    type(evidence["other_question_confirmed"]) is not bool or \
+                    not isinstance(evidence["note"], str) or \
+                    not 20 <= len(evidence["note"].strip()) <= 2000:
+                raise ReviewError("Verified audio requires explicit human listening, both boundaries, transcript, paired-question checks and a detailed evidence note")
+        elif evidence is not None:
+            raise ReviewError("Human verification evidence is only accepted for an explicit verified decision")
 
         # Verify immutable local media before taking central row locks.
         with closing(self._connect()) as preflight:
@@ -1143,6 +1205,8 @@ class ReviewStore:
             if source.stat().st_size != asset["byte_size"] or hashlib.sha256(source.read_bytes()).hexdigest() != asset["sha256"]:
                 raise ReviewError("Audio source has changed; segment cannot be saved")
             pair = SHARED_AUDIO.get(question["exam_number"], (question["exam_number"],))
+            if status == "verified" and evidence["other_question_confirmed"] is not (len(pair) == 2):
+                raise ReviewError("Confirm the paired question only when the 35th source has a registered shared interval")
             qids = sorted(f"035-I-L-{number:03d}" for number in pair)
             asset_snapshot = (asset["id"], asset["duration_seconds"], asset["sha256"], asset["byte_size"])
 
@@ -1161,8 +1225,13 @@ class ReviewStore:
                 raise Conflict("Audio source metadata changed while saving; reload before editing")
             if any((rows[qid]["version"] if qid in rows else 0) != version for qid in qids):
                 raise Conflict("Audio interval was changed in another tab; reload before saving")
-            if status == "verified" and any(qid not in rows for qid in qids):
-                raise ReviewError("Preview and save a candidate before verifying its interval")
+            if status == "verified" and any(qid not in rows or rows[qid]["status"] != "candidate" or
+                    rows[qid]["start_ms"] != start or rows[qid]["end_ms"] != end for qid in qids):
+                raise Conflict("Verify only the exact currently saved candidate for every shared question; reload first")
+            if status == "verified" and len(qids) == 2:
+                shared = self._shared_transcript_state(db, locked_question["exam_number"])
+                if not shared or not shared["consistent"]:
+                    raise Conflict("Shared transcripts or source pages differ. Compare both original transcripts before approving audio")
             now = datetime.now(timezone.utc).isoformat(timespec="seconds")
             for qid in qids:
                 old = rows.get(qid)
@@ -1182,7 +1251,9 @@ class ReviewStore:
                 db.execute("INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
                            "VALUES(?,?,?,?,?,?,?)",
                            ("audio_segment", qid, status, "local_reviewer", "manual_audio_boundary_35",
-                            json.dumps({"before": prior, "after": after, "source_sha256": current_asset["sha256"]},
+                            json.dumps({"before": prior, "after": after, "source_sha256": current_asset["sha256"],
+                                        **({"human_evidence": evidence, "verified_by_human_declaration": True,
+                                            "shared_questions": list(pair)} if status == "verified" else {})},
                                        ensure_ascii=False), now))
         return self.get_question(question_id)
 
@@ -1640,15 +1711,20 @@ class ReviewStore:
                 images_by_qid[img["question_id"]].append(img["image_key"])
 
             record_rows = db.execute(
-                "SELECT subject_id, status, scope, evidence, reviewed_at FROM review_records "
-                "WHERE subject_type='question' AND subject_id IN ("
+                "SELECT subject_type,subject_id,status,scope,evidence,reviewed_at FROM review_records "
+                "WHERE subject_type IN ('question','audio_segment') AND subject_id IN ("
                 "SELECT q.id FROM questions q JOIN sections s ON s.id=q.section_id "
                 "WHERE s.exam_id=?) ORDER BY id DESC", (self.exam_id,)
             ).fetchall()
             records_by_qid: dict[str, list[dict]] = defaultdict(list)
+            audio_history_by_qid: dict[str, list[dict]] = defaultdict(list)
             count_by_qid: dict[str, int] = defaultdict(int)
             for r in record_rows:
                 qid = r["subject_id"]
+                if r["subject_type"] == "audio_segment":
+                    if len(audio_history_by_qid[qid]) < 8:
+                        audio_history_by_qid[qid].append(self._audio_history_item(r))
+                    continue
                 count_by_qid[qid] += 1
                 if len(records_by_qid[qid]) < 30:
                     item = dict(r)
@@ -1663,6 +1739,7 @@ class ReviewStore:
             has_audio = self._has_audio_segments(db)
             assets_by_sec = {}
             segments_by_qid = {}
+            audio_attestations = {}
             if has_audio:
                 asset_rows = db.execute(
                     "SELECT a.id, a.section_id, a.duration_seconds, s.sha256 FROM audio_assets a "
@@ -1681,6 +1758,21 @@ class ReviewStore:
                     (self.exam_id,),
                 ).fetchall()
                 segments_by_qid = {r["question_id"]: r for r in segment_rows}
+                if any(r["status"] == "verified" for r in segment_rows):
+                    # One batched query, not a per-question F3 read. Legacy
+                    # status-only records are marked as evidence unconfirmed.
+                    evidence_rows = db.execute(
+                        "SELECT r.subject_id,r.evidence,r.reviewed_at FROM review_records r "
+                        "JOIN questions q ON q.id=r.subject_id "
+                        "JOIN sections s ON s.id=q.section_id "
+                        "WHERE s.exam_id=? AND r.subject_type='audio_segment' "
+                        "AND r.scope='manual_audio_boundary_35' AND r.status='verified' "
+                        "ORDER BY r.id DESC", (self.exam_id,),
+                    ).fetchall()
+                    for evidence_row in evidence_rows:
+                        qid = evidence_row["subject_id"]
+                        if qid not in audio_attestations:
+                            audio_attestations[qid] = evidence_row
 
             punctuation_revision = self._punctuation_revision(db)
             questions_map = {}
@@ -1716,6 +1808,11 @@ class ReviewStore:
                                 "source_duration_ms": round(asset["duration_seconds"] * 1000),
                                 "shared_questions": pair,
                                 "clip_url": clip_url,
+                                "human_evidence": (self._audio_attestation(
+                                    audio_attestations[qid]["evidence"],
+                                    audio_attestations[qid]["reviewed_at"], segment,
+                                    asset["sha256"]) if qid in audio_attestations else None),
+                                "review_history": audio_history_by_qid.get(qid, []),
                             }
 
                 q_data = {
