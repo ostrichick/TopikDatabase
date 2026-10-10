@@ -990,6 +990,20 @@ class ReviewStore:
         ).fetchall()
         human_evidence = self._audio_evidence_from_records(
             records, segment, asset["sha256"], pair)
+        if segment["status"] == "verified" and not any(
+                r["scope"] == "manual_audio_boundary_35" and r["status"] == "verified"
+                for r in records):
+            # The display timeline is intentionally capped at eight events.
+            # Repeated clip exports can push the latest human declaration out
+            # of that window. Resolve the authoritative declaration from the
+            # complete audit log, as the F3 bundle and export paths already do.
+            # Do not expand the timeline or accept an older valid declaration
+            # over a newer malformed one.
+            try:
+                human_evidence = self._require_audio_evidence(
+                    db, question["id"], segment, asset["sha256"], pair)
+            except ReviewError:
+                human_evidence = None
         pair_provenance = bool(human_evidence)
         if pair_provenance:
             try:

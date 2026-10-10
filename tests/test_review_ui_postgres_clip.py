@@ -195,6 +195,72 @@ class Stage8PostgresClipTests(unittest.TestCase):
                 db.execute("SELECT dialogue_text,review_status FROM transcripts WHERE question_id=?", (qid,)).fetchone(),
             )
 
+    def test_latest_human_attestation_survives_more_than_eight_clip_history_events(self):
+        """A bounded audit timeline must not truncate the authoritative declaration."""
+        store = self._store(self.pc_media)
+        with patch("src.audio_35.export_segment", side_effect=self._fake_encoder()):
+            store.export_audio_clip("035-I-L-025")
+
+        # Each export adds an audio_export_35 entry per sibling. Extra historical
+        # events can legitimately outnumber the eight recent events shown in UI.
+        with closing(sqlite3.connect(self.db_path)) as db:
+            for n in (25, 26):
+                qid = f"035-I-L-{n:03d}"
+                for index in range(9):
+                    db.execute(
+                        "INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        ("audio_segment", qid, "verified", "test_fixture_only", "audio_export_35",
+                         json.dumps({"event": "SIMULATED EXPORT HISTORY ONLY", "index": index}),
+                         "2026-10-10T00:00:00+00:00"),
+                    )
+            db.commit()
+
+        bundle = store.get_questions_bundle()["questions"]
+        for number in (25, 26):
+            qid = f"035-I-L-{number:03d}"
+            detail = store.get_question(qid)["audio_segment"]
+            batched = bundle[qid]["audio_segment"]
+            self.assertEqual(detail["human_evidence"], batched["human_evidence"])
+            self.assertEqual(detail["clip_provenance_confirmed"], batched["clip_provenance_confirmed"])
+            self.assertEqual(detail["clip_url"], batched["clip_url"])
+            self.assertTrue(detail["human_evidence"]["explicit_declaration"])
+            self.assertEqual(len(detail["review_history"]), 8)
+            self.assertEqual(detail["review_history"], batched["review_history"])
+
+        # A later malformed human declaration must revoke both shared-link
+        # states even if another nine non-review events bury that declaration.
+        with closing(sqlite3.connect(self.db_path)) as db:
+            qid = "035-I-L-026"
+            db.execute(
+                "INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                ("audio_segment", qid, "verified", "test_fixture_only", "manual_audio_boundary_35",
+                 json.dumps({"verified_by_human_declaration": True, "human_evidence": {}}),
+                 "2026-10-10T00:00:00+00:00"),
+            )
+            for index in range(9):
+                db.execute(
+                    "INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    ("audio_segment", qid, "verified", "test_fixture_only", "audio_export_35",
+                     json.dumps({"event": "SIMULATED EXPORT HISTORY ONLY", "index": index}),
+                     "2026-10-10T00:00:00+00:00"),
+                )
+            db.commit()
+        bundle = store.get_questions_bundle()["questions"]
+        for number in (25, 26):
+            qid = f"035-I-L-{number:03d}"
+            detail = store.get_question(qid)["audio_segment"]
+            batched = bundle[qid]["audio_segment"]
+            self.assertIs(detail["clip_provenance_confirmed"], False)
+            self.assertIs(batched["clip_provenance_confirmed"], False)
+            self.assertIsNone(detail["clip_url"])
+            self.assertIsNone(batched["clip_url"])
+            with self.assertRaises(review_ui.ReviewError):
+                store.clip_path(qid)
+        self.assertIsNone(store.get_question("035-I-L-026")["audio_segment"]["human_evidence"])
+
     def test_legacy_verified_status_without_human_evidence_is_not_exportable_or_downloadable(self):
         """Status flag or existing clip bytes never stand in for human evidence."""
         store = self._store(self.pc_media)
