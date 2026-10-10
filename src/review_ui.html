@@ -125,6 +125,7 @@
     .ai-decision-panel .ai-decision-findings { margin: 7px 0 8px; padding-left: 21px; display: grid; gap: 5px; line-height: 1.58; font-size: .93rem; overflow-wrap: anywhere; }
     .ai-decision-panel .ai-decision-source { padding: 9px 11px; background: #fff; border: 1px solid #e0e7ef; border-radius: 8px; font-size: .9rem; }
     .ai-decision-panel .btn { min-height: 44px; font-size: .93rem; }
+    .source-shortcut { min-height: 44px; }
     .section-card { padding: 17px 0; border-top: 1px solid #e9eee9; }
     .section-card h3 { font-size: .98rem; margin: 0 0 11px; }
     .comparison-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
@@ -159,7 +160,7 @@
     .reference-header h2 { font-size: 1.06rem; margin: 0 0 6px; }
     .reference-header p { font-size: .8rem; margin: 0; color: #748177; line-height: 1.5; }
     .reference-body { padding: 0 15px 20px; }
-    .source-tabs { display: flex; gap: 5px; padding: 5px; background: #edf2ec; border-radius: 11px; margin-bottom: 11px; }
+    .source-tabs { display: flex; gap: 5px; padding: 5px; background: #edf2ec; border-radius: 11px; margin-bottom: 11px; position: sticky; top: 0; z-index: 1; }
     .source-tab { flex: 1; border: 0; border-radius: 8px; padding: 10px 5px; background: transparent; color: #607365; font-weight: 750; font-size: .8rem; }
     .source-tab.active { background: #fff; color: #245a40; box-shadow: 0 2px 7px #20332417; }
     .pdf-wrap { border: 1px solid #d7e1d8; border-radius: 11px; overflow: hidden; background: #f2f5ef; }
@@ -321,7 +322,10 @@
           <div class="quick-controls"><button class="btn" type="button" id="nextPending">다음 미검수</button><button class="btn" type="button" id="nextProblem">다음 문제 발견</button></div>
           <div class="badges" id="questionBadges"></div>
           <nav class="review-shortcuts" aria-label="검수 근거 바로가기">
-            <button type="button" class="btn" id="jumpSource" aria-controls="sourceReference">원본 자료 보기</button>
+            <button type="button" class="btn source-shortcut" id="jumpSource" aria-controls="sourceReference">시험지 원본</button>
+            <button type="button" class="btn source-shortcut" id="jumpAnswer" aria-controls="sourceReference">정답표 원본</button>
+            <button type="button" class="btn source-shortcut" id="jumpTranscript" aria-controls="sourceReference" hidden>대본 원본</button>
+            <button type="button" class="btn source-shortcut" id="jumpAudio" aria-controls="audioSection" hidden>전체 듣기 음원</button>
             <button type="button" class="btn" id="jumpAiEvidence" aria-controls="independentComparisonSection aiAuditSection">AI 판단 근거</button>
             <button type="button" class="btn" id="jumpWarnings" aria-controls="flagList" hidden>추출 주의사항</button>
           </nav>
@@ -379,7 +383,7 @@
           <div class="source-tabs" role="group" aria-label="PDF 자료 선택"><button class="source-tab active" type="button" data-source="question" aria-pressed="true">문제지</button><button class="source-tab" type="button" data-source="answer" aria-pressed="false">정답표</button><button class="source-tab" type="button" data-source="transcript" aria-pressed="false">대본</button></div>
           <div class="pdf-wrap"><iframe id="sourceFrame" title="원본 PDF 미리보기" loading="lazy" referrerpolicy="no-referrer" hidden></iframe><div class="pdf-fallback" id="pdfFallback">문항을 선택하면 원본 PDF가 여기에 표시됩니다.</div></div>
           <div class="source-actions"><p id="sourcePage">원본 페이지 —</p><a id="sourceLink" class="btn" target="_blank" rel="noopener noreferrer" hidden>새 탭에서 열기 ↗</a></div>
-          <div class="media-card" id="audioSection" hidden>
+          <div class="media-card" id="audioSection" tabindex="-1" hidden>
             <h3>듣기 음원 · 문항별 구간 검수</h3>
             <p class="hint">시작·종료 시각은 실제 녹음을 듣고 직접 지정하세요. 저장만으로 검증 완료되지 않습니다.</p>
             <div class="audio-segment" id="audioSegmentPanel" hidden>
@@ -1199,6 +1203,9 @@
         $('audioFeedback').className = `audio-feedback ${kind}`;
       }
       function audioSharedNumbers(q) {
+        // Only the 35th corpus has source-validated shared-dialogue pairs.
+        // Never infer those pairings from a 36th question number.
+        if (q.exam_id !== '035-I-B' || state.examId !== '035-I-B') return [];
         const supplied = q.audio_segment?.shared_questions;
         if (Array.isArray(supplied) && supplied.every(n => Number.isSafeInteger(n) && n >= 1 && n <= 30)) return supplied;
         for (const pair of [[25, 26], [27, 28], [29, 30]]) if (pair.includes(q.number)) return pair;
@@ -1247,7 +1254,7 @@
           ? `전체 원본 길이: ${seconds(duration)}초 · 시작과 종료는 소수 셋째 자리까지 입력` : '전체 원본 길이를 확인하는 중입니다. 재생기에서 음원을 로드하세요.';
         const shared = audioSharedNumbers(q);
         $('audioSharedNote').hidden = shared.length < 2;
-        if (shared.length >= 2) $('audioSharedNote').textContent = `${shared.join('·')}번은 동일한 대화를 공유하므로 이 구간을 저장·검증하면 두 문항에 함께 반영됩니다. 원본 녹음에서 공유 대화 전체의 시작과 끝을 직접 듣고 확인하세요.`;
+        if (shared.length >= 2) $('audioSharedNote').textContent = `${shared.join('·')}번은 동일한 대화 원본을 공유합니다. 음원 구간을 저장·검증하면 두 문항에 함께 반영되지만, 대본 수정·사람의 승인 기록은 다른 문항으로 자동 전파되지 않습니다. 두 대본을 각각 대조하고 구간은 직접 청취하세요.`;
         const clip = segment?.status === 'verified' ? sameOriginURL(segment.clip_url) : null;
         $('audioClipLink').hidden = !clip;
         if (clip) $('audioClipLink').href = clip.href;
@@ -1256,14 +1263,16 @@
         refreshDirty();
       }
       function renderAudioSegment(q, audioUrl) {
-        state.audio.available = q.section === 'listening' && !!audioUrl &&
+        const supported = state.examId === '035-I-B' && q.exam_id === '035-I-B' &&
+          state.capabilities?.audioSegmentWrite === true;
+        state.audio.available = supported && q.section === 'listening' && !!audioUrl &&
           Object.prototype.hasOwnProperty.call(q, 'audio_segment');
         state.audio.preview = null;
         state.audio.heardSignature = null;
         state.audio.durationMs = null;
         state.audio.error = false;
         const segment = audioSegment();
-        $('audioSegmentPanel').hidden = q.section !== 'listening' || !audioUrl;
+        $('audioSegmentPanel').hidden = !supported || q.section !== 'listening' || !audioUrl;
         $('audioStart').value = Number.isSafeInteger(segment?.start_ms) ? seconds(segment.start_ms) : '';
         $('audioEnd').value = Number.isSafeInteger(segment?.end_ms) ? seconds(segment.end_ms) : '';
         audioFeedback(state.audio.available
@@ -1457,11 +1466,24 @@
         updateNavigation();
         refreshAudioActions();
       }
+      function retainedSourceTab(previous, next, tab) {
+        // Same-section questions often cite the same multi-page PDF (35th
+        // shared listening transcripts and 36th reading paper). Preserve the
+        // reviewer's chosen evidence type, not a stale cross-exam document.
+        if (!previous || previous.exam_id !== next.exam_id || previous.section !== next.section)
+          return 'question';
+        if (tab === 'transcript' && next.section === 'listening' && next.transcript_pdf_url)
+          return 'transcript';
+        if (tab === 'answer' && next.answer_pdf_url) return 'answer';
+        return 'question';
+      }
       async function selectQuestion(id, { force = false, focusEditor = false } = {}) {
         if (!force && id === state.selectedId && state.detail) return;
         if (!force && !canNavigate()) return;
         if (state.saving || state.audio.saving) return;
 
+        const previousDetail = state.detail;
+        const previousPdfTab = state.pdfTab;
         const cached = state.detailsCache && state.detailsCache[id];
         if (!force && cached) {
           state.selectedId = id;
@@ -1472,7 +1494,7 @@
           $('audioPlayer').pause();
           clearNotice();
           setLoading(false);
-          state.pdfTab = 'question';
+          state.pdfTab = retainedSourceTab(previousDetail, cached, previousPdfTab);
           renderDetail();
           keepSelectedQuestionVisible();
           focusEditorOnMobile(focusEditor);
@@ -1499,7 +1521,7 @@
           if (!detail || detail.id !== id || !Array.isArray(detail.choices)) throw new Error('문항 상세 응답 형식이 올바르지 않습니다.');
           if (state.detailsCache) state.detailsCache[id] = detail;
           state.detail = detail;
-          state.pdfTab = 'question';
+          state.pdfTab = retainedSourceTab(previousDetail, detail, previousPdfTab);
           renderDetail();
           keepSelectedQuestionVisible();
           focusEditorOnMobile(focusEditor);
@@ -1608,7 +1630,9 @@
         $('transcriptSpacingPreview').hidden = !showSpacingPreview;
         if (showSpacingPreview) textBox('transcriptSpacingPreviewText', q.transcript.display_text, '');
         $('transcriptInput').disabled = state.capabilities?.reviewWrite === false || pendingOrFailed;
-        $('transcriptHint').textContent = `대본 검수 상태: ${statusName(q.transcript?.review_status)} · 원본 PDF ${q.transcript?.source_pdf_page || '—'}쪽 · 오른쪽에서 음원 구간을 별도로 듣고 검증할 수 있습니다. 대본 승인과 구간 검증은 별개입니다.`;
+        const sharedDialogue = audioSharedNumbers(q);
+        $('transcriptHint').textContent = `대본 검수 상태: ${statusName(q.transcript?.review_status)} · 원본 PDF ${q.transcript?.source_pdf_page || '—'}쪽 · ${state.examId === '036-I-B' ? '36회는 전체 원본 음원과 대조하세요. 문항별 구간 검증은 미지원입니다.' : '음원 구간은 별도로 듣고 검증하세요. 대본 승인과 구간 검증은 별개입니다.'}` +
+          (sharedDialogue.length > 1 ? ` · ${sharedDialogue.join('·')}번은 같은 대화 원본을 사용합니다. 한 문항의 대본 수정은 다른 문항에 자동 반영되지 않으므로 양쪽 대본을 따로 대조하세요.` : '');
         $('reviewNote').value = state.failedReviews?.get(q.id)?.input?.note || '';
         $('reviewNote').disabled = state.capabilities?.reviewWrite === false || pendingOrFailed;
         state.baseline = JSON.stringify(draft());
@@ -1653,6 +1677,14 @@
         const q = state.detail;
         renderPdf();
         const audioUrl = q.section === 'listening' ? sourceWithSharedAudio(q.audio_url) : null;
+        // Keep the paper button available when an original is missing: the
+        // reference panel then explains the unavailable source explicitly.
+        $('jumpSource').disabled = false;
+        $('jumpAnswer').disabled = !sourceWithPage(q.answer_pdf_url, q.answer?.source_pdf_page);
+        $('jumpTranscript').hidden = q.section !== 'listening';
+        $('jumpTranscript').disabled = !sourceWithPage(q.transcript_pdf_url, q.transcript?.source_pdf_page);
+        $('jumpAudio').hidden = q.section !== 'listening';
+        $('jumpAudio').disabled = !audioUrl;
         $('audioSection').hidden = q.section !== 'listening';
         const player = $('audioPlayer');
         const wasPreviewing = !!state.audio.preview;
@@ -1670,6 +1702,8 @@
         player.hidden = !audioUrl;
         $('audioFullHint').textContent = q.audio_url && !audioUrl
           ? '음원 주소가 로컬 서버 외부이거나 잘못되어 재생을 차단했습니다.'
+          : state.examId === '036-I-B'
+          ? '36회는 전체 원본 음원 청취만 지원합니다. 문항별 구간·공유 대화 위치는 확인된 데이터가 없어 표시하거나 저장하지 않습니다.'
           : '전체 원본 음원도 재생기에서 언제든 들을 수 있습니다. 구간 미지정 시 자동 분할하거나 검증하지 않습니다.';
         refreshAudioActions();
         const imageList = $('imageList');
@@ -2146,6 +2180,28 @@
         if (kind === 'warnings') target.focus({ preventScroll: true });
         else $('sourceReference').querySelector('.source-tab.active')?.focus({ preventScroll: true });
       }
+      function jumpToOriginal(kind) {
+        if (!state.detail) return;
+        const q = state.detail;
+        const audio = kind === 'audio';
+        const targetUrl = audio ? (q.section === 'listening' ? sourceWithSharedAudio(q.audio_url) : null)
+          : sourceWithPage(({
+            question: q.source_pdf_url, answer: q.answer_pdf_url,
+            transcript: q.transcript_pdf_url,
+          })[kind], ({
+            question: q.source_pdf_page, answer: q.answer?.source_pdf_page,
+            transcript: q.transcript?.source_pdf_page,
+          })[kind]);
+        // The paper shortcut also opens the unavailable-source explanation,
+        // so reviewers can distinguish a missing PDF from a dead button.
+        if (!targetUrl && kind !== 'question') return;
+        if (!audio) { state.pdfTab = kind; renderPdf(); }
+        if (window.matchMedia('(max-width: 1250px)').matches) setReferenceOpen(true);
+        const target = kind === 'question' ? $('sourceReference') :
+          audio ? $('audioSection') : document.querySelector(`.source-tab[data-source="${kind}"]`);
+        target?.scrollIntoView({ block: 'start' });
+        target?.focus({ preventScroll: true });
+      }
       function setReferenceOpen(open, restoreFocus = false) {
         const enabled = open && window.matchMedia('(max-width: 1250px)').matches;
         const mobile = enabled && window.matchMedia('(max-width: 760px)').matches;
@@ -2166,7 +2222,10 @@
       function installHandlers() {
         $('examSelector').addEventListener('change', event => switchExam(event.target.value));
         $('aiDecisionOpenEvidence').addEventListener('click', () => jumpToEvidence('ai'));
-        $('jumpSource').addEventListener('click', () => jumpToEvidence('source'));
+        $('jumpSource').addEventListener('click', () => jumpToOriginal('question'));
+        $('jumpAnswer').addEventListener('click', () => jumpToOriginal('answer'));
+        $('jumpTranscript').addEventListener('click', () => jumpToOriginal('transcript'));
+        $('jumpAudio').addEventListener('click', () => jumpToOriginal('audio'));
         $('jumpAiEvidence').addEventListener('click', () => jumpToEvidence('ai'));
         $('jumpWarnings').addEventListener('click', () => jumpToEvidence('warnings'));
         $('aiRetry').addEventListener('click', retryAiSummary);
