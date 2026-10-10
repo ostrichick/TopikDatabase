@@ -586,6 +586,28 @@ class DisposablePostgres17Concurrency(unittest.TestCase):
         self.assertEqual(bundle[a]["audio_segment"]["human_evidence"]["note"], evidence["note"])
         self.assertEqual(bundle[b]["audio_segment"]["human_evidence"]["note"], evidence["note"])
 
+    def test_80_legacy_status_only_cannot_export_or_serve_clip(self):
+        """Only mutate the disposable PG17 database, never original/operational data."""
+        left, right = (question_id(25), question_id(26))
+        with self.new_store()._write_transaction() as db:
+            db.execute("UPDATE audio_segments SET status='verified' "
+                       "WHERE question_id IN (?,?)", (left, right))
+        store = self.new_store()
+        for qid in (left, right):
+            before = store.get_question(qid, fast=True)["audio_segment"]
+            self.assertEqual(before["status"], "verified")
+            self.assertIsNone(before["human_evidence"])
+            self.assertIsNone(before["clip_url"])
+            bundle = store.get_questions_bundle()["questions"][qid]["audio_segment"]
+            self.assertIsNone(bundle["human_evidence"])
+            self.assertIsNone(bundle["clip_url"])
+            with self.assertRaisesRegex(review_ui.ReviewError, "human evidence"):
+                store.clip_path(qid)
+        with patch("src.audio_35.export_segment") as encoder:
+            with self.assertRaisesRegex(review_ui.ReviewError, "human evidence"):
+                store.export_audio_clip(left)
+        encoder.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1336,7 +1336,9 @@
         $('audioVerify').disabled = state.capabilities?.audioSegmentWrite === false || !enabled || !interval || !same || segment.status !== 'candidate' || !heard || !!state.audio.preview ||
           !Object.entries(evidence).every(([key, value]) => key === 'note' ? value.length >= 20 && value.length <= 2000 :
             key === 'other_question_confirmed' ? value === (audioSharedNumbers(q).length === 2) : value === true);
-        $('audioExport').disabled = state.capabilities?.clipExport === false || !enabled || !segment || segment.status !== 'verified' || !!segment.clip_url || audioDirty();
+        $('audioExport').disabled = state.capabilities?.clipExport === false || !enabled || !segment ||
+          segment.status !== 'verified' || segment.clip_provenance_confirmed !== true ||
+          !!segment.clip_url || audioDirty();
         ['audioStart', 'audioEnd'].forEach(id => { $(id).disabled = state.capabilities?.audioSegmentWrite === false || state.audio.saving || state.saving || state.loading || !state.audio.available; });
       }
       function updateAudioSummary() {
@@ -1352,6 +1354,8 @@
         const savedEvidence = segment?.human_evidence;
         $('audioStoredEvidence').textContent = segment?.status !== 'verified'
           ? '현재 후보 상태입니다. 사람 청취 검증 근거 없음 · 문항 승인과 무관합니다.'
+          : segment.clip_provenance_confirmed !== true && segment.human_evidence?.explicit_declaration === true
+            ? '이 문항의 검증 선언은 있지만 공유 짝 문항의 근거·버전·구간 일치가 미확정입니다. 클립 추출은 차단됩니다.'
           : savedEvidence?.explicit_declaration === true
             ? `사람이 입력한 검증 선언 (청취 사실은 독립 검증되지 않음) · ${savedEvidence.declared_at || '시각 미기록'} · 근거: ${savedEvidence.note}`
             : '기존 검증 상태이지만 사람이 직접 청취했다는 명시적 근거가 기록되지 않았거나 확인되지 않았습니다.';
@@ -1547,7 +1551,8 @@
         const q = state.detail;
         const segment = audioSegment();
         if (!q || !state.audio.available || state.audio.saving || state.saving || state.loading ||
-            segment?.status !== 'verified' || segment.clip_url || audioDirty()) return;
+            segment?.status !== 'verified' || segment.clip_provenance_confirmed !== true ||
+            segment.clip_url || audioDirty()) return;
         state.audio.saving = true;
         refreshAudioActions();
         updateNavigation();

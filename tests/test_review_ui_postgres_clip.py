@@ -8,6 +8,7 @@ PostgreSQL concurrency/error behavior is validated separately during stage 8.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -106,6 +107,27 @@ class Stage8PostgresClipTests(unittest.TestCase):
         with closing(sqlite3.connect(self.db_path)) as db:
             db.executescript(SCHEMA.read_text(encoding="utf-8"))
             db.execute("UPDATE audio_segments SET status='verified',clip_relative_path=NULL,clip_sha256=NULL")
+            # TEST-ONLY synthetic declarations. Stage-8 clips must not be
+            # published merely because a fixture changed a status flag.
+            records = db.execute(
+                "SELECT a.question_id,a.start_ms,a.end_ms,a.source_sha256 "
+                "FROM audio_segments a ORDER BY a.question_id"
+            ).fetchall()
+            for qid, start, end, sha in records:
+                n = int(qid.rsplit("-", 1)[1])
+                pair = review_ui.SHARED_AUDIO.get(n, (n,))
+                evidence = {"before": {"status": "candidate"},
+                    "after": {"start_ms": start, "end_ms": end, "status": "verified"},
+                    "source_sha256": sha, "shared_questions": list(pair),
+                    "verified_by_human_declaration": True,
+                    "human_evidence": {
+                        "listened_to_source": True, "checked_start": True,
+                        "checked_end": True, "checked_transcript": True,
+                        "other_question_confirmed": len(pair) == 2,
+                        "note": "SIMULATED EVIDENCE ONLY: a disposable clip export contract fixture"}}
+                db.execute("INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
+                           "VALUES(?,?,?,?,?,?,?)", ("audio_segment", qid, "verified", "test_fixture_only",
+                            "manual_audio_boundary_35", json.dumps(evidence), "2026-10-10T00:00:00+00:00"))
             db.commit()
         self.calls: list[tuple[str, tuple]] = []
         self.fail_review_insert = [False]
@@ -172,6 +194,68 @@ class Stage8PostgresClipTests(unittest.TestCase):
                 db.execute("SELECT stem,review_status,points FROM questions WHERE id=?", (qid,)).fetchone(),
                 db.execute("SELECT dialogue_text,review_status FROM transcripts WHERE question_id=?", (qid,)).fetchone(),
             )
+
+    def test_legacy_verified_status_without_human_evidence_is_not_exportable_or_downloadable(self):
+        """Status flag or existing clip bytes never stand in for human evidence."""
+        store = self._store(self.pc_media)
+        qid = "035-I-L-025"
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("DELETE FROM review_records WHERE subject_type='audio_segment' "
+                       "AND scope='manual_audio_boundary_35' "
+                       "AND subject_id IN ('035-I-L-025','035-I-L-026')")
+            db.commit()
+        with patch("src.audio_35.export_segment") as encoder:
+            with self.assertRaisesRegex(review_ui.ReviewError, "human evidence"):
+                store.export_audio_clip(qid)
+        encoder.assert_not_called()
+        self.assertEqual(store.get_question(qid)["audio_segment"]["status"], "verified")
+        self.assertIsNone(store.get_question(qid)["audio_segment"]["human_evidence"])
+        self.assertIs(store.get_question(qid)["audio_segment"]["clip_provenance_confirmed"], False)
+        self.assertIsNone(store.get_question(qid)["audio_segment"]["clip_url"])
+
+        # A historical canonical file is not sufficient either; only a temp
+        # copy of the 35th archive and disposable exported bytes are touched.
+        clip_dir = store._clip_output_dir(create=True)
+        filename = "035-I-L-025-026-v1-legacy-test.mp3"
+        clip = clip_dir / filename
+        clip.write_bytes(FAKE_MP3)
+        relative = "topik-past-papers/derived/audio-clips/" + filename
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("UPDATE audio_segments SET clip_relative_path=?,clip_sha256=? "
+                       "WHERE question_id IN ('035-I-L-025','035-I-L-026')",
+                       (relative, hashlib.sha256(FAKE_MP3).hexdigest()))
+            db.commit()
+        self.assertIsNone(store.get_question(qid)["audio_segment"]["clip_url"])
+        self.assertIsNone(store.get_questions_bundle()["questions"][qid]["audio_segment"]["clip_url"])
+        with self.assertRaisesRegex(review_ui.ReviewError, "human evidence"):
+            store.clip_path(qid)
+        with patch("src.audio_35.export_segment") as encoder:
+            with self.assertRaisesRegex(review_ui.ReviewError, "human evidence"):
+                store.export_audio_clip(qid)
+        encoder.assert_not_called()
+        self.assertTrue(clip.is_file(), "Never delete historical artifacts during read-only gating")
+
+    def test_missing_sibling_attestation_hides_link_and_refuses_export_and_serve(self):
+        store = self._store(self.pc_media)
+        with patch("src.audio_35.export_segment", side_effect=self._fake_encoder()):
+            store.export_audio_clip("035-I-L-025")
+        self.assertTrue(store.get_question("035-I-L-025")["audio_segment"]["clip_url"])
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("DELETE FROM review_records WHERE subject_type='audio_segment' "
+                       "AND scope='manual_audio_boundary_35' AND subject_id='035-I-L-026'")
+            db.commit()
+        for number in (25, 26):
+            qid = f"035-I-L-{number:03d}"
+            self.assertIs(store.get_question(qid)["audio_segment"]["clip_provenance_confirmed"], False)
+            self.assertIs(store.get_questions_bundle()["questions"][qid]["audio_segment"]["clip_provenance_confirmed"], False)
+            self.assertIsNone(store.get_question(qid)["audio_segment"]["clip_url"])
+            self.assertIsNone(store.get_questions_bundle()["questions"][qid]["audio_segment"]["clip_url"])
+            with self.assertRaisesRegex(review_ui.ReviewError, "human evidence"):
+                store.clip_path(qid)
+        with patch("src.audio_35.export_segment") as encoder:
+            with self.assertRaisesRegex(review_ui.ReviewError, "human evidence"):
+                store.export_audio_clip("035-I-L-025")
+        encoder.assert_not_called()
 
     def test_first_export_encodes_before_pg_locks_and_links_shared_pair_atomically(self):
         store = self._store(self.pc_media)

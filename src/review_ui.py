@@ -981,13 +981,6 @@ class ReviewStore:
         pair = list(SHARED_AUDIO.get(question["exam_number"], (question["exam_number"],))
                     if self.exam_id == DEFAULT_EXAM_ID else (question["exam_number"],))
         clip_url = None
-        if segment["status"] == "verified" and segment["clip_relative_path"]:
-            # Never reveal an unverified file path supplied by database contents.
-            try:
-                self._clip_file(segment)
-                clip_url = f"/media/{question['id']}/clip"
-            except ReviewError:
-                pass
         # A stored status alone never proves human listening. The evidence is
         # the reviewer's explicit declaration, not the playback UI telemetry.
         records = db.execute(
@@ -995,18 +988,28 @@ class ReviewStore:
             "WHERE subject_type='audio_segment' AND subject_id=? ORDER BY id DESC LIMIT 8",
             (question["id"],),
         ).fetchall()
-        human_evidence = None
-        for record in records:
-            if segment["status"] == "verified" and human_evidence is None and \
-                    record["scope"] == "manual_audio_boundary_35" and record["status"] == "verified":
-                human_evidence = self._audio_attestation(
-                    record["evidence"], record["reviewed_at"], segment, asset["sha256"])
-                break
+        human_evidence = self._audio_evidence_from_records(
+            records, segment, asset["sha256"], pair)
+        pair_provenance = bool(human_evidence)
+        if pair_provenance:
+            try:
+                self._require_shared_clip_provenance(
+                    db, question["id"], segment, asset["sha256"], pair)
+            except ReviewError:
+                pair_provenance = False
+        if pair_provenance and segment["clip_relative_path"]:
+            # Legacy verified status alone cannot authorize download of a clip.
+            try:
+                self._clip_file(segment)
+                clip_url = f"/media/{question['id']}/clip"
+            except ReviewError:
+                pass
         return {"start_ms": segment["start_ms"], "end_ms": segment["end_ms"],
                 "status": segment["status"], "version": segment["version"],
                 "source_duration_ms": round(asset["duration_seconds"] * 1000),
                 "shared_questions": pair, "clip_url": clip_url,
                 "human_evidence": human_evidence,
+                "clip_provenance_confirmed": pair_provenance,
                 "review_history": [self._audio_history_item(r) for r in records]}
 
     @staticmethod
@@ -1024,19 +1027,72 @@ class ReviewStore:
                 "note": declared.get("note", "") if isinstance(declared, dict) and
                 isinstance(declared.get("note", ""), str) else ""}
 
+    @classmethod
+    def _audio_evidence_from_records(cls, records, segment, source_sha, pair):
+        """Proof of a declared review, never proof of the actual listening act.
+
+        Fail closed on the most recent verified human-boundary record. An older
+        valid event must not mask a newer malformed or mismatched declaration.
+        """
+        if segment["status"] != "verified":
+            return None
+        for record in records:
+            if record["scope"] == "manual_audio_boundary_35" and record["status"] == "verified":
+                return cls._audio_attestation(
+                    record["evidence"], record["reviewed_at"], segment,
+                    source_sha, pair)
+        return None
+
+    @classmethod
+    def _require_audio_evidence(cls, db, qid, segment, source_sha, pair):
+        record = db.execute(
+            "SELECT scope,status,evidence,reviewed_at FROM review_records "
+            "WHERE subject_type='audio_segment' AND subject_id=? "
+            "AND scope='manual_audio_boundary_35' AND status='verified' "
+            "ORDER BY id DESC LIMIT 1", (qid,),
+        ).fetchone()
+        attestation = cls._audio_evidence_from_records(
+            [record] if record else [], segment, source_sha, pair)
+        if attestation is None:
+            raise ReviewError("Audio interval has no matching explicit human evidence; keep it unconfirmed")
+        return attestation
+
+    @classmethod
+    def _require_shared_clip_provenance(cls, db, selected_id, selected, source_sha, pair):
+        """Every member must carry the same source and its own audit record."""
+        for number in pair:
+            qid = f"035-I-L-{number:03d}"
+            row = selected if qid == selected_id else db.execute(
+                "SELECT * FROM audio_segments WHERE question_id=?", (qid,),
+            ).fetchone()
+            if not row or any(row[field] != selected[field] for field in
+                    ("status", "start_ms", "end_ms", "version", "source_sha256",
+                     "audio_asset_id", "clip_relative_path", "clip_sha256")):
+                raise Conflict("Shared clip provenance is inconsistent; reload")
+            if row["source_sha256"] != source_sha:
+                raise Conflict("Shared clip source changed; reload")
+            cls._require_audio_evidence(db, qid, row, source_sha, pair)
+
     @staticmethod
-    def _audio_attestation(raw, timestamp, segment, source_sha):
+    def _audio_attestation(raw, timestamp, segment, source_sha, pair=None):
         try:
             recorded = json.loads(raw)
             attest = recorded.get("human_evidence")
             after = recorded.get("after")
+            checks = ("listened_to_source", "checked_start", "checked_end", "checked_transcript")
+            note = attest.get("note") if isinstance(attest, dict) else None
             if recorded.get("verified_by_human_declaration") is True and \
                     isinstance(attest, dict) and isinstance(after, dict) and \
+                    all(attest.get(check) is True for check in checks) and \
+                    type(attest.get("other_question_confirmed")) is bool and \
+                    (pair is None or attest["other_question_confirmed"] is (len(pair) == 2)) and \
+                    isinstance(note, str) and 20 <= len(note.strip()) <= 2000 and \
+                    (pair is None or (len(pair) != 2 or recorded.get("shared_questions") == list(pair))) and \
                     (after.get("start_ms"), after.get("end_ms")) == \
                     (segment["start_ms"], segment["end_ms"]) and \
-                    recorded.get("source_sha256") == source_sha and \
-                    isinstance(attest.get("note"), str):
-                return {"note": attest["note"], "declared_at": timestamp,
+                    after.get("status") == "verified" and \
+                    recorded.get("source_sha256") == source_sha:
+                return {"note": note, "declared_at": timestamp,
                         "explicit_declaration": True}
         except (TypeError, ValueError, AttributeError, KeyError):
             pass
@@ -1156,6 +1212,15 @@ class ReviewStore:
                                  (question["id"],)).fetchone()
             if segment is None or segment["status"] != "verified":
                 raise NotFound("Clip has not been verified and exported")
+            pair = SHARED_AUDIO.get(question["exam_number"], (question["exam_number"],))
+            source = db.execute(
+                "SELECT s.sha256 FROM audio_assets a JOIN source_files s "
+                "ON s.id=a.source_file_id WHERE a.id=?", (segment["audio_asset_id"],),
+            ).fetchone()
+            if not source or source["sha256"] != segment["source_sha256"]:
+                raise Conflict("Original audio identity changed; clip not available")
+            self._require_shared_clip_provenance(
+                db, question["id"], segment, source["sha256"], pair)
             return self._clip_file(segment)
 
     def save_audio_segment(self, question_id: str, payload: dict) -> dict:
@@ -1291,6 +1356,8 @@ class ReviewStore:
             ).fetchone()
             if audio_source is None or audio_source["sha256"] != expected_sha:
                 raise ReviewError("The segment's original audio checksum no longer matches")
+            for qid, segment in zip(qids, rows):
+                self._require_audio_evidence(db, qid, segment, expected_sha, pair)
             source_snapshot = (
                 audio_source["source_file_id"], audio_source["relative_path"],
                 audio_source["sha256"], audio_source["byte_size"],
@@ -1361,6 +1428,8 @@ class ReviewStore:
                     current_source["sha256"], current_source["byte_size"],
                 ) != source_snapshot:
                     raise Conflict("Audio source metadata changed while exporting; no clip was linked")
+                for qid, segment in zip(qids, current):
+                    self._require_audio_evidence(db, qid, segment, expected_sha, pair)
 
                 canonical_now = self._clip_identity(current)
                 if canonical_now is None:
@@ -1794,7 +1863,27 @@ class ReviewStore:
                             pair = list(SHARED_AUDIO.get(question["exam_number"], (question["exam_number"],))
                                         if self.exam_id == DEFAULT_EXAM_ID else (question["exam_number"],))
                             clip_url = None
-                            if segment["status"] == "verified" and segment["clip_relative_path"]:
+                            evidence = (self._audio_attestation(
+                                audio_attestations[qid]["evidence"],
+                                audio_attestations[qid]["reviewed_at"], segment,
+                                asset["sha256"], pair) if qid in audio_attestations else None)
+                            # The clip is a shared source; do not publish an
+                            # apparently usable URL if its partner's review
+                            # attestation is missing or its version differs.
+                            pair_provenance = bool(evidence)
+                            for number in pair:
+                                linked_id = f"035-I-L-{number:03d}"
+                                linked = segments_by_qid.get(linked_id)
+                                linked_audit = audio_attestations.get(linked_id)
+                                if (not linked or not linked_audit or
+                                    any(linked[key] != segment[key] for key in
+                                        ("status", "start_ms", "end_ms", "version",
+                                         "source_sha256", "audio_asset_id", "clip_relative_path", "clip_sha256")) or
+                                    not self._audio_attestation(linked_audit["evidence"],
+                                        linked_audit["reviewed_at"], linked, asset["sha256"], pair)):
+                                    pair_provenance = False
+                                    break
+                            if pair_provenance and segment["clip_relative_path"]:
                                 try:
                                     self._clip_file(segment)
                                     clip_url = self._media_url(qid, "clip")
@@ -1808,10 +1897,8 @@ class ReviewStore:
                                 "source_duration_ms": round(asset["duration_seconds"] * 1000),
                                 "shared_questions": pair,
                                 "clip_url": clip_url,
-                                "human_evidence": (self._audio_attestation(
-                                    audio_attestations[qid]["evidence"],
-                                    audio_attestations[qid]["reviewed_at"], segment,
-                                    asset["sha256"]) if qid in audio_attestations else None),
+                                "human_evidence": evidence,
+                                "clip_provenance_confirmed": pair_provenance,
                                 "review_history": audio_history_by_qid.get(qid, []),
                             }
 
