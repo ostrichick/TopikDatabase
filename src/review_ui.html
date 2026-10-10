@@ -116,6 +116,7 @@
     .review-decision-cue.newer h3 { color: #873c33; }
     .review-decision-cue p { margin: 0 0 10px; font-size: .94rem; line-height: 1.65; color: #544b3c; }
     .review-decision-cue .btn { min-height: 44px; font-size: .94rem; }
+    #sharedTranscriptGuide p { font-size: 1rem; line-height: 1.7; }
     .ai-decision-panel { margin: 0 0 18px; border: 1px solid #cbd9e3; border-left: 4px solid #547a95; border-radius: 11px; padding: 14px 16px; background: #f6f9fc; }
     .ai-decision-panel.attention { border-color: #ddbc89; border-left-color: #ae6e29; background: #fffaf2; }
     .ai-decision-panel h3 { margin: 0 0 5px; font-size: 1.04rem; line-height: 1.5; color: #28455b; }
@@ -354,6 +355,11 @@
           <div class="section-card" id="transcriptEditorSection" hidden>
             <h3>듣기 대본 검수</h3>
             <label class="small-label" for="transcriptInput">대본 · 원본 PDF와 대조</label><textarea id="transcriptInput" rows="7" spellcheck="false" placeholder="추출 대본을 확인하고 필요한 부분만 수정하세요."></textarea>
+            <div id="sharedTranscriptGuide" class="review-decision-cue" hidden role="note">
+              <strong id="sharedTranscriptTitle">공유 대본 · 각각 검수 필요</strong>
+              <p id="sharedTranscriptText">공유 대본의 수정은 짝 문항의 출처와 버전을 확인해야 합니다.</p>
+              <button type="button" class="btn" id="sharedTranscriptSibling">짝 문항 확인</button>
+            </div>
             <div id="transcriptSpacingPreview" hidden>
               <span class="small-label">문장부호 교정 미리보기 · 승인된 대본 및 원본 DB 텍스트는 변경하지 않음</span>
               <div class="readonly" id="transcriptSpacingPreviewText"></div>
@@ -548,6 +554,53 @@
           input.choices.every((value, index) =>
             detail.choices.find(choice => Number(choice.number) === index + 1)?.text === value) &&
           (detail.section !== 'listening' || detail.transcript?.text === input.transcript_text);
+      }
+      function sharedTranscriptChanged(detail, input) {
+        return detail?.exam_id === '035-I-B' &&
+          audioSharedNumbers(detail).length === 2 &&
+          detail.transcript?.text !== input.transcript_text;
+      }
+      async function prepareSharedTranscriptCorrection(detail, input) {
+        if (detail.shared_transcript_state?.consistent === false) {
+          const error = new Error('공유 대본이 이미 서로 다릅니다. 자동 공동 수정하지 않고 원본과 기존 이력을 별도로 대조해야 합니다.');
+          error.status = 409;
+          throw error;
+        }
+        const pair = audioSharedNumbers(detail);
+        const number = pair.find(value => value !== detail.number);
+        if (!number || detail.exam_id !== '035-I-B') throw new Error('검증된 35회 공유 대본 관계가 없습니다.');
+        const siblingId = `035-I-L-${String(number).padStart(3, '0')}`;
+        // Refresh the sibling exactly once for this deliberate correction.
+        // The bundle is a navigation cache, not authoritative CAS evidence.
+        const sibling = await request(`/api/questions/${encodeURIComponent(siblingId)}?fast=1`);
+        if (!sibling || sibling.id !== siblingId || sibling.exam_id !== '035-I-B' ||
+            sibling.transcript?.text !== detail.transcript?.text ||
+            !Number.isSafeInteger(sibling.version)) {
+          const error = new Error('짝 문항의 대본·검수 상태가 예상과 다릅니다. 원본과 두 문항을 다시 대조한 후 수정하세요.');
+          error.status = 409;
+          throw error;
+        }
+        const resetReview = sibling.review_status !== 'needs_manual_review' ||
+          sibling.transcript?.review_status !== 'needs_manual_review';
+        const confirmed = window.confirm(`${detail.number}·${number}번은 같은 대본 원본을 공유합니다. 두 문항의 현재 대본이 동일합니다. 수정된 대본을 양쪽에 함께 저장합니다. ${resetReview
+          ? `${number}번은 이미 ${statusName(sibling.review_status)} 상태이므로 이전 승인·반려 기록은 보존하면서 문항과 대본 상태를 '검토 필요'로 전환합니다. 반드시 별도로 재검수·승인해야 합니다.`
+          : `${number}번은 '검토 필요' 상태를 유지하며 자동 승인되지 않습니다.`} 음원 후보·검증 구간은 변경되지 않습니다. 계속할까요?`);
+        if (!confirmed) return null;
+        return { other_question_id: siblingId, other_version: sibling.version, confirm_shared_source: true,
+          ...(resetReview ? { confirm_reset_review: true } : {}) };
+      }
+      function invalidateSharedTranscriptCache(ack) {
+        const sibling = ack?.shared_transcript_updated;
+        if (!sibling) return;
+        if (typeof sibling.id !== 'string' || !/^035-I-L-0(25|26|27|28|29|30)$/.test(sibling.id) ||
+            !Number.isSafeInteger(sibling.version) || sibling.review_status !== 'needs_manual_review')
+          throw new Error('공유 대본 저장 결과의 짝 문항 버전을 확인할 수 없습니다.');
+        delete state.detailsCache[sibling.id];
+        state.bundleProtectedIds.add(sibling.id);
+        state.aiHistoryLoadedIds.delete(sibling.id);
+        const item = state.items.find(entry => entry.id === sibling.id);
+        if (item) { item.review_version = sibling.version; item.status = 'needs_manual_review'; }
+        state.committedReviews.delete(sibling.id);
       }
       function aiAudit(item) {
         const value = item?.ai_audit;
@@ -1632,7 +1685,16 @@
         $('transcriptInput').disabled = state.capabilities?.reviewWrite === false || pendingOrFailed;
         const sharedDialogue = audioSharedNumbers(q);
         $('transcriptHint').textContent = `대본 검수 상태: ${statusName(q.transcript?.review_status)} · 원본 PDF ${q.transcript?.source_pdf_page || '—'}쪽 · ${state.examId === '036-I-B' ? '36회는 전체 원본 음원과 대조하세요. 문항별 구간 검증은 미지원입니다.' : '음원 구간은 별도로 듣고 검증하세요. 대본 승인과 구간 검증은 별개입니다.'}` +
-          (sharedDialogue.length > 1 ? ` · ${sharedDialogue.join('·')}번은 같은 대화 원본을 사용합니다. 한 문항의 대본 수정은 다른 문항에 자동 반영되지 않으므로 양쪽 대본을 따로 대조하세요.` : '');
+          (sharedDialogue.length > 1 ? ` · ${sharedDialogue.join('·')}번은 같은 원본을 사용합니다. 대본은 양쪽 버전·검수 상태를 확인한 뒤 명시적으로 공동 수정할 수 있습니다. 짝 문항은 별도로 검수·승인해야 합니다.` : '');
+        $('sharedTranscriptGuide').hidden = sharedDialogue.length !== 2;
+        if (sharedDialogue.length === 2) {
+          const sibling = sharedDialogue.find(number => number !== q.number);
+          $('sharedTranscriptTitle').textContent = `${sharedDialogue.join('·')}번 · 공유 원본 대본`;
+        $('sharedTranscriptText').textContent = q.shared_transcript_state?.consistent === false
+          ? `${sibling}번과 현재 저장된 공통 대본이 다릅니다. 원본·검수 이력을 먼저 대조하세요. 이 상태에서는 신규 승인을 차단하며 자동 공동 수정도 허용하지 않습니다.`
+          : `${sibling}번의 내용과 승인 상태는 독립적입니다. 대본 공동 수정은 양쪽 최신 버전·원본 일치를 검사하고 동의를 받습니다. 이미 승인·반려된 짝 문항은 이전 이력을 보존한 채 '검토 필요'로 명시적으로 되돌리고 다시 승인해야 합니다. 음원 구간 검증은 별개입니다.`;
+          $('sharedTranscriptSibling').dataset.siblingId = `035-I-L-${String(sibling).padStart(3, '0')}`;
+        }
         $('reviewNote').value = state.failedReviews?.get(q.id)?.input?.note || '';
         $('reviewNote').disabled = state.capabilities?.reviewWrite === false || pendingOrFailed;
         state.baseline = JSON.stringify(draft());
@@ -2038,6 +2100,28 @@
         if (!state.detail || state.loading || state.saving || state.audio?.saving) return;
         if (reviewWritesBlocked()) { notice('먼저 진행 중인 저장 또는 실패 문항을 확인하세요.', 'info'); return; }
         const input = draft();
+        let sharedTranscript = null;
+        if (sharedTranscriptChanged(state.detail, input)) {
+          if (!input.note.trim()) {
+            notice('공유 대본의 수정 근거(원본 PDF·음원 대조 내용)를 검수 메모에 기록하세요.', 'info');
+            $('reviewNote').focus();
+            return;
+          }
+          // Lock navigation and duplicate submits during the independent
+          // sibling GET. No POST is issued unless the reviewer confirms both.
+          state.saving = true;
+          setLoading(false);
+          try {
+            sharedTranscript = await prepareSharedTranscriptCorrection(state.detail, input);
+            if (!sharedTranscript) return;
+          } catch (error) {
+            notice(error.message, 'error', error.status === 409);
+            return;
+          } finally {
+            state.saving = false;
+            setLoading(false);
+          }
+        }
         if (status === 'needs_manual_review' && ['verified', 'rejected'].includes(state.detail.review_status)) {
           if (!dirty()) {
             notice('이 문항은 이미 최종 판정되었습니다. 수정할 내용이 없으므로 승인·반려 상태를 유지합니다.', 'info');
@@ -2058,7 +2142,7 @@
         const reviewOrder = visibleHasCurrent ? state.visible : state.items;
         const currentIndex = reviewOrder.findIndex(item => item.id === state.detail.id);
         const nextId = status === 'verified' && currentIndex >= 0 ? reviewOrder[currentIndex + 1]?.id : null;
-        if (status === 'verified' && nextId && state.detailsCache?.[nextId] && !audioDirty()) {
+        if (status === 'verified' && nextId && state.detailsCache?.[nextId] && !audioDirty() && !sharedTranscript) {
           return sendOptimisticApproval(state.detail.id, input, nextId);
         }
         const approvedId = state.detail.id;
@@ -2071,11 +2155,15 @@
           const id = state.detail.id;
           const submitted = { version: state.detail.version, status, stem: input.stem,
             choices: input.choices, transcript_text: input.transcript_text, note: input.note };
+          if (sharedTranscript) submitted.shared_transcript = sharedTranscript;
           const updated = verifyReviewAck(await request(`/api/questions/${encodeURIComponent(id)}/review?fast=1`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Review-Token': state.csrfToken },
             body: JSON.stringify(submitted)
           }), id, status, submitted);
+          if (sharedTranscript && updated.shared_transcript_updated?.id !== sharedTranscript.other_question_id)
+            throw new Error('짝 문항 대본 저장 확인 응답이 없습니다. 서버 상태를 다시 조회하세요.');
+          invalidateSharedTranscriptCache(updated);
           // A short response is returned only after the database transaction
           // commits. Reuse the detailed question already in memory.
           const detail = Array.isArray(updated.choices) ? updated : {
@@ -2107,7 +2195,8 @@
           // A user may keep editing text or an audio interval during the POST.
           // Re-rendering here would silently discard those unsaved changes.
           if (!nextQuestionId && !dirty() && !audioDirty()) renderDetail();
-          notice(status === 'verified' ? '문항이 검수 승인되었습니다.' : status === 'rejected' ? '문항이 반려되었습니다.' : '수정 내용이 미검수 상태로 저장되었습니다.', 'success');
+          notice(sharedTranscript ? `공유 대본을 두 문항에 함께 저장했습니다. ${sharedTranscript.other_question_id}은(는) 승인되지 않았으며 개별 대조가 필요합니다.` :
+            status === 'verified' ? '문항이 검수 승인되었습니다.' : status === 'rejected' ? '문항이 반려되었습니다.' : '수정 내용이 미검수 상태로 저장되었습니다.', 'success');
           // Render the next question as soon as commit is confirmed. Refresh
           // cross-tab status in the background without delaying navigation.
           counts();
@@ -2120,7 +2209,17 @@
             notice(`승인은 저장됐지만 목록 갱신에 실패했습니다: ${error.message}`, 'info');
           }
         } catch (error) {
-          notice(error.message, 'error', error.status === 409);
+          if (sharedTranscript && error.status !== 409 && error.status !== 400) {
+            // The COMMIT may have succeeded while its response was lost.
+            // Preserve the submitted snapshot; never retry a paired write.
+            state.failedReviews.set(approvedId, {
+              input, before: state.detail, sharedTranscript, error: error.message || String(error)
+            });
+            renderReviewSync();
+            notice('공유 대본 저장 결과가 불확실합니다. 다시 저장하지 말고 서버 내용 및 짝 문항을 확인하세요.', 'error', true);
+          } else {
+            notice(error.message, 'error', error.status === 409);
+          }
         } finally {
           state.saving = false;
           setLoading(false);
@@ -2230,6 +2329,10 @@
         $('jumpWarnings').addEventListener('click', () => jumpToEvidence('warnings'));
         $('aiRetry').addEventListener('click', retryAiSummary);
         $('reviewDecisionEvidence').addEventListener('click', renderDecisionEvidence);
+        $('sharedTranscriptSibling').addEventListener('click', () => {
+          const id = $('sharedTranscriptSibling').dataset.siblingId;
+          if (id) selectQuestion(id, { focusEditor: true });
+        });
         $('aiAuditSection').addEventListener('toggle', async () => {
           const section = $('aiAuditSection');
           const current = state.detail;
@@ -2344,12 +2447,29 @@
             const noOp = before?.review_status === 'verified' && !failed.input.note.trim() &&
               matchesReviewInput(before, failed.input);
             const last = state.detail.history?.[0];
-            const committed = state.detail.review_status === 'verified' &&
+            let committed = state.detail.review_status === 'verified' &&
               matchesReviewInput(state.detail, failed.input) &&
               (noOp ? state.detail.version === before.version :
                 state.detail.version === before?.version + 1 &&
                 last?.scope === 'manual_question_review' && last?.status === 'verified' &&
                 (last.note || '') === failed.input.note);
+            if (committed && failed.sharedTranscript) {
+              try {
+                const other = await request(`/api/questions/${encodeURIComponent(failed.sharedTranscript.other_question_id)}?fast=1`);
+                committed = other?.id === failed.sharedTranscript.other_question_id &&
+                  other?.review_status === 'needs_manual_review' &&
+                  other?.version === failed.sharedTranscript.other_version + 1 &&
+                  other?.transcript?.text === failed.input.transcript_text;
+                if (committed) {
+                  invalidateSharedTranscriptCache({ shared_transcript_updated: {
+                    id: other.id, version: other.version, review_status: other.review_status,
+                  } });
+                }
+              } catch (error) {
+                notice(`짝 문항 서버 조회 실패: ${error.message}. 결과가 불확실하므로 다시 저장할 수 없습니다.`, 'error', true);
+                return;
+              }
+            }
             state.failedReviews.delete(id);
             renderReviewSync();
             renderDetail();

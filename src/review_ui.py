@@ -993,6 +993,25 @@ class ReviewStore:
                 "source_duration_ms": round(asset["duration_seconds"] * 1000),
                 "shared_questions": pair, "clip_url": clip_url}
 
+    def _shared_transcript_state(self, db, number: int) -> dict | None:
+        """Actual 35th shared-source identity, never inferred for 36th."""
+        pair = SHARED_AUDIO.get(number) if self.exam_id == DEFAULT_EXAM_ID else None
+        if not pair:
+            return None
+        ids = sorted(f"035-I-L-{n:03d}" for n in pair)
+        rows = db.execute(
+            "SELECT q.id,q.review_status,t.source_file_id,t.source_pdf_page,t.dialogue_text "
+            "FROM questions q LEFT JOIN transcripts t ON t.question_id=q.id "
+            "WHERE q.id IN (?,?) ORDER BY q.id", ids,
+        ).fetchall()
+        sibling_id = next(key for key in ids if key != f"035-I-L-{number:03d}")
+        coherent = len(rows) == 2 and all(r["source_file_id"] is not None for r in rows) and \
+            all(rows[0][name] == rows[1][name] for name in
+                ("source_file_id", "source_pdf_page", "dialogue_text"))
+        sibling = next((r for r in rows if r["id"] == sibling_id), None)
+        return {"other_question_id": sibling_id, "consistent": coherent,
+                "other_review_status": sibling["review_status"] if sibling else None}
+
     @staticmethod
     def _file_sha256(path: Path) -> str:
         digest = hashlib.sha256()
@@ -1535,6 +1554,9 @@ class ReviewStore:
                 "preview_flags": json.loads(question["preview_flags_json"]),
                 "history": history,
             }
+            shared_state = self._shared_transcript_state(db, question["exam_number"])
+            if shared_state:
+                result["shared_transcript_state"] = shared_state
             if ai_audit:
                 result["ai_audit"] = ai_audit
             return self._add_punctuation_preview(result)
@@ -1569,7 +1591,7 @@ class ReviewStore:
                 choices_by_qid[c["question_id"]].append({"number": c["number"], "text": c["text"]})
 
             transcript_rows = db.execute(
-                "SELECT t.question_id,t.dialogue_text AS text,t.source_pdf_page,"
+                "SELECT t.question_id,t.dialogue_text AS text,t.source_file_id,t.source_pdf_page,"
                 "t.review_status,t.warnings_json FROM transcripts t "
                 "JOIN questions q ON q.id=t.question_id "
                 "JOIN sections s ON s.id=q.section_id WHERE s.exam_id=?", (self.exam_id,)
@@ -1578,11 +1600,34 @@ class ReviewStore:
             for t in transcript_rows:
                 item = dict(t)
                 qid = item.pop("question_id")
+                item.pop("source_file_id", None)
                 try:
                     item["warnings"] = json.loads(item.pop("warnings_json"))
                 except (ValueError, TypeError):
                     item["warnings"] = []
                 transcript_by_qid[qid] = item
+
+            # Shared-source consistency derives from the same snapshot as
+            # the bundle. No extra roundtrip and no 36th pair inference.
+            if self.exam_id == DEFAULT_EXAM_ID:
+                source_by_qid = {r["question_id"]: r for r in transcript_rows}
+                shared_states = {}
+                row_by_id = {row["id"]: row for row in rows}
+                for number, pair in SHARED_AUDIO.items():
+                    current, other = (f"035-I-L-{n:03d}" for n in pair)
+                    a, b = source_by_qid.get(current), source_by_qid.get(other)
+                    # Source identity itself is checked in get_question and
+                    # before any write; bundle reports text/page consistency.
+                    consistent = bool(a and b and a["source_file_id"] == b["source_file_id"] and
+                                      a["text"] == b["text"] and
+                                      a["source_pdf_page"] == b["source_pdf_page"])
+                    selected = f"035-I-L-{number:03d}"
+                    sibling = other if selected == current else current
+                    shared_states[selected] = {"other_question_id": sibling,
+                        "consistent": consistent,
+                        "other_review_status": row_by_id[sibling]["review_status"] if sibling in row_by_id else None}
+            else:
+                shared_states = {}
 
             image_rows = db.execute(
                 "SELECT qi.question_id,qi.image_key FROM question_images qi "
@@ -1717,6 +1762,8 @@ class ReviewStore:
                     "preview_flags": json.loads(question["preview_flags_json"]),
                     "history": history,
                 }
+                if qid in shared_states:
+                    q_data["shared_transcript_state"] = shared_states[qid]
                 questions_map[qid] = self._add_punctuation_preview(q_data)
 
             return {
@@ -1730,8 +1777,8 @@ class ReviewStore:
         if not isinstance(payload, dict):
             raise ReviewError("Expected JSON object")
         allowed = {"version", "status", "stem", "choices", "transcript_text", "note"}
-        if set(payload) != allowed:
-            raise ReviewError("Review payload must contain only version, status, stem, choices, transcript_text and note")
+        if set(payload) not in (allowed, allowed | {"shared_transcript"}):
+            raise ReviewError("Review payload has unexpected fields")
         if type(payload["version"]) is not int or payload["version"] < 0:
             raise ReviewError("Invalid review version")
         if payload["status"] not in STATUSES:
@@ -1754,11 +1801,100 @@ class ReviewStore:
             raise ReviewError("Invalid review note")
         if payload["status"] == "rejected" and not payload["note"].strip():
             raise ReviewError("A rejection reason is required")
+        if "shared_transcript" in payload:
+            shared = payload["shared_transcript"]
+            if not isinstance(shared, dict) or set(shared) not in (
+                {"other_question_id", "other_version", "confirm_shared_source"},
+                {"other_question_id", "other_version", "confirm_shared_source", "confirm_reset_review"},
+            ) or type(shared["other_version"]) is not int or shared["other_version"] < 0 \
+                    or shared["confirm_shared_source"] is not True or \
+                    not isinstance(shared["other_question_id"], str) or \
+                    ("confirm_reset_review" in shared and shared["confirm_reset_review"] is not True):
+                raise ReviewError("Shared transcript requires explicit paired question/version confirmation")
+            if not payload["note"].strip():
+                raise ReviewError("Shared transcript correction requires an original-source review note")
         return payload
+
+    def _locked_shared_transcripts(self, db, question_id: str, number: int, new_text: str,
+                                   shared: dict | None) -> dict | None:
+        """Guard a real 35th common dialogue; never silently edit a sibling.
+
+        This runs inside the existing review write transaction. The caller
+        locks both question IDs in sorted order *before* this check; audio
+        boundary writers use the same order. Versions and source provenance
+        are checked while the locks are held. The sibling's human status is
+        never promoted, rejected or changed implicitly.
+        """
+        pair = SHARED_AUDIO.get(number) if self.exam_id == DEFAULT_EXAM_ID else None
+        if not pair:
+            if shared is not None:
+                raise ReviewError("This exam/question has no confirmed shared-transcript correction")
+            return None
+        qids = sorted(f"035-I-L-{n:03d}" for n in pair)
+        if question_id not in qids:
+            raise Conflict("Shared transcript source/question mapping is inconsistent")
+        sibling_id = next(qid for qid in qids if qid != question_id)
+        if shared is None:
+            raise Conflict(f"{pair[0]}·{pair[1]}번 공유 대본은 한쪽만 수정할 수 없습니다. 짝 문항을 대조하고 명시적으로 함께 수정하세요.")
+        if shared["other_question_id"] != sibling_id:
+            raise Conflict("Shared transcript sibling is not the registered 35th source pair")
+        sibling = self._question(db, sibling_id)
+        if sibling["section"] != "listening" or sibling["exam_number"] not in pair:
+            raise Conflict("The paired source is not a registered 35th listening question")
+        source_rows = db.execute(
+            "SELECT question_id,source_file_id,source_pdf_page,dialogue_text,review_status "
+            "FROM transcripts WHERE question_id IN (?,?) ORDER BY question_id",
+            qids,
+        ).fetchall()
+        if len(source_rows) != 2:
+            raise Conflict("Shared dialogue provenance is incomplete; no transcript was changed")
+        by_id = {r["question_id"]: r for r in source_rows}
+        first, second = (by_id[qid] for qid in qids)
+        if first["source_file_id"] != second["source_file_id"] or \
+                first["source_pdf_page"] != second["source_pdf_page"] or \
+                first["dialogue_text"] != second["dialogue_text"]:
+            raise Conflict("Shared dialogue records already differ; reconcile source and individual history before editing")
+        original_status = sibling["review_status"]
+        original_transcript_status = by_id[sibling_id]["review_status"]
+        recheck_required = original_status != "needs_manual_review" or \
+            original_transcript_status != "needs_manual_review"
+        if recheck_required and shared.get("confirm_reset_review") is not True:
+            raise Conflict("Paired question is already reviewed. Explicitly confirm reverting its status to needs_manual_review, while preserving past approvals")
+        if self._version(db, sibling_id) != shared["other_version"]:
+            raise Conflict("The paired question changed in another tab. Reload both questions before shared correction")
+        if new_text == first["dialogue_text"]:
+            raise ReviewError("Shared transcript confirmation is only for an actual transcript correction")
+        return {"other_question_id": sibling_id,
+                "old_text": by_id[sibling_id]["dialogue_text"],
+                "other_version": shared["other_version"],
+                "previous_question_status": original_status,
+                "previous_transcript_status": original_transcript_status,
+                "explicit_recheck": recheck_required,
+                "source_file_id": first["source_file_id"],
+                "source_pdf_page": first["source_pdf_page"]}
 
     def save_review(self, question_id: str, payload: dict, *, fast_response: bool = False) -> dict:
         self._list_questions_cache = None
         with self._review_write_transaction(question_id) as db:
+            # Explicit two-question corrections must lock in the same fixed
+            # order as shared-audio writes. Never first hold the requested
+            # question lock and then wait on the sibling (reverse order).
+            requested_shared = payload.get("shared_transcript") if isinstance(payload, dict) else None
+            if self.exam_id == DEFAULT_EXAM_ID and \
+                    isinstance(question_id, str) and QUESTION_ID.fullmatch(question_id):
+                try:
+                    number = int(question_id.rsplit("-", 1)[-1])
+                except ValueError:
+                    number = -1
+                pair = SHARED_AUDIO.get(number)
+                if pair:
+                    ids = sorted(f"035-I-L-{n:03d}" for n in pair)
+                    if self.backend == "postgres":
+                        locked = db.execute(
+                            "SELECT id FROM questions WHERE id IN (?,?) ORDER BY id FOR UPDATE", ids
+                        ).fetchall()
+                        if len(locked) != 2:
+                            raise Conflict("Paired questions are missing; shared transcript cannot be changed")
             question = self._lock_question(db, question_id)
             old_choices = [row["text"] for row in db.execute(
                 "SELECT text FROM choices WHERE question_id=? ORDER BY number", (question_id,)
@@ -1772,6 +1908,22 @@ class ReviewStore:
             version = self._version(db, question_id)
             if version != payload["version"]:
                 raise Conflict("This question was saved in another tab. Reload before editing again.")
+            if payload["status"] == "verified" and question["section"] == "listening" and \
+                    self.exam_id == DEFAULT_EXAM_ID and question["exam_number"] in SHARED_AUDIO and \
+                    requested_shared is None:
+                shared_state = self._shared_transcript_state(db, question["exam_number"])
+                if not shared_state or not shared_state["consistent"]:
+                    raise Conflict("Shared transcript sources differ. Do not approve until the paired dialogue is reconciled")
+            correction = None
+            if old_transcript != payload["transcript_text"] and \
+                    self.exam_id == DEFAULT_EXAM_ID and question["section"] == "listening" and \
+                    question["exam_number"] in SHARED_AUDIO:
+                correction = self._locked_shared_transcripts(
+                    db, question_id, question["exam_number"], payload["transcript_text"],
+                    payload.get("shared_transcript"),
+                )
+            elif payload.get("shared_transcript") is not None:
+                raise ReviewError("Shared correction confirmation requires changing a confirmed 35th shared transcript")
             old = {"stem": question["stem"], "choices": old_choices,
                    "transcript_text": old_transcript, "status": question["review_status"]}
             new = {"stem": payload["stem"], "choices": payload["choices"],
@@ -1788,6 +1940,32 @@ class ReviewStore:
                 if transcript_row:
                     db.execute("UPDATE transcripts SET dialogue_text=?, review_status=? WHERE question_id=?",
                                (new["transcript_text"], new["status"], question_id))
+                if correction:
+                    other = correction["other_question_id"]
+                    # Review decisions are independent. Source revisions make
+                    # older sibling approvals stale ONLY after explicit
+                    # reviewer consent; historical approvals remain append-only.
+                    db.execute("UPDATE transcripts SET dialogue_text=?,review_status='needs_manual_review' "
+                               "WHERE question_id=?", (new["transcript_text"], other))
+                    if correction["explicit_recheck"]:
+                        db.execute("UPDATE questions SET review_status='needs_manual_review' WHERE id=?", (other,))
+                    db.execute(
+                        "INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        ("question", other, "needs_manual_review", "local_reviewer",
+                         "shared_transcript_source_correction",
+                         json.dumps({"paired_question_id": question_id,
+                                     "before": correction["old_text"],
+                                     "after": new["transcript_text"],
+                                     "source_file_id": correction["source_file_id"],
+                                     "source_pdf_page": correction["source_pdf_page"],
+                                     "previous_question_status": correction["previous_question_status"],
+                                     "previous_transcript_status": correction["previous_transcript_status"],
+                                     "human_approval_changed": correction["explicit_recheck"],
+                                     "historical_approvals_preserved": True,
+                                     "explicit_pair_recheck": correction["explicit_recheck"]}, ensure_ascii=False),
+                         datetime.now(timezone.utc).isoformat(timespec="seconds")),
+                    )
                 db.execute(
                     "INSERT INTO review_records(subject_type,subject_id,status,reviewer,scope,evidence,reviewed_at) "
                     "VALUES(?,?,?,?,?,?,?)",
@@ -1829,7 +2007,10 @@ class ReviewStore:
                     "last_human_review": last_human,
                     "saved_review_id": last_human["id"] if saved and last_human else None,
                     "saved_reviewed_at": last_human["reviewed_at"] if saved and last_human else None,
-                    "requires_image": bool(question["requires_image"]), "saved": saved}
+                    "requires_image": bool(question["requires_image"]), "saved": saved,
+                    "shared_transcript_updated": ({"id": correction["other_question_id"],
+                        "version": correction["other_version"] + 1,
+                        "review_status": "needs_manual_review"} if correction else None)}
         return self.get_question(question_id)
 
     def media_path(self, question_id: str, kind: str) -> Path:

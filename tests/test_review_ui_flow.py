@@ -54,6 +54,8 @@ async function scenario(status, { fail = false, last = false, slowList = false }
       return result;
     },
     reviewWritesBlocked: () => false,
+    sharedTranscriptChanged: () => false,
+    invalidateSharedTranscriptCache: () => {},
     audioDirty: () => false,
     counts: () => events.push('counts'),
     filterItems: () => events.push('filter'),
@@ -128,6 +130,7 @@ function source(from, until) {
 }
 const functions = [
   source('function verifyReviewAck(', 'function matchesReviewInput('),
+  source('function sharedTranscriptChanged(', 'function aiAudit('),
   source('function draft() {', 'function audioSegment() {'),
   source('function audioSegment() {', 'function seconds('),
   source('function audioDirty() {', 'function audioFeedback('),
@@ -758,7 +761,7 @@ for (const invalid of [{...result,id:'q9'},{...result,version:2},{...result,requ
    {...result,saved:false},{...result,review_status:'rejected'}]) {
   assert.throws(()=>ack(invalid,'q1','verified',input));
 }
-const matches = vm.runInNewContext('('+getFn('matchesReviewInput','aiAudit').trim()+')');
+const matches = vm.runInNewContext('('+getFn('matchesReviewInput','sharedTranscriptChanged').trim()+')');
 assert.equal(matches({stem:'S',section:'listening',choices:[{number:1,text:'a'}],transcript:{text:'t'}},
   {stem:'S',choices:['a'],transcript_text:'t'}),true);
 assert.equal(matches({stem:'S',section:'listening',choices:[{number:1,text:'a'}],transcript:{text:'old'}},
