@@ -48,3 +48,13 @@
 3. **프로세스 간소화 — 다음:** 첫 70문항 bundle+개별 상세 요청의 중앙 DB 지연/비용을 계측해 첫 문항 로딩을 최적화. 현재 초기 표시에서 bundle 응답을 기다리지 않도록 변경했지만 완전한 요청 비용 검증은 추가 측정이 필요하다.
 
 기존 F2–F5, F3 성능, 인간 검수·AI 상태 신뢰성 수정은 이번 작업에서 회귀 보호만 했고 중복 구현하지 않았다.
+
+## 재개 후 누락 경로 보완 (2026-10-10)
+
+작업 재확인 시 `bc427a0` 구현은 커밋·작업 트리에 정상 반영돼 있었지만, 실제 **기존 AI 감사 근거**를 모바일에서 여는 경로 한 건의 결함을 발견했다.
+
+- 원인: `jumpToEvidence('ai')`가 기존 AI 감사가 있는 문항에 대해 원본 패널 안쪽의 `#aiAuditSection`만 `open`으로 전환했다. 화면 폭 ≤1250px에서는 `#sourceReference`가 닫힌 상태일 수 있어, `AI 판단 근거`를 눌러도 근거가 실제로 보이지 않았다. 기존 Node 테스트는 독립 Gemini·ChatGPT 비교 근거로 이동하는 경로만 검증했다.
+- 재현: `tests/test_review_mobile_workspace.py`에 기존 AI 감사 기록이 존재할 때 **부모 원본 패널까지 열려야 한다**는 테스트를 추가. 수정 전 320/390px에서 `aria-expanded=false` 실패 재현.
+- 수정: 기존 AI 감사를 열 때 원본 패널이 off-canvas인 ≤1250px에서는 `setReferenceOpen(true)`를 먼저 호출하고 상세 기록을 펼친다. 독립 비교 감사나 데스크톱은 기존 경로를 유지한다. 검수 승인·버전·초안·DB/API 호출은 바꾸지 않는다.
+- 재검증: 새 Node 재현 테스트 및 F2/F3/35·36 UI 확대 회귀 **51개 실행, 실패/오류 0, skip 5** (실 PostgreSQL 경합용 격리 DB 미설정). 실제 inline JavaScript 전체 `node --check`, `git diff --check` 통과. Playwright-core와 설치된 Chromium의 임시 localhost 읽기 fixture에서 기존 감사가 포함된 320/390/1366px 실제 브라우저 모두 `#aiAuditSection.open=true`와 키보드 summary focus, 원본 패널/모바일 dialog 열림, 페이지 가로 overflow 없음 확인. `GET /api/questions-fast` 추가 호출은 0회. 화면 증거는 무시 경로 `.stage9-runtime/audit_shortcut_{320,390,1366}.png`에 기록했다.
+- 이 추가 수정 후에도 기존 운영 PostgreSQL·승인 이력·원본 데이터에는 쓰지 않았다. 앞선 전체 315개 통과 결과는 이번 변경 **이전 기준선**이며, 이번 경로는 관련 회귀 및 실제 Chromium을 새로 실행해 검증했다.

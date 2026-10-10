@@ -237,6 +237,21 @@ for(const id of ['jumpSource','jumpAiEvidence','jumpWarnings']){
 assert.match($('jumpWarnings').textContent,/2/,
   'Quick warning shortcut exposes combined question + transcript warning count');
 assert.equal($('approveQuestion').disabled,false,'Quick actions leave approval accessible');
+// Existing AI audit logs are inside the source reference panel. If that
+// panel is closed on mobile, opening only its <details> leaves no evidence
+// visible to the reviewer even though the shortcut claims to navigate there.
+state.detail.ai_audit={total:2,finding:1,unresolved_findings:1,risk_score:65};
+$('aiAuditSection').open=false;
+await $('jumpAiEvidence').click();
+assert.equal($('aiAuditSection').open,true,'Existing audit details must expand');
+if(width<=1250)assert.equal($('toggleReference').getAttribute('aria-expanded'),'true',
+  'Existing audit evidence must open its parent source panel on narrow screens');
+if(width<=760){
+  assert.equal($('sourceReference').getAttribute('role'),'dialog',
+    'On mobile existing audit evidence must be visible inside the source modal');
+}
+if(document.body.classList.contains('reference-open'))await $('closeReference').click();
+delete state.detail.ai_audit;
 // Existing keyboard/approval navigation invokes selectQuestion without
 // focusEditor; it must not move focus away from an ongoing review operation.
 events.length=0;

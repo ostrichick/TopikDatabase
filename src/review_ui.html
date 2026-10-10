@@ -1990,6 +1990,11 @@
           const independentFinding = ['gemini', 'chatgpt'].some(key => comparison?.[key]?.verdict === 'finding');
           const hasExisting = !!(aiAudit(state.detail) || aiAudit(row));
           const section = hasExisting && !independentFinding ? $('aiAuditSection') : $('independentComparisonSection');
+          // Existing audit details live inside the source panel, which is an
+          // off-canvas dialog on mobile. Expanding <details> without opening
+          // its parent leaves the evidence invisible to the reviewer.
+          if (section.id === 'aiAuditSection' && window.matchMedia('(max-width: 1250px)').matches)
+            setReferenceOpen(true);
           section.open = true;
           section.scrollIntoView({ block: 'start' });
           section.querySelector('summary')?.focus({ preventScroll: true });
