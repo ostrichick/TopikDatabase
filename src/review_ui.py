@@ -16,6 +16,7 @@ import argparse
 import base64
 from collections import defaultdict
 import errno
+import gzip
 import hashlib
 import inspect
 import json
@@ -671,7 +672,12 @@ class ReviewStore:
                 " COUNT(*) OVER (PARTITION BY subject_id) AS review_version,"
                 " ROW_NUMBER() OVER (PARTITION BY subject_id ORDER BY id DESC) AS latest_rank,"
                 " ROW_NUMBER() OVER (PARTITION BY subject_id, scope ORDER BY id DESC) AS scope_rank"
+                # Rank only reviews belonging to the requested exam. Ranking
+                # every historical exam (even if the outer list is scoped)
+                # forces unnecessary window sorts as the shared DB grows.
                 " FROM review_records WHERE subject_type='question'"
+                " AND subject_id IN (SELECT q2.id FROM questions q2"
+                " JOIN sections s2 ON s2.id=q2.section_id WHERE s2.exam_id=?)"
                 ") "
                 "SELECT q.id, q.exam_number AS number, s.name AS section,"
                 " q.review_status AS status, q.requires_image,"
@@ -684,7 +690,7 @@ class ReviewStore:
                 " LEFT JOIN ranked_reviews manual ON manual.subject_id=q.id"
                 " AND manual.scope='manual_question_review' AND manual.scope_rank=1"
                 " WHERE s.exam_id=? ORDER BY q.exam_number",
-                (self.exam_id,),
+                (self.exam_id, self.exam_id),
             ).fetchall()]
             punctuation_revision = self._punctuation_revision(db)
         if punctuation_revision:
@@ -2412,8 +2418,35 @@ def make_handler(store: ReviewStore, *, access_key: str | None,
         def _json(self, status: int, content: dict):
             self._drain_body()
             payload = json.dumps(content, ensure_ascii=False).encode("utf-8")
-            self._headers(status, "application/json; charset=utf-8", len(payload))
+            extra = {"Vary": "Accept-Encoding"}
+            # The real 35th F3 bundle is ~200 KiB of repeated JSON keys/text.
+            # Negotiate transport compression without changing the JSON contract,
+            # audit provenance, database snapshot or client request sequence.
+            # Do not gzip tiny responses, unsupported clients, or incompressible
+            # payloads; browser fetch transparently decodes this representation.
+            if len(payload) >= 2048 and self._accepts_gzip():
+                compressed = gzip.compress(payload, compresslevel=5, mtime=0)
+                if len(compressed) + 128 < len(payload):
+                    payload = compressed
+                    extra["Content_Encoding"] = "gzip"
+            self._headers(status, "application/json; charset=utf-8", len(payload), **extra)
             self.wfile.write(payload)
+
+        def _accepts_gzip(self) -> bool:
+            # An explicit `gzip;q=0` must never be overridden by a wildcard.
+            for component in self.headers.get("Accept-Encoding", "").split(","):
+                coding, *parameters = component.split(";")
+                if coding.strip().lower() != "gzip":
+                    continue
+                for parameter in parameters:
+                    name, separator, value = parameter.partition("=")
+                    if name.strip().lower() == "q":
+                        try:
+                            return separator == "=" and 0.0 < float(value.strip()) <= 1.0
+                        except ValueError:
+                            return False
+                return True
+            return False
 
         def _origin(self) -> str:
             return f"http://127.0.0.1:{self.server.server_port}"
@@ -2523,6 +2556,11 @@ def make_handler(store: ReviewStore, *, access_key: str | None,
                 raise NotFound("Unknown page")
             except ReviewError as exc:
                 return self._error(exc)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                # A browser can cancel an in-flight image/PDF navigation after
+                # the successful response headers have already been written.
+                # Never attempt to send a second 500 on that closed socket.
+                return
             except (OSError, sqlite3.Error, DatabaseConfigError, DatabaseOperationError):
                 return self._json(500, {"error": "Local file or database unavailable"})
 

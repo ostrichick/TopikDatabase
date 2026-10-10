@@ -529,6 +529,20 @@ class DisposablePostgres17Concurrency(unittest.TestCase):
         self.assertEqual(fresh["stem"], payload["stem"])
         self.assertEqual(fresh["version"], original["version"] + 1)
 
+    def test_55_f3_fast_list_and_bundle_match_on_real_postgres_snapshot(self):
+        # This must execute PostgreSQL's exam-scoped ranked_reviews query,
+        # not merely pass on SQLite's SQL parser. No new mutations.
+        listing = self.store.list_questions_fast()
+        bundled = self.store.get_questions_bundle()
+        self.assertEqual(len(listing["items"]), 70)
+        self.assertEqual(len(bundled["questions"]), 70)
+        for item in listing["items"]:
+            detail = bundled["questions"][item["id"]]
+            self.assertEqual(item["status"], detail["review_status"])
+            self.assertEqual(item["review_version"], detail["version"])
+            self.assertEqual(item["human_review_evidence"], detail["human_review_evidence"])
+            self.assertEqual(item["last_human_review"], detail["last_human_review"])
+
     def test_60_36th_exam_and_operational_data_are_not_reachable(self):
         before = self.store.get_question("035-I-L-025", fast=True)
         with self.assertRaises(review_ui.ReviewError):
