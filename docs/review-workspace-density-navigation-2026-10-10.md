@@ -58,3 +58,4 @@
 - 수정: 기존 AI 감사를 열 때 원본 패널이 off-canvas인 ≤1250px에서는 `setReferenceOpen(true)`를 먼저 호출하고 상세 기록을 펼친다. 독립 비교 감사나 데스크톱은 기존 경로를 유지한다. 검수 승인·버전·초안·DB/API 호출은 바꾸지 않는다.
 - 재검증: 새 Node 재현 테스트 및 F2/F3/35·36 UI 확대 회귀 **51개 실행, 실패/오류 0, skip 5** (실 PostgreSQL 경합용 격리 DB 미설정). 실제 inline JavaScript 전체 `node --check`, `git diff --check` 통과. Playwright-core와 설치된 Chromium의 임시 localhost 읽기 fixture에서 기존 감사가 포함된 320/390/1366px 실제 브라우저 모두 `#aiAuditSection.open=true`와 키보드 summary focus, 원본 패널/모바일 dialog 열림, 페이지 가로 overflow 없음 확인. `GET /api/questions-fast` 추가 호출은 0회. 화면 증거는 무시 경로 `.stage9-runtime/audit_shortcut_{320,390,1366}.png`에 기록했다.
 - 이 추가 수정 후에도 기존 운영 PostgreSQL·승인 이력·원본 데이터에는 쓰지 않았다. 앞선 전체 315개 통과 결과는 이번 변경 **이전 기준선**이며, 이번 경로는 관련 회귀 및 실제 Chromium을 새로 실행해 검증했다.
+- `docs/review-ui-35.md`의 기존 35회 전용 문구 및 "항상 다음 번호" 안내는 현재 35·36회 선택기, 세부 필터, 낙관적 승인 응답 확인과 맞지 않아 현행 화면 사용법에 맞춰 수정했다. 기존 35회 시범·마이그레이션 기록은 보존했다.
