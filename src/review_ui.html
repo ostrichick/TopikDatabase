@@ -93,6 +93,12 @@
     .badge.status.verified { background: #e1f5e8; color: #176445; }
     .badge.status.rejected { background: #feebe9; color: #a33f36; }
     .badge.dirty { background: #eaf0fc; color: #385a9a; }
+    .review-decision-cue { border: 1px solid #e2c895; border-left: 4px solid #b37d28; border-radius: 11px; background: #fffaf0; padding: 13px 15px; margin: 0 0 17px; overflow-wrap: anywhere; }
+    .review-decision-cue.newer { border-color: #dfa59c; border-left-color: #b54c3e; background: #fff5f3; }
+    .review-decision-cue h3 { margin: 0 0 5px; font-size: 1rem; line-height: 1.5; color: #69441a; }
+    .review-decision-cue.newer h3 { color: #873c33; }
+    .review-decision-cue p { margin: 0 0 10px; font-size: .94rem; line-height: 1.65; color: #544b3c; }
+    .review-decision-cue .btn { min-height: 44px; font-size: .94rem; }
     .section-card { padding: 17px 0; border-top: 1px solid #e9eee9; }
     .section-card h3 { font-size: .98rem; margin: 0 0 11px; }
     .comparison-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
@@ -269,6 +275,11 @@
           </div>
           <div class="quick-controls"><button class="btn" type="button" id="nextPending">다음 미검수</button><button class="btn" type="button" id="nextProblem">다음 문제 발견</button></div>
           <div class="badges" id="questionBadges"></div>
+          <section class="review-decision-cue" id="reviewDecisionCue" aria-labelledby="reviewDecisionHeading" hidden>
+            <h3 id="reviewDecisionHeading">승인 상태와 AI 지적사항 확인</h3>
+            <p id="reviewDecisionText"></p>
+            <button type="button" class="btn" id="reviewDecisionEvidence">AI 근거 확인</button>
+          </section>
           <div class="section-card">
             <h3>공통 지시문 및 지문</h3>
             <span class="small-label">공통 지시문</span><div class="readonly" id="groupInstruction"></div>
@@ -521,7 +532,8 @@
           });
           if (afterApproval.length) return { kind: 'problem', reason: `인간 승인 후 ${afterApproval.map(key => names[key]).join('·')}의 새로운 문제 발견` };
           return { kind: 'verified', reason: sources.length
-            ? '인간 최종 승인 · 기존 AI 지적사항은 사람이 확인했습니다.' : '인간 검수 승인 완료' };
+            ? `인간 검수 승인 완료 · ${[...new Set(sources)].join('·')} 지적사항은 승인 기록만으로 확인 여부를 판단할 수 없습니다. 원본 및 검수 이력 대조 필요`
+            : '인간 검수 승인 완료' };
         }
         if (sources.length) return { kind: 'problem', reason: `${[...new Set(sources)].join('·')} 문제 발견 · 인간 재확인 필요` };
         return { kind: 'pending', reason: state.independentAudits
@@ -545,6 +557,42 @@
         if (value.converged === true) return `최근 pass 추가 발견 ${newFindings}건 · ${passes}회 완료`;
         if (passes < 2) return `판단 자료 부족 · ${passes}회 완료`;
         return `최근 pass 추가 발견 ${newFindings}건 · ${passes}회 완료`;
+      }
+      function renderReviewDecisionCue() {
+        const cue = $('reviewDecisionCue');
+        const q = state.detail;
+        if (!q || q.review_status !== 'verified') { cue.hidden = true; return; }
+        const listRow = state.items.find(item => item.id === q.id);
+        const item = { ...listRow, ...q, status: q.review_status,
+          ai_audit: aiAudit(listRow) || aiAudit(q) };
+        const comparison = state.independentAudits?.questions?.[String(item.number)];
+        const independentFinding = ['gemini', 'chatgpt'].some(key => comparison?.[key]?.verdict === 'finding');
+        const existingFinding = aiNumber(aiAudit(item)?.unresolved_findings) > 0;
+        if (!independentFinding && !existingFinding) { cue.hidden = true; return; }
+        const indicator = reviewIndicator(item);
+        const newer = indicator.kind === 'problem';
+        cue.hidden = false;
+        cue.classList.toggle('newer', newer);
+        $('reviewDecisionHeading').textContent = newer
+          ? '승인 후 새 AI 지적사항 · 원본 재확인 필요'
+          : '승인된 문항에 AI 지적사항 · 검토 여부 미확정';
+        const sourceLabel = q.section === 'listening' ? '원본 PDF·대본' : '원본 PDF';
+        $('reviewDecisionText').textContent = newer
+          ? `승인 이후 새 AI 지적이 기록됐습니다. 승인 상태는 유지되지만 ${sourceLabel}와 검수 이력을 다시 대조해야 합니다.`
+          : `사람 승인 기록만으로 AI 지적사항까지 검토했는지 알 수 없습니다. ${sourceLabel}와 검수 이력을 대조한 뒤 판단하세요.`;
+        const evidence = $('reviewDecisionEvidence');
+        evidence.dataset.target = independentFinding ? 'independentComparisonSection' : 'aiAuditSection';
+        evidence.textContent = independentFinding ? 'Gemini·ChatGPT 판단 근거 확인' : '기존 AI 감사 기록 확인';
+      }
+      function renderDecisionEvidence() {
+        const targetId = $('reviewDecisionEvidence').dataset.target;
+        if (!['independentComparisonSection', 'aiAuditSection'].includes(targetId)) return;
+        if (targetId === 'aiAuditSection' && window.matchMedia('(max-width: 1250px)').matches)
+          setReferenceOpen(true);
+        const target = $(targetId);
+        target.open = true;
+        target.scrollIntoView({ block: 'start' });
+        target.querySelector('summary')?.focus({ preventScroll: true });
       }
       function element(tag, className, text) {
         const node = document.createElement(tag);
@@ -857,6 +905,7 @@
         stopAiSummaryPoll();
         setAiSummaryStatus('ready');
         filterItems();
+        if (state.detail) renderReviewDecisionCue();
       }
       async function loadList() {
         const generation = (state.listGeneration || 0) + 1;
@@ -1335,6 +1384,7 @@
           badge('미저장 변경', 'dirty')
         );
         $('questionBadges').lastElementChild.id = 'dirtyBadge';
+        renderReviewDecisionCue();
         renderIndependentComparison();
         textBox('groupInstruction', q.group?.instruction_display ?? q.group?.instruction, '공통 지시문 없음');
         textBox('groupPassage', q.group?.passage_text_display ?? q.group?.passage_text, '공통 지문 없음');
@@ -1886,6 +1936,7 @@
       function installHandlers() {
         $('examSelector').addEventListener('change', event => switchExam(event.target.value));
         $('aiRetry').addEventListener('click', retryAiSummary);
+        $('reviewDecisionEvidence').addEventListener('click', renderDecisionEvidence);
         $('aiAuditSection').addEventListener('toggle', async () => {
           const section = $('aiAuditSection');
           const current = state.detail;
@@ -2084,7 +2135,7 @@
           request('/api/independent-audits').then(data => {
             state.independentAudits = data;
             filterItems();
-            if (state.detail) renderIndependentComparison();
+            if (state.detail) { renderIndependentComparison(); renderReviewDecisionCue(); }
           }).catch(error => {
             state.independentAuditError = error.message;
             if (state.detail) renderIndependentComparison();

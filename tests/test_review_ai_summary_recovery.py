@@ -42,7 +42,7 @@ function createHarness(examId = '035-I-B') {
   const context = {
     state, $:id=>{assert.ok(controls[id],id);return controls[id]},
     VALID_EXAMS:['035-I-B','036-I-B'],
-    counts:()=>{}, filterItems:()=>{},syncExamHeading:()=>{},
+    counts:()=>{}, filterItems:()=>{},syncExamHeading:()=>{},renderReviewDecisionCue:()=>{},
     Date:{now:()=>clock},
     request:(url,options)=>new Promise((resolve,reject)=>requests.push({url,options,resolve,reject})),
     setTimeout:(fn,ms)=>{const id=++nextTimer;timers.set(id,{when:clock+ms,fn});delays.push(ms);return id;},
