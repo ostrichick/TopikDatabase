@@ -18,6 +18,7 @@ import errno
 import hashlib
 import inspect
 import json
+import logging
 import os
 import re
 import secrets
@@ -119,6 +120,8 @@ class ReviewStore:
         self._ai_summaries_loading: bool = False
         self._ai_summaries_error: bool = False
         self._ai_summaries_checked_at: float = 0.0
+        self._ai_summary_lock = threading.Lock()
+        self._ai_summary_generation = 0
         self._exam_stores: dict[str, ReviewStore] = {}
         self._exam_stores_lock = threading.Lock()
         if self.backend == "sqlite" and not self.db_path.is_file():
@@ -380,6 +383,32 @@ class ReviewStore:
         return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
     def list_questions(self) -> dict:
+        if self.backend == "postgres":
+            # Keep this legacy full-list endpoint compatible, but never run
+            # N+1 subject status queries or build detailed summaries here.
+            audit_data = self.list_ai_audit_summary()
+            audit_items = {item["id"]: item["ai_audit"] for item in audit_data["items"]}
+            with closing(self._connect()) as db:
+                items = [dict(row) for row in db.execute(
+                    "SELECT q.id,q.exam_number AS number,s.name AS section,"
+                    "q.review_status AS status,q.requires_image "
+                    "FROM questions q JOIN sections s ON s.id=q.section_id "
+                    "WHERE s.exam_id=? ORDER BY q.exam_number", (self.exam_id,)
+                ).fetchall()]
+            for item in items:
+                if item["id"] in audit_items:
+                    item["ai_audit"] = audit_items[item["id"]]
+            counts = {status: sum(item["status"] == status for item in items) for status in STATUSES}
+            counts["total"] = len(items)
+            return {
+                "exam_id": self.exam_id, "items": items, "counts": counts,
+                "ai_audit_available": audit_data["ai_audit_available"],
+                "read_only": False, "database_backend": "postgres",
+                "capabilities": {"review_write": True,
+                                 "audio_segment_write": self.exam_id == DEFAULT_EXAM_ID,
+                                 "clip_export": self.exam_id == DEFAULT_EXAM_ID,
+                                 "ai_audit_write": False},
+            }
         if (self.exam_id == DEFAULT_EXAM_ID and self._ai_summaries_checked_at
                 and time.monotonic() - self._ai_summaries_checked_at > 60):
             # External audit jobs may update summaries without a review write.
@@ -493,21 +522,86 @@ class ReviewStore:
         if self.exam_id != DEFAULT_EXAM_ID:
             return {"exam_id": self.exam_id, "state": "unavailable",
                     "ai_audit_available": False, "items": []}
-        listing = self.list_questions()
-        if self._ai_summaries_loading:
-            status = "loading"
-        elif self._ai_summaries_error:
-            status = "error"
+        if self.backend == "sqlite":
+            listing = self.list_questions()
+            if self._ai_summaries_loading:
+                status = "loading"
+            elif self._ai_summaries_error:
+                status = "error"
+            else:
+                status = "ready" if listing["ai_audit_available"] else "unavailable"
+            items = ([{"id": item["id"], "ai_audit": item["ai_audit"]}
+                      for item in listing["items"] if "ai_audit" in item]
+                     if status == "ready" else [])
         else:
-            status = "ready" if listing["ai_audit_available"] else "unavailable"
+            self._ensure_ai_summary_started()
+            with self._ai_summary_lock:
+                cached = self._ai_summaries_cache
+                loading = self._ai_summaries_loading
+                errored = self._ai_summaries_error
+            if cached is not None:
+                status = "ready" if cached[0] else "unavailable"
+                items = ([{"id": qid, "ai_audit": audit} for qid, audit in cached[1].items()]
+                         if cached[0] else [])
+            else:
+                status = "loading" if loading else "error" if errored else "unavailable"
+                items = []
         return {
             "exam_id": self.exam_id,
             "state": status,
             "ai_audit_available": status == "ready",
-            "items": ([{"id": item["id"], "ai_audit": item["ai_audit"]}
-                       for item in listing["items"] if "ai_audit" in item]
-                      if status == "ready" else []),
+            "items": items,
         }
+
+    def _compute_ai_list_summary(self) -> tuple[bool, dict]:
+        """Compute audit-only rows without fetching human review state."""
+        from src.ai_audit_list_summary import summarize_list_bulk
+        from src.database import PostgresAuditConnection
+        with closing(PostgresAuditConnection(self.database_url, readonly=True)) as db:
+            # Let bulk reader establish its repeatable-read snapshot before
+            # issuing any table-discovery SQL on the connection.
+            data = summarize_list_bulk(db)
+            return self._has_ai_audit_tables(db), data
+
+    def _ensure_ai_summary_started(self) -> None:
+        """Single-flight refresh; a slow or failing worker never blocks fast lists."""
+        if self.backend != "postgres" or self.exam_id != DEFAULT_EXAM_ID:
+            return
+        now = time.monotonic()
+        with self._ai_summary_lock:
+            if self._ai_summaries_loading:
+                return
+            fresh = self._ai_summaries_cache is not None and now - self._ai_summaries_checked_at < 60
+            cooldown = self._ai_summaries_error and now - self._ai_summaries_checked_at < 10
+            if fresh or cooldown:
+                return
+            self._ai_summaries_loading = True
+            self._ai_summary_generation += 1
+            generation = self._ai_summary_generation
+
+        def compute():
+            started = time.monotonic()
+            try:
+                result = self._compute_ai_list_summary()
+            except Exception as exc:
+                # Preserve last valid snapshot. Error state is bounded by the
+                # cooldown and carries no source data, credentials or raw SQL.
+                logging.warning("AI list summary unavailable (type=%s elapsed_ms=%d)",
+                                type(exc).__name__, int((time.monotonic() - started) * 1000))
+                with self._ai_summary_lock:
+                    if generation == self._ai_summary_generation:
+                        self._ai_summaries_error = True
+                        self._ai_summaries_checked_at = time.monotonic()
+                        self._ai_summaries_loading = False
+                return
+            with self._ai_summary_lock:
+                if generation == self._ai_summary_generation:
+                    self._ai_summaries_cache = result
+                    self._ai_summaries_error = False
+                    self._ai_summaries_checked_at = time.monotonic()
+                    self._ai_summaries_loading = False
+
+        threading.Thread(target=compute, name="topik-ai-summary", daemon=True).start()
 
     def list_questions_fast(self) -> dict:
         """Lightweight list with current human-review evidence in one bulk read."""

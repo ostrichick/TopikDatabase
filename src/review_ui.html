@@ -251,6 +251,7 @@
             <label id="sortOrderWrap" hidden><span class="control-label">정렬</span><select id="sortOrder" aria-label="문항 정렬"><option value="number">문항 번호</option><option value="risk">AI 위험 높은 순</option><option value="findings">미해결 발견 많은 순</option><option value="latest">최근 AI 감사 순</option></select></label>
           </div>
           <p class="small-label" id="aiLoadStatus" role="status" aria-live="polite" hidden></p>
+          <button class="btn" type="button" id="aiRetry" hidden>AI 감사 요약 다시 시도</button>
           <label class="comparison-filter"><input type="checkbox" id="comparisonDisagreement">Gemini·ChatGPT 판정 차이만 보기</label>
           <label><span class="control-label">문항 표시 상태</span><select id="indicatorFilter" aria-label="문항 표시 상태"><option value="all">전체</option><option value="problem">빨강 · 문제 발견</option><option value="pending">주황 · 검토 대기</option><option value="verified">초록 · 승인 완료</option></select></label>
           <div class="status-legend" aria-label="문항 상태 범례"><span><i class="state-dot verified"></i>승인 완료</span><span><i class="state-dot problem"></i>문제 발견</span><span><i class="state-dot"></i>검토 대기</span></div>
@@ -419,10 +420,12 @@
         const next = new URL(window.location.href);
         next.searchParams.set('exam_id', examId);
         state.examSwitchConfirmed = true;
+        stopAiSummaryPoll();
         try { window.location.assign(next.href); }
         catch (error) {
           state.examSwitchConfirmed = false;
           $('examSelector').value = previous;
+          setAiSummaryStatus('error');
           notice('회차를 전환하지 못했습니다. 다시 시도하세요.', 'error');
         }
       }
@@ -724,6 +727,7 @@
         return selectQuestion(next.id, { force: true });
       }
       function setAiSummaryStatus(status) {
+        state.aiSummaryStatus = status;
         const available = status === 'ready' || (state.aiAuditAvailable && (status === 'loading' || status === 'error'));
         state.aiAuditAvailable = available;
         $('aiFilterWrap').hidden = !available;
@@ -733,35 +737,112 @@
           $('sortOrder').value = 'number';
         }
         const hints = {
-          loading: 'AI 감사 요약을 불러오는 중입니다. 일반 검수는 계속할 수 있습니다.',
-          error: 'AI 감사 요약을 불러오지 못했습니다. 일반 검수는 계속할 수 있습니다.',
+          loading: 'AI 감사 요약을 불러오는 중입니다. 처리가 길어져도 일반 검수는 계속할 수 있습니다.',
+          error: 'AI 감사 요약 조회가 중단되거나 실패했습니다. 일반 검수를 계속하거나 아래에서 다시 시도할 수 있습니다.',
           unavailable: '', ready: ''
         };
         $('aiLoadStatus').textContent = hints[status] || '';
         $('aiLoadStatus').hidden = !hints[status];
+        const retryButton = $('aiRetry');
+        if (retryButton) retryButton.hidden = status !== 'error';
       }
-      async function loadAiSummary(generation, retry = 0) {
-        let data;
-        try { data = await request('/api/questions-ai-summary'); }
-        catch (_) {
-          if (generation === state.listGeneration) setAiSummaryStatus('error');
+      const AI_SUMMARY_MAX_POLL_MS = 180000;
+      function stopAiSummaryPoll() {
+        const job = state.aiSummaryPoll;
+        if (!job) return;
+        state.aiSummaryPoll = null;
+        if (job.timer !== null) clearTimeout(job.timer);
+        job.controller?.abort();
+      }
+      function activeAiSummaryPoll(job) {
+        return state.aiSummaryPoll === job && job.generation === state.listGeneration &&
+          job.examId === state.examId && !state.examSwitchConfirmed;
+      }
+      function scheduleAiSummaryPoll(job) {
+        if (!activeAiSummaryPoll(job)) return;
+        const remaining = AI_SUMMARY_MAX_POLL_MS - (Date.now() - job.startedAt);
+        if (remaining <= 0) {
+          stopAiSummaryPoll();
+          setAiSummaryStatus('error');
           return;
         }
-        if (generation !== state.listGeneration || data?.exam_id !== state.examId) return;
+        // The backend may need longer than the old fixed 18-attempt window.
+        // Retain a bounded job lifetime while reducing queries as time passes.
+        const delay = Math.min(12000, Math.round(750 * Math.pow(1.8, job.retries++)), remaining);
+        job.timer = setTimeout(() => {
+          job.timer = null;
+          if (!activeAiSummaryPoll(job)) return;
+          if (Date.now() - job.startedAt >= AI_SUMMARY_MAX_POLL_MS) {
+            stopAiSummaryPoll();
+            setAiSummaryStatus('error');
+            return;
+          }
+          void loadAiSummary(job);
+        }, delay);
+      }
+      function startAiSummaryPoll(generation) {
+        stopAiSummaryPoll();
+        if (generation !== state.listGeneration || !state.examId || state.examSwitchConfirmed) return;
+        const hasUsableSummary = state.aiAuditAvailable && state.aiSummaryStatus === 'ready';
+        const job = {
+          generation, examId: state.examId, startedAt: Date.now(), retries: 0, timer: null,
+          controller: typeof AbortController === 'function' ? new AbortController() : null,
+        };
+        state.aiSummaryPoll = job;
+        if (!hasUsableSummary) setAiSummaryStatus('loading');
+        void loadAiSummary(job);
+      }
+      function retryAiSummary() {
+        if (!state.listGeneration || !state.examId || state.examSwitchConfirmed) return;
+        startAiSummaryPoll(state.listGeneration);
+      }
+      async function loadAiSummary(job) {
+        if (!activeAiSummaryPoll(job)) return;
+        let data;
+        try { data = await request('/api/questions-ai-summary',
+          job.controller ? { signal: job.controller.signal } : {}); }
+        catch (_) {
+          if (activeAiSummaryPoll(job)) {
+            stopAiSummaryPoll();
+            setAiSummaryStatus('error');
+          }
+          return;
+        }
+        if (!activeAiSummaryPoll(job)) return;
+        if (data?.exam_id !== job.examId) {
+          stopAiSummaryPoll();
+          setAiSummaryStatus('error');
+          return;
+        }
         if (data.state === 'loading') {
           setAiSummaryStatus('loading');
-          // PostgreSQL summary preload is independent from the fast list. Give
-          // it a bounded opportunity to finish without blocking navigation.
-          if (retry < 18) setTimeout(() => loadAiSummary(generation, retry + 1), Math.min(500 + retry * 250, 3500));
-          else setAiSummaryStatus('error');
+          scheduleAiSummaryPoll(job);
           return;
         }
         if (data.state !== 'ready' || data.ai_audit_available !== true || !Array.isArray(data.items)) {
           if (data.state === 'unavailable') {
             for (const item of state.items) delete item.ai_audit;
+            state.aiSummaryVersion = null;
+            state.aiSummaryVersionExam = job.examId;
+            stopAiSummaryPoll();
             setAiSummaryStatus('unavailable');
             filterItems();
-          } else setAiSummaryStatus('error');
+          } else {
+            stopAiSummaryPoll();
+            setAiSummaryStatus('error');
+          }
+          return;
+        }
+        // Monotonic numeric summary versions are optional in older backends.
+        // A lower/missing version cannot replace a newer version already seen
+        // in this document. Generation also protects unversioned responses.
+        const version = Number.isSafeInteger(data.summary_version) ? data.summary_version :
+          Number.isSafeInteger(data.version) ? data.version : null;
+        const previousVersion = state.aiSummaryVersionExam === job.examId &&
+          Number.isSafeInteger(state.aiSummaryVersion) ? state.aiSummaryVersion : null;
+        if (previousVersion !== null && (version === null || version < previousVersion)) {
+          setAiSummaryStatus('loading');
+          scheduleAiSummaryPoll(job);
           return;
         }
         const summaries = new Map(data.items.filter(item => item && typeof item.id === 'string' &&
@@ -771,12 +852,16 @@
           if (summaries.has(item.id)) item.ai_audit = summaries.get(item.id);
           else delete item.ai_audit;
         }
+        state.aiSummaryVersion = version;
+        state.aiSummaryVersionExam = job.examId;
+        stopAiSummaryPoll();
         setAiSummaryStatus('ready');
         filterItems();
       }
       async function loadList() {
         const generation = (state.listGeneration || 0) + 1;
         state.listGeneration = generation;
+        stopAiSummaryPoll();
         const requestedExam = state.examId;
         const data = await request('/api/questions-fast');
         if (generation !== state.listGeneration) return;
@@ -819,7 +904,7 @@
           ? '중앙 PostgreSQL · 검수/로컬 클립 활성'
           : '로컬 SQLite · 편집 가능';
         // Audit-only metadata may arrive later; never replace fast human rows.
-        void loadAiSummary(generation);
+        startAiSummaryPoll(generation);
       }
       function draft() {
         if (!state.detail) return null;
@@ -1800,6 +1885,7 @@
       }
       function installHandlers() {
         $('examSelector').addEventListener('change', event => switchExam(event.target.value));
+        $('aiRetry').addEventListener('click', retryAiSummary);
         $('aiAuditSection').addEventListener('toggle', async () => {
           const section = $('aiAuditSection');
           const current = state.detail;
