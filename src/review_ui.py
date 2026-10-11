@@ -333,28 +333,38 @@ class ReviewStore:
         return row
 
     def _punctuation_revision(self, db) -> int:
-        """Invalidate 36th review forms opened before the v4 -> v5 migration.
+        """Invalidate open review forms after either source-only migration.
 
         The migration intentionally does not fabricate human review records.
         Its immutable metadata marker is a separate one-time source revision.
         """
-        if self.exam_id != "036-I-B":
+        if self.exam_id == "035-I-B" and self.backend != "postgres":
+            # The canonical 35th SQLite source is frozen and unmodified.
+            return 0
+        if self.exam_id == "035-I-B":
+            keys = ("035-I-B:transcript-speaker:v1",)
+        elif self.exam_id == "036-I-B":
+            keys = ("036-I-B:punctuation:v4-to-v5", "036-I-B:punctuation:v5-to-v6",
+                    "036-I-B:transcript-speaker:v1")
+        else:
             return 0
         return db.execute(
-            "SELECT COUNT(*) AS revision FROM import_metadata WHERE key IN (?,?)",
-            ("036-I-B:punctuation:v4-to-v5", "036-I-B:punctuation:v5-to-v6"),
+            f"SELECT COUNT(*) AS revision FROM import_metadata WHERE key IN ({','.join('?' for _ in keys)})",
+            keys,
         ).fetchone()["revision"]
 
     def _version(self, db, question_id: str) -> int:
-        if self.backend == "postgres" and self.exam_id == "036-I-B":
+        if self.backend == "postgres" and self.exam_id in ("035-I-B", "036-I-B"):
             # One database roundtrip for both human review count and additive
             # source punctuation revisions (v4→v5, then v5→v6).
+            keys = (("035-I-B:transcript-speaker:v1",) if self.exam_id == "035-I-B" else
+                    ("036-I-B:punctuation:v4-to-v5", "036-I-B:punctuation:v5-to-v6",
+                     "036-I-B:transcript-speaker:v1"))
             row = db.execute(
                 "SELECT COUNT(*) + (SELECT COUNT(*) FROM import_metadata "
-                "WHERE key IN (?,?)) AS review_count "
+                f"WHERE key IN ({','.join('?' for _ in keys)})) AS review_count "
                 "FROM review_records WHERE subject_type='question' AND subject_id=?",
-                ("036-I-B:punctuation:v4-to-v5",
-                 "036-I-B:punctuation:v5-to-v6", question_id),
+                (*keys, question_id),
             ).fetchone()
             return row["review_count"]
         row = db.execute(
@@ -1622,6 +1632,24 @@ class ReviewStore:
                 sources["chatgpt"]["reason"] = "3차 독립 감수 파일의 계약 또는 70문항 범위가 유효하지 않습니다."
 
         with closing(self._connect()) as db:
+            source_revision = db.execute(
+                "SELECT value FROM import_metadata WHERE key=?",
+                ("035-I-B:transcript-speaker:v1",),
+            ).fetchone()
+            if source_revision is not None:
+                # These independent reviews remain verifiable for their
+                # original 631c.. source, not for the later spacing-only
+                # successor 946f.. . Never relabel historical evidence.
+                try:
+                    revision = json.loads(source_revision["value"])
+                    if revision["old_35_source_sha256"] == (
+                            "631c4fb71784439961956b582d0e66847eb862e2c2370f49c89d5ca520057c35"):
+                        for source in sources.values():
+                            source["source_version"] = "35회 화자 공백 교정 이전 원본"
+                            source["limits"] = [
+                                "역사적 원본 스냅샷에 대한 감수로 현재 교정 후 대본을 새로 감수한 근거는 아닙니다"]
+                except (ValueError, KeyError, TypeError):
+                    raise ReviewError("35th speaker revision marker is malformed")
             if self._has_ai_audit_tables(db):
                 rows = db.execute(
                     "SELECT p.id AS pass_id, p.pass_number, p.model_id, p.auditor_id,"

@@ -23,7 +23,10 @@ from src.extraction_rules import (
 
 CORPUS = ROOT / "topik-past-papers"
 EXAM_ID = "036-I-B"
-FROZEN_35_SHA = "631c4fb71784439961956b582d0e66847eb862e2c2370f49c89d5ca520057c35"
+# Current source fingerprint after the narrowly scoped speaker-only transcript
+# revision (035-I-L-001, two spaces). Previous AI snapshot 631c4fb7... remains
+# immutable and individually attributable to the pre-correction source version.
+FROZEN_35_SHA = "946faa08bcca6613fada345c190e72b45da79da55ebd8762529fdcd207e0df3f"
 
 
 class ImportBlocked(RuntimeError):

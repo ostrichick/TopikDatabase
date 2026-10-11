@@ -168,7 +168,27 @@ class Stage6TransactionTests(unittest.TestCase):
         self.assertIn("SELECT COUNT(*) FROM import_metadata", probe.calls[0][0])
         self.assertEqual(probe.calls[0][1],
                          ("036-I-B:punctuation:v4-to-v5",
-                          "036-I-B:punctuation:v5-to-v6", "036-I-R-001"))
+                          "036-I-B:punctuation:v5-to-v6",
+                          "036-I-B:transcript-speaker:v1", "036-I-R-001"))
+
+    def test_35_version_includes_speaker_source_revision(self):
+        store = self._store()
+        store.exam_id = "035-I-B"
+
+        class Cursor:
+            def fetchone(self):
+                return {"review_count": 3}
+
+        class Probe(TransactionProbe):
+            def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                return Cursor()
+
+        probe = Probe()
+        self.assertEqual(store._version(probe, "035-I-L-001"), 3)
+        self.assertEqual(len(probe.calls), 1)
+        self.assertEqual(probe.calls[0][1],
+                         ("035-I-B:transcript-speaker:v1", "035-I-L-001"))
 
     def test_batched_pg_preflight_keeps_full_sha_and_exam_scope(self):
         class Cursor:

@@ -204,6 +204,10 @@ class TestReviewStore(unittest.TestCase):
             def fetchall(self):
                 return [dict(row) for row in self.cursor.fetchall()]
 
+            def fetchone(self):
+                row = self.cursor.fetchone()
+                return dict(row) if row is not None else None
+
         class PostgresStyleRead:
             backend = "postgres"
 
