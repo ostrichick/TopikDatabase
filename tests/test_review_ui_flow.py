@@ -35,6 +35,7 @@ async function scenario(status, { fail = false, last = false, slowList = false }
     detail: { id: first.id, number: first.number, version: 0 },
     selectedId: first.id, loading: false, saving: false, items: rows, csrfToken: 'test',
     detailsCache: {}, bundleProtectedIds: new Set(),
+    pendingReviews: new Map(), failedReviews: new Map(),
   };
   const events = [];
   const context = {
@@ -59,6 +60,13 @@ async function scenario(status, { fail = false, last = false, slowList = false }
     reviewWritesBlocked: () => false,
     sharedTranscriptChanged: () => false,
     invalidateSharedTranscriptCache: () => {},
+    renderReviewSync: () => {},
+    invalidateDetailFetch: () => {},
+    cachedQuestion: () => null,
+    requestQuestionDetail: async id => {
+      events.push('prefetch:' + id);
+      return { id, number: 2, version: 0 };
+    },
     audioDirty: () => false,
     counts: () => events.push('counts'),
     filterItems: () => events.push('filter'),
@@ -195,12 +203,17 @@ async function scenario({ listening = false, edited = true, post = 'ok',
       if (filtered) state.visible=rows.filter(row =>
         row.number !== 2 && row.status === 'needs_manual_review');
     },
+    renderReviewSync:()=>{},
     loadList:async()=>{},
     renderDetail:()=>{
       events.push('render:'+state.detail.id);
       setFields(state.detail);
       state.baseline=JSON.stringify(vm.runInContext('draft()',ctx));
     },
+    cachedQuestion:()=>null,
+    invalidateDetailFetch:()=>{},
+    prefetchAhead:()=>{},
+    requestQuestionDetail:id=>ctx.request('/api/questions/'+encodeURIComponent(id)+'?fast=1'),
     keepSelectedQuestionVisible:()=>{},
     request:async(url, options)=>{
       if(options?.method === 'POST') {
@@ -241,7 +254,8 @@ async function scenario({ listening = false, edited = true, post = 'ok',
   assert.equal(r.state.selectedId,'q2');
   assert.equal(r.state.items[0].status,'verified');
   assert.equal(r.events.includes('confirm'),false,'Committed text must not prompt');
-  assert.ok(r.events.indexOf('ack')<r.events.findIndex(e=>typeof e==='string'&&e.startsWith('get:')));
+  assert.ok(r.events.findIndex(e=>typeof e==='string'&&e.startsWith('get:'))<r.events.indexOf('ack'),
+    'Safe next GET should begin before approval ACK without navigating');
 
   r=await scenario({filtered:true});
   assert.equal(r.state.selectedId,'q3','Follow filtered visible order, skipping hidden q2');
@@ -869,6 +883,7 @@ async function scenario(fail) {
     bundleProtectedIds:new Set(), aiHistoryLoadedIds:new Set(), csrfToken:'token', loading:false };
   const events = [];
   const ctx = {state, request:()=>{events.push('send');return deferred.promise;},
+    invalidateDetailFetch:()=>{},
     verifyReviewAck:(result,id,status,submitted)=>{
       assert.equal(result.id,id);assert.equal(result.review_status,status);
       assert.equal(result.request_version,submitted.version);return result;

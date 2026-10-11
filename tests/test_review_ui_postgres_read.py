@@ -110,7 +110,7 @@ class ReviewPostgresReadTests(unittest.TestCase):
         patcher = patch.object(
             review_ui,
             "PostgresReadConnection",
-            side_effect=lambda _url: SQLiteBackedPostgresRead(SOURCE_DB),
+            side_effect=lambda _url, **_kwargs: SQLiteBackedPostgresRead(SOURCE_DB),
         )
         self.addCleanup(patcher.stop)
         patcher.start()
@@ -160,7 +160,7 @@ class ReviewPostgresReadTests(unittest.TestCase):
     def test_bundle_uses_one_repeatable_read_snapshot_and_skips_per_question_audit_details(self):
         connections = []
 
-        def factory(_url):
+        def factory(_url, **_kwargs):
             connection = SQLiteBackedPostgresRead(SOURCE_DB)
             connections.append(connection)
             return connection

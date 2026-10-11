@@ -484,6 +484,7 @@
       // use the exam_id from the first list response (e.g. --exam-id 036-I-B).
       const initialExam = new URLSearchParams(window.location.search).get('exam_id');
       const state = { items: [], detail: null, detailsCache: {}, questionNodes: new Map(), committedReviews: new Map(), bundleProtectedIds: new Set(), baseline: '', selectedId: null, visible: [], pdfTab: 'question', loading: false, saving: false, requestId: 0, csrfToken: null, aiAuditAvailable: false, independentAudits: null, independentAuditError: '', aiHistoryLoading: false, aiHistoryLoadedIds: new Set(), pendingReviews: new Map(), failedReviews: new Map(), readOnly: false,
+        detailFetches: new Map(), detailFetchEpochs: new Map(), prefetchQueue: [], prefetchActive: 0,
         examId: VALID_EXAMS.includes(initialExam) ? initialExam : null, examSwitchConfirmed: false,
         databaseBackend: 'sqlite', capabilities: { reviewWrite: true, audioSegmentWrite: true, clipExport: true, aiAuditWrite: false },
         audio: { available: false, saving: false, preview: null, heardSignature: null, durationMs: null, error: false } };
@@ -520,6 +521,8 @@
         // A new document is intentional: it disposes the entire detail cache,
         // in-flight bundle/audit/list reads, review versions and media frames.
         // Never reuse any state or CSRF-bearing request across exam contexts.
+        state.prefetchQueue = [];
+        state.detailFetches.clear();
         const next = new URL(window.location.href);
         next.searchParams.set('exam_id', examId);
         state.examSwitchConfirmed = true;
@@ -625,6 +628,7 @@
             !Number.isSafeInteger(sibling.version) || sibling.review_status !== 'needs_manual_review')
           throw new Error('공유 대본 저장 결과의 짝 문항 버전을 확인할 수 없습니다.');
         delete state.detailsCache[sibling.id];
+        invalidateDetailFetch(sibling.id);
         state.bundleProtectedIds.add(sibling.id);
         state.aiHistoryLoadedIds.delete(sibling.id);
         const item = state.items.find(entry => entry.id === sibling.id);
@@ -1077,6 +1081,7 @@
         filterItems();
         if (!state.selectedId || state.visible.some(item => item.id === state.selectedId)) {
           keepSelectedQuestionVisible();
+          prefetchAhead();
           return;
         }
         const next = state.visible[0];
@@ -1266,6 +1271,7 @@
           if (cached && Number.isSafeInteger(item.review_version) &&
               cached.version < item.review_version && !state.pendingReviews?.has(item.id)) {
             delete state.detailsCache[item.id];
+            invalidateDetailFetch(item.id);
             state.bundleProtectedIds.add(item.id);
             state.aiHistoryLoadedIds.delete(item.id);
             if (state.detail?.id === item.id && state.detail.version < item.review_version) {
@@ -1278,6 +1284,7 @@
         }).sort((a, b) => Number(a.number) - Number(b.number));
         counts();
         filterItems();
+        if (state.detail) prefetchAhead();
         $('connectionState').textContent = state.databaseBackend === 'postgres'
           ? '중앙 PostgreSQL · 검수/로컬 클립 활성'
           : '로컬 SQLite · 편집 가능';
@@ -1694,6 +1701,88 @@
         if (tab === 'answer' && next.answer_pdf_url) return 'answer';
         return 'question';
       }
+      function detailVersionFloor(id) {
+        const row = state.items.find(item => item.id === id);
+        const committed = state.committedReviews?.get(id);
+        return Math.max(Number.isSafeInteger(row?.review_version) ? row.review_version : 0,
+          Number.isSafeInteger(committed?.version) ? committed.version : 0);
+      }
+      function cachedQuestion(id) {
+        const detail = state.detailsCache?.[id];
+        if (!detail || detail.id !== id || (state.examId && detail.exam_id !== state.examId) ||
+            !Number.isSafeInteger(detail.version) || detail.version < detailVersionFloor(id)) return null;
+        return detail;
+      }
+      function invalidateDetailFetch(id) {
+        state.detailFetchEpochs.set(id, (state.detailFetchEpochs.get(id) || 0) + 1);
+        // An already dispatched response cannot be cancelled reliably, but its
+        // epoch prevents it from populating the cache after a review or reload.
+        for (const key of state.detailFetches.keys()) {
+          if (key.startsWith(`${id}/`)) state.detailFetches.delete(key);
+        }
+        state.prefetchQueue = state.prefetchQueue.filter(value => value !== id);
+      }
+      function requestQuestionDetail(id, { fresh = false } = {}) {
+        const exam = state.examId;
+        if (!exam || !id.startsWith(`${exam.slice(0, 3)}-I-`) || state.examSwitchConfirmed)
+          return Promise.reject(new Error('선택한 회차의 문항이 아닙니다.'));
+        if (fresh) invalidateDetailFetch(id);
+        const epoch = state.detailFetchEpochs.get(id) || 0;
+        const floor = detailVersionFloor(id);
+        const key = `${id}/${floor}/${epoch}`;
+        if (state.detailFetches.has(key)) return state.detailFetches.get(key);
+        const task = Promise.resolve().then(() =>
+          request(`/api/questions/${encodeURIComponent(id)}?fast=1`)).then(detail => {
+          if (!detail || detail.id !== id || detail.exam_id !== exam ||
+              !Array.isArray(detail.choices) || !Number.isSafeInteger(detail.version))
+            throw new Error('문항 상세 응답의 회차·식별자 또는 버전을 확인할 수 없습니다.');
+          if (state.examSwitchConfirmed || state.examId !== exam ||
+              (state.detailFetchEpochs.get(id) || 0) !== epoch)
+            throw new Error('문항 상세 요청이 새 화면 또는 수정 내역으로 무효화됐습니다.');
+          if (detail.version < detailVersionFloor(id) ||
+              (Number.isSafeInteger(state.detailsCache?.[id]?.version) &&
+               detail.version < state.detailsCache[id].version))
+            throw new Error('목록 또는 저장된 문항보다 이전 버전의 상세 응답입니다. 다시 불러오세요.');
+          if (state.pendingReviews?.has(id) || state.failedReviews?.has(id))
+            throw new Error('저장 결과를 확인하기 전에는 이전 문항 데이터를 덮어쓸 수 없습니다.');
+          state.detailsCache[id] = detail;
+          state.bundleProtectedIds.add(id);
+          return detail;
+        });
+        state.detailFetches.set(key, task);
+        // Rejection is owned by the foreground navigation or the background
+        // prefetcher; clear the dedupe slot regardless of success or failure.
+        void task.then(() => {
+          if (state.detailFetches.get(key) === task) state.detailFetches.delete(key);
+        }, () => {
+          if (state.detailFetches.get(key) === task) state.detailFetches.delete(key);
+        });
+        return task;
+      }
+      function pumpQuestionPrefetch() {
+        if (!state.examId || state.examSwitchConfirmed) return;
+        while (state.prefetchActive < 2 && state.prefetchQueue.length) {
+          const id = state.prefetchQueue.shift();
+          if (cachedQuestion(id) || state.pendingReviews?.has(id) || state.failedReviews?.has(id)) continue;
+          state.prefetchActive++;
+          // Prefetch never changes selection, editor fields, approval state or
+          // notices. Offline / HTTP errors leave foreground GET as a fallback.
+          void requestQuestionDetail(id).catch(() => {}).finally(() => {
+            state.prefetchActive--;
+            pumpQuestionPrefetch();
+          });
+        }
+      }
+      function prefetchAhead() {
+        const pool = state.visible?.some(item => item.id === state.selectedId)
+          ? state.visible : state.items;
+        const index = pool.findIndex(item => item.id === state.selectedId);
+        state.prefetchQueue = index < 0 ? [] :
+          pool.slice(index + 1, index + 4).map(item => item.id)
+            .filter(id => !cachedQuestion(id) && !state.pendingReviews?.has(id) &&
+              !state.failedReviews?.has(id));
+        pumpQuestionPrefetch();
+      }
       async function selectQuestion(id, { force = false, focusEditor = false } = {}) {
         const currentRow = state.items.find(item => item.id === id);
         if (!force && id === state.selectedId && state.detail &&
@@ -1704,10 +1793,10 @@
 
         const previousDetail = state.detail;
         const previousPdfTab = state.pdfTab;
-        const cached = state.detailsCache && state.detailsCache[id];
-        const cacheCurrent = cached && (!Number.isSafeInteger(currentRow?.review_version) ||
-          cached.version >= currentRow.review_version);
-        if (!force && cacheCurrent) {
+        const token = ++state.requestId;
+        const selectedExam = state.examId;
+        const cached = !force && cachedQuestion(id);
+        if (cached) {
           state.selectedId = id;
           state.detail = cached;
           state.baseline = '';
@@ -1720,10 +1809,10 @@
           renderDetail();
           keepSelectedQuestionVisible();
           focusEditorOnMobile(focusEditor);
+          prefetchAhead();
           return;
         }
 
-        const token = ++state.requestId;
         state.bundleProtectedIds.add(id);
         state.selectedId = id;
         state.detail = null;
@@ -1738,9 +1827,8 @@
         filterItems();
         setLoading(true);
         try {
-          const detail = await request(`/api/questions/${encodeURIComponent(id)}?fast=1`);
-          if (token !== state.requestId) return;
-          if (!detail || detail.id !== id || !Array.isArray(detail.choices)) throw new Error('문항 상세 응답 형식이 올바르지 않습니다.');
+          const detail = await requestQuestionDetail(id, { fresh: force });
+          if (token !== state.requestId || selectedExam !== state.examId || state.examSwitchConfirmed) return;
           const latestRow = state.items.find(item => item.id === id);
           if (Number.isSafeInteger(latestRow?.review_version) && detail.version < latestRow.review_version)
             throw new Error('목록보다 이전 버전의 상세 응답입니다. 새로고침하여 현재 검수 이력을 확인하세요.');
@@ -1750,8 +1838,9 @@
           renderDetail();
           keepSelectedQuestionVisible();
           focusEditorOnMobile(focusEditor);
+          prefetchAhead();
         } catch (error) {
-          if (token !== state.requestId) return;
+          if (token !== state.requestId || selectedExam !== state.examId || state.examSwitchConfirmed) return;
           $('editorEmpty').textContent = '문항을 불러오지 못했습니다. 목록에서 다시 선택하거나 새로고침하세요.';
           notice(error.message, 'error');
         } finally {
@@ -2232,10 +2321,11 @@
         state.detailsCache[id] = draftDetail;
         state.bundleProtectedIds.add(id);
         state.pendingReviews.set(id, { input, before });
+        invalidateDetailFetch(id);
         renderReviewSync();
         filterItems();
         // The request is started immediately. Navigation uses the preloaded next
-        // question and is not gated on its acknowledgement.
+        // question, but its own GET/failure must NEVER gate the POST ACK handler.
         const savePromise = request(`/api/questions/${encodeURIComponent(id)}/review?fast=1`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Review-Token': state.csrfToken },
@@ -2243,7 +2333,16 @@
         });
         state.baseline = JSON.stringify(input);
         try {
-          await selectQuestion(nextId);
+          // Even a previously valid cache entry can be invalidated between the
+          // eligibility check and navigation (e.g., a concurrent list refresh).
+          // Reconciliation is independent of a stalled/rejected successor GET.
+          try {
+            void Promise.resolve(selectQuestion(nextId)).catch(error => {
+              notice(`다음 문항 이동에 실패했습니다: ${error.message}`, 'info');
+            });
+          } catch (error) {
+            notice(`다음 문항 이동에 실패했습니다: ${error.message}`, 'info');
+          }
           renderReviewSync();
           const result = verifyReviewAck(await savePromise, id, 'verified', submitted);
           state.detailsCache[id] = applyReviewAck({
@@ -2251,6 +2350,7 @@
             transcript: draftDetail.transcript ? { ...draftDetail.transcript, review_status: result.review_status } : null,
           }, result);
           state.aiHistoryLoadedIds?.delete(id);
+          invalidateDetailFetch(id);
           const row = state.items.find(item => item.id === id);
           const confirmed = { status: result.review_status, version: result.version,
             last_human_review: result.last_human_review ?? null,
@@ -2329,7 +2429,7 @@
         const reviewOrder = visibleHasCurrent ? state.visible : state.items;
         const currentIndex = reviewOrder.findIndex(item => item.id === state.detail.id);
         const nextId = status === 'verified' && currentIndex >= 0 ? reviewOrder[currentIndex + 1]?.id : null;
-        if (status === 'verified' && nextId && state.detailsCache?.[nextId] && !audioDirty() && !sharedTranscript) {
+        if (status === 'verified' && nextId && cachedQuestion(nextId) && !audioDirty() && !sharedTranscript) {
           return sendOptimisticApproval(state.detail.id, input, nextId);
         }
         const approvedId = state.detail.id;
@@ -2338,6 +2438,13 @@
         state.saving = true;
         setLoading(false);
         notice('중앙 데이터베이스에 검수 결과를 저장하는 중…', 'info');
+        // An independent successor GET can overlap the approval POST without
+        // navigating or touching unsaved editor fields. Shared transcript and
+        // dirty audio paths retain their conservative post-ACK behavior.
+        if (status === 'verified' && nextId && !sharedTranscript && !audioDirty() &&
+            !cachedQuestion(nextId)) {
+          void requestQuestionDetail(nextId).catch(() => {});
+        }
         try {
           const id = state.detail.id;
           const submitted = { version: state.detail.version, status, stem: input.stem,
@@ -2367,6 +2474,7 @@
           // (and any unsaved audio boundaries) must still block navigation.
           state.baseline = JSON.stringify(input);
           state.aiHistoryLoadedIds?.delete(id);
+          invalidateDetailFetch(id);
           state.bundleProtectedIds.add(id);
           if (state.detailsCache) state.detailsCache[id] = detail;
           const row = state.items.find(item => item.id === id);
@@ -2398,14 +2506,18 @@
             notice(`승인은 저장됐지만 목록 갱신에 실패했습니다: ${error.message}`, 'info');
           }
         } catch (error) {
-          if (sharedTranscript && error.status !== 409 && error.status !== 400) {
+          if (error.status !== 409 && error.status !== 400) {
             // The COMMIT may have succeeded while its response was lost.
-            // Preserve the submitted snapshot; never retry a paired write.
+            // Preserve the submitted snapshot and block further approvals;
+            // never retry either an ordinary or a paired review automatically.
             state.failedReviews.set(approvedId, {
-              input, before: state.detail, sharedTranscript, error: error.message || String(error)
+              input, before: state.detail, ...(sharedTranscript ? { sharedTranscript } : {}),
+              error: error.message || String(error)
             });
             renderReviewSync();
-            notice('공유 대본 저장 결과가 불확실합니다. 다시 저장하지 말고 서버 내용 및 짝 문항을 확인하세요.', 'error', true);
+            notice(sharedTranscript
+              ? '공유 대본 저장 결과가 불확실합니다. 다시 저장하지 말고 서버 내용 및 짝 문항을 확인하세요.'
+              : '승인 저장 결과가 불확실합니다. 중복 저장하지 말고 서버 기록을 먼저 확인하세요.', 'error', true);
           } else {
             notice(error.message, 'error', error.status === 409);
           }
@@ -2743,6 +2855,7 @@
               const latest = state.items.find(item => item.id === id);
               if (Number.isSafeInteger(latest?.review_version) && detail.version < latest.review_version) continue;
               if (state.bundleProtectedIds.has(id) ||
+                  state.pendingReviews?.has(id) || state.failedReviews?.has(id) ||
                   Object.prototype.hasOwnProperty.call(state.detailsCache, id)) continue;
               state.detailsCache[id] = detail;
             }

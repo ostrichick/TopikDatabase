@@ -37,12 +37,14 @@ function createHarness(examId = '035-I-B') {
     baseline:'unsaved text editor', pendingReviews:new Map([['pending',{version:7}]]),
     failedReviews:new Map(),committedReviews:new Map([['q1',{version:7,status:'verified'}]]),
     csrfToken:'old-token', aiAuditAvailable:false,detailsCache:{q1:{stem:'draft'}},
+    detailFetches:new Map(),detailFetchEpochs:new Map(),prefetchQueue:[],prefetchActive:0,
     saving:false,audio:{saving:false},examSwitchConfirmed:false,
   };
   const context = {
     state, $:id=>{assert.ok(controls[id],id);return controls[id]},
     VALID_EXAMS:['035-I-B','036-I-B'],
     counts:()=>{}, filterItems:()=>{},syncExamHeading:()=>{},renderReviewDecisionCue:()=>{},renderAiDecisionPanel:()=>{},
+    prefetchAhead:()=>{},invalidateDetailFetch:()=>{},
     Date:{now:()=>clock},
     request:(url,options)=>new Promise((resolve,reject)=>requests.push({url,options,resolve,reject})),
     setTimeout:(fn,ms)=>{const id=++nextTimer;timers.set(id,{when:clock+ms,fn});delays.push(ms);return id;},

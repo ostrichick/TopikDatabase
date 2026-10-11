@@ -173,6 +173,8 @@ async function save({conflict=false}={}) {
     reviewWritesBlocked:()=>false,sharedTranscriptChanged:()=>false,
     prepareSharedTranscriptCorrection:()=>{throw Error('Unexpected shared edit')},
     invalidateSharedTranscriptCache:()=>{},
+    invalidateDetailFetch:()=>{},
+    cachedQuestion:()=>null,requestQuestionDetail:()=>{throw Error('No next question')},
     setLoading:val=>{state.loading=val},
     counts:()=>{},filterItems:()=>{},renderReviewSync:()=>{},
     renderDetail:()=>{},loadList:async()=>{},
@@ -261,6 +263,7 @@ async function optimistic() {
   const notifications=[];
   const context=vm.createContext({state,$:get,JSON,Number,
     request:()=>promise,
+    invalidateDetailFetch:()=>{},
     verifyReviewAck:(result,id,status,submitted)=>{
       assert.equal(result.id,id);assert.equal(status,'verified');
       assert.equal(result.version,submitted.version+1);return result;
@@ -306,6 +309,7 @@ async function race() {
     listGeneration:0,detailsCache:{[id]:{...q,version:2,status:'needs_manual_review',
       review_status:'needs_manual_review',history:[{note:'obsolete'}]}},
     bundleProtectedIds:new Set(),audio:{saving:false,preview:null,heardSignature:null},
+    detailFetches:new Map(),detailFetchEpochs:new Map(),prefetchQueue:[],prefetchActive:0,
     pendingReviews:new Map(),failedReviews:new Map(),csrfToken:null,readOnly:false,
     saving:false,loading:false,requestId:0,pdfTab:'question',
     aiAuditAvailable:true,aiHistoryLoadedIds:new Set(),capabilities:{reviewWrite:true}};
@@ -333,6 +337,7 @@ async function race() {
   });
   get('audioPlayer').pause=()=>{};
   vm.runInContext(actual('async function loadList()', 'function audioSegment()')
+    +actual('function detailVersionFloor(', 'async function selectQuestion(')
     +actual('async function selectQuestion(', 'function badge('),context);
   const stalePromise=context.loadList();
   resolveList({exam_id:'035-I-B',items:[stale()],csrf_token:'local',database_backend:'postgres',

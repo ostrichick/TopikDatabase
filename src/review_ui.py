@@ -44,6 +44,7 @@ from src.database import (
     DatabaseOperationError,
     PostgresReadConnection,
     PostgresWriteConnection,
+    close_reviewer_pools,
     get_database_url,
     get_media_root,
 )
@@ -168,7 +169,8 @@ class ReviewStore:
         if self.backend == "postgres":
             if not self.database_url:
                 raise DatabaseConfigError("TOPIK_DATABASE_URL is not configured")
-            return PostgresWriteConnection(self.database_url) if writable else PostgresReadConnection(self.database_url)
+            return (PostgresWriteConnection(self.database_url, pooled=True) if writable else
+                    PostgresReadConnection(self.database_url, pooled=True))
         if writable:
             assert_sqlite_write_allowed(self.db_path)
         connection = sqlite3.connect(self.db_path.as_uri() + ("?mode=rw" if writable else "?mode=ro"),
@@ -1858,6 +1860,39 @@ class ReviewStore:
     def _audit_36_id(number: int) -> str:
         return f"036-I-{'L' if number <= 30 else 'R'}-{number:03d}"
 
+    def _fast_pg_related(self, db, question_id: str) -> dict:
+        """Fetch independent editor relations in one PostgreSQL roundtrip.
+
+        The caller has already established REPEATABLE READ READ ONLY and
+        checked the question's exam. Keep the full (not just visible 30)
+        review count and authoritative last manual action for 409/provenance.
+        Never include source bytes or an inferred audio attestation here.
+        """
+        markers = (("035-I-B:transcript-speaker:v1",) if self.exam_id == "035-I-B" else
+                   ("036-I-B:punctuation:v4-to-v5", "036-I-B:punctuation:v5-to-v6",
+                    "036-I-B:transcript-speaker:v1"))
+        return dict(db.execute(
+            "SELECT "
+            "(SELECT COALESCE(json_agg(row_to_json(c) ORDER BY c.number),'[]'::json) "
+            " FROM (SELECT number,text FROM choices WHERE question_id=?) c) AS choices, "
+            "(SELECT row_to_json(t) FROM (SELECT dialogue_text AS text,source_pdf_page,"
+            " review_status,warnings_json FROM transcripts WHERE question_id=?) t) AS transcript, "
+            "(SELECT COALESCE(json_agg(image_key ORDER BY image_key),'[]'::json) "
+            " FROM question_images WHERE question_id=?) AS images, "
+            "(SELECT COALESCE(json_agg(row_to_json(r) ORDER BY r.id DESC),'[]'::json) "
+            " FROM (SELECT id,status,scope,reviewer,evidence,reviewed_at FROM review_records "
+            " WHERE subject_type='question' AND subject_id=? ORDER BY id DESC LIMIT 30) r) AS history, "
+            "(SELECT row_to_json(m) FROM (SELECT id,status,reviewer,reviewed_at "
+            " FROM review_records WHERE subject_type='question' AND subject_id=? "
+            " AND scope='manual_question_review' ORDER BY id DESC LIMIT 1) m) AS last_manual, "
+            "(SELECT COUNT(*) FROM review_records WHERE subject_type='question' "
+            " AND subject_id=?) AS full_review_count, "
+            f"(SELECT COUNT(*) FROM import_metadata WHERE key IN ({','.join('?' for _ in markers)})) "
+            " AS source_revision",
+            (question_id, question_id, question_id, question_id, question_id,
+             question_id, *markers),
+        ).fetchone())
+
     def get_question(self, question_id: str, *, fast: bool = False) -> dict:
         with closing(self._connect()) as db:
             # Concurrent reviews or source migrations must never combine old
@@ -1870,40 +1905,50 @@ class ReviewStore:
             row = self._question(db, question_id)
             question = dict(row)
             ai_audit = None if fast or self.exam_id != DEFAULT_EXAM_ID else self._get_ai_audit_for_question(db, question_id)[1]
-            choices = [dict(item) for item in db.execute(
-                "SELECT number, text FROM choices WHERE question_id=? ORDER BY number", (question_id,)
-            )]
-            transcript = db.execute(
+            # Native PG fast path: five independently selected relations,
+            # source revision and full history count in a *single* SQL call.
+            # SQLite and read-test adapters retain the original SQL contract.
+            related = (self._fast_pg_related(db, question_id)
+                       if fast and self.backend == "postgres" and getattr(db, "native_pg_json", False) is True
+                       and self.exam_id in ("035-I-B", "036-I-B") else None)
+            choices = (related["choices"] if related is not None else
+                       [dict(item) for item in db.execute(
+                           "SELECT number, text FROM choices WHERE question_id=? ORDER BY number", (question_id,)
+                       )])
+            transcript = (related["transcript"] if related is not None else db.execute(
                 "SELECT dialogue_text AS text, source_pdf_page, review_status, warnings_json "
                 "FROM transcripts WHERE question_id=?", (question_id,)
-            ).fetchone()
+            ).fetchone())
             transcript_info = dict(transcript) if transcript else None
             if transcript_info:
                 transcript_info["warnings"] = json.loads(transcript_info.pop("warnings_json"))
-            image_keys = [item["image_key"] for item in db.execute(
-                "SELECT image_key FROM question_images WHERE question_id=? ORDER BY image_key", (question_id,)
-            )]
+            image_keys = (related["images"] if related is not None else
+                          [item["image_key"] for item in db.execute(
+                              "SELECT image_key FROM question_images WHERE question_id=? ORDER BY image_key", (question_id,)
+                          )])
             history = []
-            records = db.execute(
+            records = (related["history"] if related is not None else db.execute(
                 "SELECT id, status, scope, reviewer, evidence, reviewed_at FROM review_records "
                 "WHERE subject_type='question' AND subject_id=? ORDER BY id DESC LIMIT 30", (question_id,)
-            ).fetchall()
+            ).fetchall())
             for record in records:
                 history.append(self._question_history_item(record))
             manual = next((r for r in records if r["scope"] == "manual_question_review"), None)
             if manual is None and len(records) == 30:
                 # Preserve provenance even when the latest manual action is
                 # older than the bounded visible history.
-                manual = db.execute(
+                manual = (related["last_manual"] if related is not None else db.execute(
                     "SELECT id,status,reviewer,reviewed_at FROM review_records "
                     "WHERE subject_type='question' AND subject_id=? "
                     "AND scope='manual_question_review' ORDER BY id DESC LIMIT 1",
                     (question_id,),
-                ).fetchone()
+                ).fetchone())
             last_human, human_evidence = self._question_human_evidence(
                 question["review_status"], records[0] if records else None, manual)
-            version = (len(records) + self._punctuation_revision(db)
-                       if len(records) < 30 else self._version(db, question_id))
+            version = (int(related["full_review_count"]) + int(related["source_revision"])
+                       if related is not None else
+                       (len(records) + self._punctuation_revision(db)
+                        if len(records) < 30 else self._version(db, question_id)))
             result = {
                 "id": question_id,
                 "exam_id": self.exam_id,
@@ -2821,6 +2866,8 @@ def main():
             server.serve_forever()
         except KeyboardInterrupt:
             print("Stopped.")
+        finally:
+            close_reviewer_pools()
 
 
 if __name__ == "__main__":

@@ -25,9 +25,27 @@ if (-not $listener) {
 }
 $env:TOPIK_DATABASE_URL = $config.database_url
 $env:TOPIK_MEDIA_ROOT = $config.media_root
-Push-Location (Split-Path $PSScriptRoot -Parent)
+$projectRoot = (Split-Path $PSScriptRoot -Parent)
+$venvPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
+Push-Location $projectRoot
 try {
-    & py -3 -B -u src/review_ui.py --port $Port
+    # Prefer the project's verified, isolated Python environment when present.
+    # This activates optional bounded psycopg_pool reuse without modifying the
+    # user's system Python; a different PC without .venv retains the old safe
+    # behavior and can install its own project environment independently.
+    $venvReady = $false
+    if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
+        & $venvPython -B -c 'import psycopg'
+        $venvReady = $LASTEXITCODE -eq 0
+        if (-not $venvReady) {
+            Write-Warning 'Project Python environment lacks psycopg; using the existing system Python fallback.'
+        }
+    }
+    if ($venvReady) {
+        & $venvPython -B -u src/review_ui.py --port $Port
+    } else {
+        & py -3 -B -u src/review_ui.py --port $Port
+    }
     if ($LASTEXITCODE -ne 0) { throw 'The PostgreSQL reviewer stopped with an error' }
 } finally {
     Pop-Location

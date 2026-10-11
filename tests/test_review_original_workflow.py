@@ -133,6 +133,9 @@ const tail = '\n      renderAiAudit=()=>{}; renderHistory=()=>{}; '+
   'renderIndependentComparison=()=>{}; renderReviewDecisionCue=()=>{}; '+
   'renderAiDecisionPanel=()=>{}; refreshDirty=()=>{}; updateNavigation=()=>{}; '+
   'filterItems=()=>{}; renderDetail=()=>renderReferences(); '+
+  // This fixture proves original-source navigation and zero foreground GET
+  // for warm cache. Proactive background reads have separate bounded VM tests.
+  'prefetchAhead=()=>{}; '+
   'request=async url=>globalThis.__getDetail(url); '+
   'globalThis.testApi={state,selectQuestion,retainedSourceTab,jumpToOriginal,'+
   'renderPdf,renderReferences,renderAudioSegment,audioSharedNumbers,'+

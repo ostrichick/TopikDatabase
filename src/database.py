@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import atexit
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -145,13 +147,103 @@ def qmark_to_postgres(sql: str) -> str:
     return "".join(output)
 
 
+# Reviewer-only pools: the audit/migration code retains independent connections.
+# Read and write sessions NEVER share a pool (and hence never share session
+# read-only settings). A lease belongs to precisely one request/thread.
+_review_pools: dict[tuple[str, bool], object] = {}
+_review_pools_lock = threading.Lock()
+
+
+def _review_pool(url: str, *, readonly: bool):
+    if os.environ.get("TOPIK_REVIEW_POOL", "1").lower() in ("0", "false", "off"):
+        return None
+    try:
+        from psycopg_pool import ConnectionPool
+    except ImportError:
+        # Optional package: installations without it retain the original
+        # connection-per-request behavior without losing reviewer access.
+        return None
+    _, dict_row = _psycopg()
+    key = (url, readonly)
+    with _review_pools_lock:
+        pool = _review_pools.get(key)
+        if pool is None:
+            try:
+                max_size = max(1, min(4, int(os.environ.get("TOPIK_REVIEW_POOL_SIZE", "3"))))
+                timeout = max(1., min(30., float(os.environ.get("TOPIK_REVIEW_POOL_TIMEOUT", "15"))))
+            except ValueError as exc:
+                raise DatabaseConfigError("Invalid reviewer pool size or timeout") from exc
+
+            def configure(connection):
+                # Configured only on newly opened idle sessions. A read pool
+                # must never lend a writable session, even after SSH recovery.
+                if readonly:
+                    connection.read_only = True
+
+            pool = ConnectionPool(url, min_size=0, max_size=max_size,
+                                  timeout=timeout, kwargs={"row_factory": dict_row},
+                                  configure=configure,
+                                  # Validate a borrowed idle TLS/SSH socket;
+                                  # psycopg_pool drops broken connections and
+                                  # opens a replacement rather than lending it.
+                                  check=ConnectionPool.check_connection, open=True)
+            _review_pools[key] = pool
+        return pool
+
+
+def close_reviewer_pools():
+    """Close idle reviewer connections when the local HTTP server exits."""
+    with _review_pools_lock:
+        pools = list(_review_pools.values())
+        _review_pools.clear()
+    for pool in pools:
+        pool.close()
+
+
+atexit.register(close_reviewer_pools)
+
+
+def _reviewer_lease(url: str, *, readonly: bool, pooled: bool):
+    pool = _review_pool(url, readonly=readonly) if pooled else None
+    if pool is None:
+        return connect_postgres(url, readonly=readonly), None
+    try:
+        raw = pool.getconn()
+        # A returned request must have no open transaction; psycopg_pool also
+        # discards broken connections, e.g. after the SSH tunnel is replaced.
+        if raw.info.transaction_status.name != "IDLE" or bool(raw.read_only) != readonly:
+            raw.close()
+            pool.putconn(raw)
+            raise DatabaseOperationError("Reviewer pool returned an unsafe session")
+        return raw, pool
+    except DatabaseOperationError:
+        raise
+    except Exception as exc:
+        raise DatabaseOperationError("PostgreSQL reviewer pool unavailable") from exc
+
+
+def _return_reviewer_lease(raw, pool):
+    if pool is None:
+        raw.close()
+        return
+    try:
+        # On every return, including after SELECT, COMMIT, 409 or an exception.
+        # Never let a subsequent request inherit snapshot/locks/failed state.
+        raw.rollback()
+    except Exception:
+        raw.close()
+    finally:
+        pool.putconn(raw)  # pool discards closed/broken connections
+
+
 class PostgresReadConnection:
     """Small sqlite-like read surface used by the stage-5 reviewer."""
 
     backend = "postgres"
+    native_pg_json = True
 
-    def __init__(self, url: str):
-        self._raw = connect_postgres(url, readonly=True)
+    def __init__(self, url: str, *, pooled: bool = False):
+        self._raw, self._pool = _reviewer_lease(url, readonly=True, pooled=pooled)
 
     def execute(self, sql: str, params=()):
         try:
@@ -163,7 +255,9 @@ class PostgresReadConnection:
             raise
 
     def close(self):
-        self._raw.close()
+        if self._raw is not None:
+            raw, self._raw = self._raw, None
+            _return_reviewer_lease(raw, self._pool)
 
 
 class PostgresWriteConnection:
@@ -175,8 +269,8 @@ class PostgresWriteConnection:
 
     backend = "postgres"
 
-    def __init__(self, url: str):
-        self._raw = connect_postgres(url, readonly=False)
+    def __init__(self, url: str, *, pooled: bool = False):
+        self._raw, self._pool = _reviewer_lease(url, readonly=False, pooled=pooled)
 
     def execute(self, sql: str, params=()):
         try:
@@ -204,7 +298,9 @@ class PostgresWriteConnection:
         self._raw.rollback()
 
     def close(self):
-        self._raw.close()
+        if self._raw is not None:
+            raw, self._raw = self._raw, None
+            _return_reviewer_lease(raw, self._pool)
 
 
 class PostgresAuditConnection:
