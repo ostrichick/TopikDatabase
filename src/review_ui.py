@@ -55,6 +55,12 @@ ROOT = PROJECT_ROOT
 DB_PATH = ROOT / "topik-past-papers" / "derived" / "035-I-B.sqlite"
 HTML_PATH = Path(__file__).with_name("review_ui.html")
 THIRD_PASS_AUDIT_PATH = ROOT / "topik-past-papers" / "derived" / "audit35-third-pass-20261008" / "ai-audit-35-third-pass-gpt6.json"
+AUDIT36_ARCHIVES = (
+    ("first", "blind-audit-v4.json", "411a5c3389bb84bebe61435154330ed502dfca4e3e61feb60b4db7ccb41e7cbf"),
+    ("second", "blind-audit-pass2-combined.json", "fb976652ce4bfcfedb8c046422e7a703dfae9701145d6424b60664b300054e6c"),
+)
+AUDIT36_V4_SHA = "4c02c999b0fcbdaad48aaf9af6d0f5c754ca424f8a37885466a6704d90403684"
+AUDIT36_V5_SHA = "af72d0c340fe7b833b63dc0eb07652538e3dd292668a6e4986b4247792e9e095"
 DEFAULT_EXAM_ID = "035-I-B"
 EXAM_ID = re.compile(r"^(\d{3})-(I|II)-([A-Z])$")
 QUESTION_ID = re.compile(r"^\d{3}-(?:I|II)-[LR]-\d{3}$")
@@ -1565,6 +1571,8 @@ class ReviewStore:
     def get_independent_audit_comparison(self) -> dict:
         """Present complete archived AI judgments side by side, without mutating audit history."""
         if self.exam_id != DEFAULT_EXAM_ID:
+            if self.exam_id == "036-I-B":
+                return self._get_36_independent_audits()
             return {"exam_id": self.exam_id, "sources": {}, "questions": {},
                     "disagreement_count": 0, "available": False}
         results: dict[str, dict] = {"gemini": {}, "chatgpt": {}}
@@ -1684,8 +1692,142 @@ class ReviewStore:
             chatgpt = results["chatgpt"].get(key)
             questions[key] = {"gemini": gemini, "chatgpt": chatgpt,
                               "disagreement": bool(gemini and chatgpt and gemini["verdict"] != chatgpt["verdict"])}
-        return {"sources": sources, "questions": questions,
+        return {"exam_id": self.exam_id, "sources": sources, "questions": questions,
                 "disagreement_count": sum(q["disagreement"] for q in questions.values())}
+
+    def _get_36_independent_audits(self) -> dict:
+        """Expose archived 36th PDF audits, with provenance and scope kept explicit.
+
+        The audits were done on v4 and v5, and are historical evidence, not
+        proof of a live v6 DB or a complete listening/audio review.
+        """
+        passes = []
+        questions: dict[str, dict] = {str(i): {"audits": {}} for i in range(1, 71)}
+        full_set = {f"036-I-{'L' if i <= 30 else 'R'}-{i:03d}" for i in range(1, 71)}
+        for index, (key, filename, expected_sha) in enumerate(AUDIT36_ARCHIVES, 1):
+            path = self.root / "topik-past-papers" / "derived" / "036-I-B" / filename
+            source = {"id": key, "label": f"{index}차 독립 감수", "available": False,
+                      "model": "", "reason": "이 기기에 검수 근거 파일이 없습니다.",
+                      "source_file": f"topik-past-papers/derived/036-I-B/{filename}"}
+            passes.append(source)
+            if not path.is_file():
+                continue
+            data = path.read_bytes()
+            source_sha = hashlib.sha256(data).hexdigest()
+            if source_sha != expected_sha:
+                source["reason"] = "검수 근거 파일의 SHA-256이 기록된 원본과 일치하지 않습니다."
+                continue
+            try:
+                payload = json.loads(data)
+                details_by_id = {}
+                if key == "first":
+                    entries = payload["verdicts"]
+                    counts = payload["counts"]
+                    valid = (payload.get("schema_version") == "topik-36-source-audit-v4"
+                             and payload.get("input_sha256") == AUDIT36_V4_SHA
+                             and counts.get("total") == 70 and counts.get("clear") == 70
+                             and counts.get("finding") == 0 and counts.get("uncertain") == 0)
+                    mapping = {entry["subject_id"]: entry for entry in entries}
+                    valid = valid and len(entries) == 70 and set(mapping) == full_set and all(
+                        entry.get("verdict") in ("clear", "finding", "uncertain")
+                        and entry.get("exam_number") == int(entry["subject_id"][-3:]) for entry in entries)
+                else:
+                    entries = payload["per_question"]
+                    counts = payload["summary"]
+                    valid = (payload.get("schema_version") == "topik36-second-blind-pass-v1"
+                             and payload.get("exam_id") == self.exam_id
+                             and payload.get("v5_sha256") == AUDIT36_V5_SHA
+                             and all(counts.get(k) == v for k, v in
+                                     (("assigned", 70), ("reviewed", 70), ("clear", 70),
+                                      ("finding", 0), ("uncertain", 0))))
+                    mapping = {entry["id"]: entry for entry in entries}
+                    valid = valid and len(entries) == 70 and set(mapping) == full_set and all(
+                        entry.get("verdict") in ("clear", "finding", "uncertain")
+                        and entry.get("number") == int(entry["id"][-3:]) for entry in entries)
+                    # This combined archive binds two independently retained reviewer files.
+                    reviewer_files = payload.get("reviewer_source_files", [])
+                    if (not isinstance(reviewer_files, list)
+                            or {r.get("file") for r in reviewer_files} != {
+                                "blind-audit-pass2-a.json", "blind-audit-pass2-b.json"}):
+                        valid = False
+                    for reviewer_file in reviewer_files:
+                        local = path.parent / reviewer_file.get("file", "")
+                        if (not local.is_file()
+                                or hashlib.sha256(local.read_bytes()).hexdigest() != reviewer_file.get("sha256")):
+                            valid = False
+                            continue
+                        reviewer_payload = json.loads(local.read_text(encoding="utf-8"))
+                        reviewer_entries = reviewer_payload.get("findings", [])
+                        reviewer_mapping = {
+                            (r.get("question_id") if reviewer_file["file"].endswith("-a.json") else r.get("id")): r
+                            for r in reviewer_entries
+                        }
+                        expected_ids = {self._audit_36_id(n) for n in (
+                            range(1, 36) if reviewer_file["file"].endswith("-a.json") else range(36, 71))}
+                        if (len(reviewer_entries) != 35 or set(reviewer_mapping) != expected_ids
+                                or any(r.get("verdict") != "clear" or r.get("issues") != []
+                                       for r in reviewer_entries)):
+                            valid = False
+                        details_by_id.update(reviewer_mapping)
+                    valid = valid and len(reviewer_files) == 2
+                    valid = valid and len(details_by_id) == 70 and all(
+                        details_by_id[qid].get("verdict") == mapping[qid].get("verdict")
+                        and (details_by_id[qid].get("source_answer_choice")
+                             if int(qid[-3:]) <= 35 else details_by_id[qid].get("official_answer"))
+                        == mapping[qid].get("source_answer_choice")
+                        and (details_by_id[qid].get("source_answer_points")
+                             if int(qid[-3:]) <= 35 else details_by_id[qid].get("official_points"))
+                        == mapping[qid].get("source_points")
+                        for qid in full_set)
+                if not valid:
+                    raise ValueError("incorrect audit content or coverage")
+            except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+                source["reason"] = "검수 근거의 형식, 입력 기준 또는 70문항 범위가 유효하지 않습니다."
+                continue
+            source.update({"available": True, "reason": "", "scope": 70,
+                           "source_sha256": source_sha,
+                           "input_sha256": AUDIT36_V4_SHA if key == "first" else AUDIT36_V5_SHA,
+                           "origin": "기기에 보존된 PDF 대조 검수 결과",
+                           "source_version": "pdf-first-36-v4" if key == "first" else "pdf-first-36-v5",
+                           "created_at": payload.get("created_at_utc", "unknown"),
+                           "timestamp_verified": self._audit_timestamp_verified(payload.get("created_at_utc")),
+                           "limits": (["현재 v6/운영 DB에 대한 직접 검수 아님",
+                                       "한국어 어절 공백 전수 이미지 대조 미완료", "전체 MP3 청취·재생 구간 검수 미완료"]),
+                           "model_note": "검수 파일에 AI 모델 식별자가 기록되지 않았습니다."})
+            if key == "first":
+                source["limits"].append("이전 R48 오류를 이미 알고 재검수한 기록으로, 완전 블라인드 판정은 아님")
+            for identifier, entry in mapping.items():
+                number = str(int(identifier[-3:]))
+                summary = entry.get("rationale") if key == "first" else (
+                    f"담당 검수자 {entry.get('auditor', '미상')} · 원본 PDF {entry.get('original_pdf_page', '미상')}쪽"
+                    f" · 정답 {entry.get('source_answer_choice', '미상')}번 · 배점 {entry.get('source_points', '미상')}점")
+                detail = None
+                if key == "second":
+                    reviewer_entry = details_by_id[identifier]
+                    checks = reviewer_entry.get("checks_done", {})
+                    source_evidence = reviewer_entry.get("source_evidence", {})
+                    pdf_reference = (reviewer_entry.get("source_citation") or
+                                     f"{source_evidence.get('question_pdf', '원본 문제지')}"
+                                     f" · PDF {source_evidence.get('question_pdf_page', '미상')}쪽")
+                    detail = (f"검수자 개별 근거: {pdf_reference} · "
+                              f"확인한 검사 항목 {len(checks)}개 · 발견된 이슈 0건")
+                questions[number]["audits"][key] = {
+                    "verdict": entry["verdict"], "summary": summary, "detail": detail,
+                    "created_at": source["created_at"], "timestamp_verified": source["timestamp_verified"],
+                    "snapshot_created_at": "unknown", "snapshot_timestamp_verified": False,
+                }
+        disagreement_count = sum(
+            len({entry["verdict"] for entry in q["audits"].values()}) > 1
+            for q in questions.values())
+        for q in questions.values():
+            q["disagreement"] = len({entry["verdict"] for entry in q["audits"].values()}) > 1
+        return {"exam_id": self.exam_id, "passes": passes, "questions": questions,
+                "disagreement_count": disagreement_count,
+                "available": any(item["available"] for item in passes)}
+
+    @staticmethod
+    def _audit_36_id(number: int) -> str:
+        return f"036-I-{'L' if number <= 30 else 'R'}-{number:03d}"
 
     def get_question(self, question_id: str, *, fast: bool = False) -> dict:
         with closing(self._connect()) as db:

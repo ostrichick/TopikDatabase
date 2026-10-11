@@ -103,7 +103,11 @@ class MultiExamReviewTests(unittest.TestCase):
             else:
                 self.assertNotIn("?exam_id=", detail["source_pdf_url"])
         self.assertFalse(self.other.list_questions()["ai_audit_available"])
-        self.assertEqual(self.other.get_independent_audit_comparison()["questions"], {})
+        comparison = self.other.get_independent_audit_comparison()
+        self.assertEqual(comparison["exam_id"], "036-I-B")
+        self.assertFalse(comparison["available"])
+        self.assertEqual(len(comparison["questions"]), 70)
+        self.assertTrue(all(not item["audits"] for item in comparison["questions"].values()))
 
     def test_cross_exam_access_rejected_and_registered_media_isolated(self):
         with self.assertRaises(review_ui.NotFound):

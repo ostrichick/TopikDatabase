@@ -303,7 +303,7 @@
                 <label id="aiFilterWrap" hidden><span class="control-label">AI 감사</span><select id="aiFilter" aria-label="AI 감사 필터"><option value="all">전체</option><option value="unresolved">미해결 발견</option><option value="finding">발견 있음</option><option value="disagreement">감사 불일치</option><option value="uncertain">불확실 있음</option><option value="high">고위험</option><option value="unaudited">미감사</option></select></label>
                 <label id="sortOrderWrap" hidden><span class="control-label">정렬</span><select id="sortOrder" aria-label="문항 정렬"><option value="number">문항 번호</option><option value="risk">AI 위험 높은 순</option><option value="findings">미해결 발견 많은 순</option><option value="latest">최근 AI 감사 순</option></select></label>
               </div>
-              <label class="comparison-filter"><input type="checkbox" id="comparisonDisagreement">Gemini·ChatGPT 판정 차이만 보기</label>
+              <label class="comparison-filter"><input type="checkbox" id="comparisonDisagreement">독립 감수 간 판정 차이만 보기</label>
               <label><span class="control-label">문항 표시 상태 · AI/인간 상태는 별개</span><select id="indicatorFilter" aria-label="문항 표시 상태"><option value="all">전체</option><option value="problem">빨강 · AI/반려 재확인</option><option value="pending">주황 · 검토 대기</option><option value="verified">초록 · 승인 선언 확인</option><option value="unknown">회색 · 검수 근거 미확정</option></select></label>
               <div class="status-legend" aria-label="문항 상태 범례"><span><i class="state-dot verified"></i>승인 선언 확인</span><span><i class="state-dot problem"></i>재확인 필요</span><span><i class="state-dot"></i>검토 대기</span><span><i class="state-dot unknown"></i>근거 미확정</span></div>
             </div>
@@ -377,7 +377,7 @@
             <p class="hint" id="transcriptHint">전체 음원만 제공됩니다. 문항별 재생 구간을 추정하지 않습니다.</p>
           </div>
           <details class="section-card" id="independentComparisonSection">
-            <summary class="comparison-heading"><strong>Gemini · ChatGPT 독립 감수 근거</strong><span id="comparisonStatus" class="comparison-status" aria-live="polite">감수 결과 불러오는 중…</span></summary>
+            <summary class="comparison-heading"><strong>독립 감수 근거</strong><span id="comparisonStatus" class="comparison-status" aria-live="polite">감수 결과 불러오는 중…</span></summary>
             <p class="hint">AI의 발견은 참고 근거입니다. 원본 PDF·대본을 확인해 최종 판단하세요.</p>
             <div class="comparison-grid" id="comparisonCards"></div>
           </details>
@@ -668,12 +668,24 @@
         if (status === 'rejected') return { kind: 'unknown', reason: '검수 근거 미확정 · DB 저장 상태는 반려이나 현재 사람 반려 선언 근거가 없거나 최신 이력과 불일치' };
         return { kind: 'pending', reason: 'DB 검토 필요 상태 · 현재 승인 선언 없음' };
       }
+      function independentEntries(number) {
+        const data = state.independentAudits;
+        if (!data || (data.exam_id && state.examId && data.exam_id !== state.examId)) return [];
+        const question = data.questions?.[String(number)] || {};
+        const passes = Array.isArray(data.passes) ? data.passes :
+          Object.keys(data.sources || {}).length
+            ? Object.entries(data.sources).map(([id, source]) => ({ ...source, id }))
+            : Object.keys(question).filter(id => question[id]?.verdict).map(id => ({ id, label: id }));
+        return passes.map(source => ({
+          source,
+          name: source.label || source.id || '독립 감수',
+          value: question.audits?.[source.id] || question[source.id] || null,
+        }));
+      }
       function reviewIndicator(item) {
         const human = reviewEvidence(item);
-        const comparison = state.independentAudits?.questions?.[String(item.number)];
-        const discoveries = ['gemini', 'chatgpt'].filter(key => comparison?.[key]?.verdict === 'finding');
-        const names = { gemini: 'Gemini', chatgpt: 'ChatGPT' };
-        const sources = discoveries.map(key => names[key]);
+        const discoveries = independentEntries(item.number).filter(entry => entry.value?.verdict === 'finding');
+        const sources = discoveries.map(entry => entry.name);
         if (aiNumber(aiAudit(item)?.unresolved_findings) > 0) sources.push('기존 AI 감사');
         if (human.kind === 'unknown') return { kind: 'unknown', reason: sources.length
           ? `${human.reason} · 별도로 ${[...new Set(sources)].join('·')}의 AI 지적사항도 원본 대조 필요`
@@ -681,15 +693,15 @@
         if (human.kind === 'rejected') return { kind: 'problem', reason: human.reason };
         if (human.kind === 'verified') {
           const approvedAt = Date.parse(item.last_human_review?.reviewed_at || '');
-          const afterApproval = discoveries.filter(key => {
-            const report = comparison[key];
+          const afterApproval = discoveries.filter(entry => {
+            const report = entry.value;
             const discoveredAt = Date.parse(report.created_at || '');
             const snapshotAt = Date.parse(report.snapshot_created_at || '');
             return report.timestamp_verified === true && report.snapshot_timestamp_verified === true &&
               Number.isFinite(approvedAt) && Number.isFinite(discoveredAt) && Number.isFinite(snapshotAt) &&
               discoveredAt > approvedAt && snapshotAt > approvedAt;
           });
-          if (afterApproval.length) return { kind: 'problem', reason: `인간 승인 후 ${afterApproval.map(key => names[key]).join('·')}의 새로운 문제 발견` };
+          if (afterApproval.length) return { kind: 'problem', reason: `인간 승인 후 ${afterApproval.map(entry => entry.name).join('·')}의 새로운 문제 발견` };
           return { kind: 'verified', reason: sources.length
             ? `${human.reason} · ${[...new Set(sources)].join('·')} 지적사항은 승인 기록만으로 검토 여부를 알 수 없습니다. 원본·이력 대조 필요`
             : human.reason };
@@ -724,8 +736,7 @@
         const listRow = state.items.find(item => item.id === q.id);
         const item = { ...listRow, ...q, status: q.review_status,
           ai_audit: aiAudit(listRow) || aiAudit(q) };
-        const comparison = state.independentAudits?.questions?.[String(item.number)];
-        const independentFinding = ['gemini', 'chatgpt'].some(key => comparison?.[key]?.verdict === 'finding');
+        const independentFinding = independentEntries(item.number).some(entry => entry.value?.verdict === 'finding');
         const existingFinding = aiNumber(aiAudit(item)?.unresolved_findings) > 0;
         if (!independentFinding && !existingFinding) { cue.hidden = true; return; }
         const indicator = reviewIndicator(item);
@@ -744,7 +755,7 @@
             : `저장된 승인 상태를 임의로 취소하지 않지만 현재 승인 선언이 확인되지 않습니다. ${sourceLabel}와 검수 이력을 대조하세요. AI 발견은 사람 승인과 별개입니다.`;
         const evidence = $('reviewDecisionEvidence');
         evidence.dataset.target = independentFinding ? 'independentComparisonSection' : 'aiAuditSection';
-        evidence.textContent = independentFinding ? 'Gemini·ChatGPT 판단 근거 확인' : '기존 AI 감사 기록 확인';
+        evidence.textContent = independentFinding ? '독립 감수 판단 근거 확인' : '기존 AI 감사 기록 확인';
       }
       function renderDecisionEvidence() {
         const targetId = $('reviewDecisionEvidence').dataset.target;
@@ -771,9 +782,7 @@
         // run, old detailed findings must not be presented as the new run's.
         const audit = auditScope ? (listAudit
           ? { ...(sameRun ? detailAudit : {}), ...listAudit } : detailAudit) : null;
-        const comparison = auditScope ? state.independentAudits?.questions?.[String(q.number)] || {} : {};
-        const reports = ['gemini', 'chatgpt'].map(key => ({ name: key === 'gemini' ? 'Gemini' : 'ChatGPT', value: comparison[key] }))
-          .filter(report => report.value && typeof report.value === 'object');
+        const reports = independentEntries(q.number).filter(report => report.value && typeof report.value === 'object');
         const independentFindings = reports.filter(report => report.value.verdict === 'finding');
         const independentUncertain = reports.filter(report => report.value.verdict === 'uncertain');
         const flags = [
@@ -796,7 +805,7 @@
           : auditScope ? ' · AI 기록 최신성: 확인할 시각/실행 정보 없음' : '';
         const score = audit && aiNumber(audit.total) > 0
           ? ` · AI 참고 위험 지표 ${aiRisk(audit).score}/100` : '';
-        const coverage = auditScope ? '' : ' · 기존 AI 감사: 이 회차에 제공되지 않음';
+        const coverage = auditScope ? '' : ' · DB 기반 AI 실행 이력: 이 회차에 제공되지 않음 (별도 PDF 독립 감수 기록 아래 참조)';
         $('aiDecisionStatus').textContent = `사람 검수: ${human} · AI 지적 검토 완료 여부: 승인만으로 판단 불가${coverage}${score}${recordedAt}`;
         const summary = $('aiDecisionSummary');
         if (needsAttention) {
@@ -806,15 +815,17 @@
           if (uncertain || independentUncertain.length) signals.push('AI 판단 불확실');
           if (failures) signals.push('AI 실행 일부 미완료·실패');
           if (flags.length) signals.push(`추출 주의 ${flags.length}건`);
-          summary.textContent = `확인이 필요한 단서: ${signals.join(' · ')}. AI 지적은 확정 오류가 아니므로 원본과 비교한 후 수정·반려 여부를 판단하세요.${auditScope ? '' : ' 36회에는 기존 35회 AI 감사가 제공되지 않습니다.'}`;
+          summary.textContent = `확인이 필요한 단서: ${signals.join(' · ')}. AI 지적은 확정 오류가 아니므로 원본과 비교한 후 수정·반려 여부를 판단하세요.`;
+        } else if (state.examId === '036-I-B' && reports.length) {
+          summary.textContent = '제공된 36회 PDF 독립 감수 결과에서 새 발견·불확실 판정이 보고되지 않았습니다. 원본 버전별 과거 검수이며, 어절 공백 전수 대조나 MP3 청취·사람 검수 완료를 의미하지 않습니다.';
         } else if (state.examId === '036-I-B') {
-          summary.textContent = '36회에 적용된 기존 35회 AI 감사 기록은 제공되지 않습니다. AI 검토 완료 또는 이상 없음으로 해석하지 마세요.';
+          summary.textContent = '36회 PDF 독립 감수 근거를 불러오지 못했습니다. 기록 없음·파일 누락·검증 실패와 이상 없음을 구분하세요.';
         } else if (audit && aiNumber(audit.total) > 0) {
           summary.textContent = `제공된 최근 AI verdict ${aiNumber(audit.total)}건에서 발견·불확실 신호가 보고되지 않았습니다. 사람의 원본 검수 완료를 의미하지 않습니다.`;
         } else if (reports.length) {
           summary.textContent = '제공된 독립 AI 결과에서 발견·불확실 신호가 보고되지 않았습니다. 누락된 출처나 시점은 확인되지 않았습니다.';
         } else {
-          summary.textContent = state.independentAudits === null && state.examId === '035-I-B'
+          summary.textContent = state.independentAudits === null
             ? 'AI 참고 기록을 확인 중입니다. 결과가 없어도 원본 검수를 진행할 수 있습니다.'
             : '이 문항에서 확인 가능한 AI 결과가 없습니다. 미감사·조회 불가와 이상 없음을 구분하세요.';
         }
@@ -1754,28 +1765,32 @@
         const status = $('comparisonStatus');
         root.replaceChildren();
         const item = state.independentAudits?.questions?.[String(q.number)] || {};
-        const sources = state.independentAudits?.sources || {};
-        const flagged = ['gemini', 'chatgpt'].filter(key => item[key]?.verdict === 'finding');
+        const reports = independentEntries(q.number);
+        const flagged = reports.filter(report => report.value?.verdict === 'finding');
         if (flagged.length) {
-          status.textContent = `${flagged.map(key => key === 'gemini' ? 'Gemini' : 'ChatGPT').join('·')} 문제 발견${item.disagreement ? ' · 판정 불일치' : ''}`;
+          status.textContent = `${flagged.map(report => report.name).join('·')} 문제 발견${item.disagreement ? ' · 판정 불일치' : ''}`;
           status.classList.add('diff');
         } else if (item.disagreement) {
           status.textContent = 'AI 판정 불일치 · 직접 확인 필요';
           status.classList.add('diff');
         } else {
-          status.textContent = state.independentAudits ? 'AI 문제 발견 없음 또는 확인 불가' : '감수 결과 불러오는 중';
+          const ready = reports.filter(report => report.value).length;
+          status.textContent = ready ? `검수 근거 ${ready}/${reports.length}개 확인 · 판정은 아래 참조` :
+            state.independentAudits ? '검수 근거 없음 또는 검증 불가' : '감수 결과 불러오는 중';
           status.classList.remove('diff');
         }
-        for (const key of ['gemini', 'chatgpt']) {
-          const src = sources[key] || {};
-          const verdict = item[key];
+        for (const report of reports) {
+          const src = report.source || {};
+          const verdict = report.value;
           const card = element('article', `comparison-card${verdict?.verdict === 'finding' ? ' finding' : ''}`);
-          card.append(element('h4', '', src.label || (key === 'gemini' ? 'Gemini' : 'ChatGPT 3차')));
+          card.append(element('h4', '', report.name));
           if (!verdict) {
             card.append(element('p', '', src.reason || state.independentAuditError || '해당 감사 결과를 불러올 수 없습니다.'));
           } else {
             card.append(element('strong', '', AI_VERDICT_NAMES[verdict.verdict] || '상태 미확인'));
-            card.append(element('span', 'meta', [src.model, src.origin].filter(Boolean).join(' · ')));
+            card.append(element('span', 'meta', [src.model || src.model_note, src.source_version, src.origin].filter(Boolean).join(' · ')));
+            if (src.source_file) card.append(element('span', 'meta', `근거 파일: ${src.source_file}`));
+            if (src.limits?.length) card.append(element('p', 'hint', `검수 범위 제한: ${src.limits.join(' · ')}`));
             if (verdict.verdict === 'finding') {
               if (verdict.summary) card.append(element('p', '', verdict.summary));
               if (verdict.detail) card.append(element('p', '', verdict.detail));
@@ -2434,7 +2449,7 @@
         if (kind === 'ai') {
           const row = state.items.find(item => item.id === state.detail.id);
           const comparison = state.independentAudits?.questions?.[String(state.detail.number)];
-          const independentFinding = ['gemini', 'chatgpt'].some(key => comparison?.[key]?.verdict === 'finding');
+          const independentFinding = independentEntries(state.detail.number).some(entry => entry.value?.verdict === 'finding');
           const hasExisting = !!(aiAudit(state.detail) || aiAudit(row));
           const section = hasExisting && !independentFinding ? $('aiAuditSection') : $('independentComparisonSection');
           // Existing audit details live inside the source panel, which is an

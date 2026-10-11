@@ -34,6 +34,12 @@ git switch --track origin/feat/topik36-pdf-ingestion-20261009
 `.gitignore`는 `topik-past-papers/` 전체와 PDF, MP3, 로컬 DB 백업,
 개인별 접속 설정을 제외한다. 따라서 Git fetch/pull만으로 **기출 미디어나
 `derived/036-I-B/staging-v5.json`, `staging-v6.json`이 이동하지 않는다**.
+36회 검수 화면의 **1차·2차 독립 감수 근거**도 Git-ignored 로컬 JSON
+(`derived/036-I-B/blind-audit-v4.json`, `blind-audit-pass2-combined.json`,
+`blind-audit-pass2-a.json`, `blind-audit-pass2-b.json`)에서 읽는다.
+다른 PC에 이 네 파일이 없으면 검수 화면이 해당 회차의 근거를 찾지 못한다.
+파일은 검증된 SHA-256을 유지한 채 별도로 옮겨야 하며,
+검수 결과를 Git이나 PostgreSQL에 업로드했다고 가정하지 않는다.
 이미 PC에 있는 기출 자료는 그대로 보존하고, 누락된 파생 파일은 그 PC의
 검증된 PDF 자료 및 설치된 추출 의존성으로 다음 명령을 실행해 생성한다.
 
