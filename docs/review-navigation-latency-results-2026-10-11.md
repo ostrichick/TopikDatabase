@@ -62,6 +62,14 @@ PowerShell launcher 구문 검사 PASS, `git diff --check` PASS.
 일부 `skip`은 외부 PostgreSQL 별도 환경을 명시적으로 요구하는 통합 테스트와 의존성 없는
 실행 환경 예외로, 전체 suite PASS가 실제 브라우저 클릭 p95 보증을 뜻하지는 않는다.
 
-최종 GitHub 커밋/푸시 식별자는 실제 push 검증 후 추가한다.
+구현 커밋: `e6a418e feat(topik): speed up safe review navigation and PostgreSQL reads`.
 
-**운영 배포 주의:** 사용자 현재 검수 서버(18737/18738)는 실행 중이다. 서버 재시작은 열린 브라우저의 **미저장 입력이나 저장 중 요청을 먼저 확인**해야 하므로 강제 종료하지 않는다. 코드가 Git에 반영돼도 현재 Python 프로세스는 새 연결 풀을 즉시 사용하지 않는다. 다만 HTML은 새로고침하면 최신 프런트가 적용될 수 있다(미저장 초안 보존 후 새로고침).
+## 3. 사용 중인 검수 서버를 보호한 신규 로컬 배포
+
+- 사용 중인 `127.0.0.1:18737`, `127.0.0.1:18738` 프로세스는 **강제 재시작/종료하지 않았다**. 이미 열린 편집·미저장 음원·승인 대기 입력을 안전하게 유지한다.
+- 새 venv/풀 코드의 localhost 서버를 `http://127.0.0.1:18739/`로 **별도 실행**(기록된 새 Python PID `9616`). `TOPIK_REVIEW_POOL=1` 및 프로젝트 `.venv` 사용.
+- 새 서버 HTTP 실측: operator Basic 인증으로 `035-I-B` **70문항 HTTP 200**, `036-I-B` **70문항 HTTP 200**, 익명 GET은 **HTTP 401**. 중앙 DB 연결 및 CSRF 제공 확인. 실제 운영 DB POST는 수행하지 않았다.
+- 사용자 로그인 안내: Username `operator`; per-launch password는 Git 제외 경로 `C:\Projects\TopikDatabase-runtime\review-performance-18739.log`에서 `Operator access: password ...` 줄로 확인. 비밀번호 본문은 어떤 보고서·커밋에도 기록하지 않는다. 새 서버는 이 장치의 `127.0.0.1`에서만 접근 가능하다.
+- 다른 PC에 이 코드가 자동 적용되지는 않는다. 각 PC Git pull 및 `requirements-postgres.txt`의 패키지 설치(권장 `.venv`), 실행 스크립트 시작과 브라우저 전환이 별도로 필요하다. 현재 노트북의 기존 서버는 구버전 프로세스로 남는다.
+
+**사용상 주의:** 18737/18738의 열린 브라우저에서는 입력 저장을 확인하기 전 새로고침하지 않는다. 새 포트 18739는 새로 로그인해 독립적으로 사용한다. 안전한 전환 후에만 이전 서버를 정상 종료할 수 있다.
