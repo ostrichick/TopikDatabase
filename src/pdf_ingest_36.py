@@ -24,6 +24,8 @@ STAGING_V5 = STAGING.with_name("staging-v5.json")
 PUNCTUATION_DIFF_REPORT = STAGING.with_name("punctuation-diff-v4-v5.json")
 STAGING_V6 = STAGING.with_name("staging-v6.json")
 PUNCTUATION_DIFF_V6_REPORT = STAGING.with_name("punctuation-diff-v5-v6.json")
+STAGING_V7 = STAGING.with_name("staging-v7.json")
+SPEAKER_DIFF_V7_REPORT = STAGING.with_name("speaker-diff-v6-v7.json")
 
 FILENAMES = {
     "test_paper": "36th-TOPIK-I-Combined-Test-Paper.pdf",
@@ -41,7 +43,8 @@ _GROUP = re.compile(r"※\s*\[\s*(\d+)\s*[～~\-]\s*(\d+)\s*\]")
 _QUESTION = re.compile(r"(?m)^\s*(\d{1,2})\s*\.\s*")
 _CHOICE = re.compile(r"[①②③④]")
 _MARKER = {"①": 1, "②": 2, "③": 3, "④": 4}
-_SPEAKER = re.compile(r"^(?:남자|여자)\s*:")
+_SPEAKER_LABEL = r"(?:남자|여자|가|나|철수|영희)"
+_SPEAKER = re.compile(rf"^{_SPEAKER_LABEL}\s*:")
 
 # Source-verified PDF line-end splits. Each pair was checked against the
 # specific original PDF page. Do not normalize these phrases globally: the
@@ -258,8 +261,12 @@ def tokenize_paper(reader, section, source_relative):
     return groups, questions
 
 
-def transcript_entries(reader):
-    """Extract source dialogue before the choices; paired 25-30 reuse one source passage."""
+def transcript_entries(reader, *, preserve_frozen_v4: bool = False):
+    """Extract dialogue; new runs use normalized speaker labels by default.
+
+    Replaying the source-frozen v4 extraction must opt out: v4/v5/v6 hashes
+    and previous independent audits are immutable historical evidence.
+    """
     entries = {}
     for page_index, page in enumerate(reader.pages, 1):
         content = strip_headers(page.extract_text())
@@ -299,7 +306,10 @@ def transcript_entries(reader):
             if not dialogue:
                 raise ValueError(f"Transcript for question {number} missing on page {page_index}")
             # Preserve each explicitly printed speaker turn, without inventing a speaker.
-            dialogue = re.sub(r"\s*(?=(?:남자|여자)\s*:)", "\n", dialogue).strip()
+            dialogue = re.sub(rf"\s*(?={_SPEAKER_LABEL}\s*:)", "\n", dialogue).strip()
+            if not preserve_frozen_v4:
+                from src.extraction_rules import normalize_speaker_turn_spacing
+                dialogue = normalize_speaker_turn_spacing(dialogue)
             entries[number] = {"dialogue_text": dialogue, "source_pdf_page": page_index,
                                "warnings": [{"severity": "review", "code": "audio_playback_unchecked",
                                             "message": "Source transcript PDF was not compared to full MP3 playback."}]}
@@ -381,7 +391,7 @@ def extract():
             readers[kind], section, paths[kind].relative_to(ROOT).as_posix())
         groups.extend(group_records)
         questions.extend(question_records)
-    transcripts = transcript_entries(readers["listening_transcript"])
+    transcripts = transcript_entries(readers["listening_transcript"], preserve_frozen_v4=True)
     for q in questions:
         number = q["exam_number"]
         if number not in answers:
@@ -445,6 +455,7 @@ def main():
     # Produce the next normalization snapshot separately, never in-place.
     from src import punctuation_pipeline as punctuation
     from src import punctuation_pipeline_v6 as punctuation_v6
+    from src import transcript_speaker_pipeline as speaker_v7
 
     original = extract()
     if hashlib.sha256(punctuation.encoded_staging(original)).hexdigest() != punctuation.SOURCE_V4_SHA256:
@@ -463,7 +474,16 @@ def main():
     write_staging(report, PUNCTUATION_DIFF_REPORT)
     written = write_staging(normalized, STAGING_V6)
     write_staging(v6_report, PUNCTUATION_DIFF_V6_REPORT)
-    return {"staging": str(written.relative_to(ROOT)), "questions": len(normalized["questions"]),
+    candidate, speaker_report = speaker_v7.normalize_v6(normalized)
+    from scripts.import_exam_staging import validate as validate_staging
+    speaker_gate = validate_staging(candidate)
+    if speaker_gate["status"] != "validated":
+        raise ValueError("Speaker v7 candidate failed import quality gate")
+    speaker_staging = write_staging(candidate, STAGING_V7)
+    write_staging(speaker_report, SPEAKER_DIFF_V7_REPORT)
+    return {"staging": str(speaker_staging.relative_to(ROOT)),
+            "frozen_v6_staging": str(written.relative_to(ROOT)),
+            "questions": len(normalized["questions"]),
             "listening": sum(q["section"] == "listening" for q in normalized["questions"]),
             "reading": sum(q["section"] == "reading" for q in normalized["questions"]),
             "groups": len(normalized["groups"]),
@@ -472,6 +492,9 @@ def main():
             "warnings": normalized["warnings"], "quality_gate": latest_gate["status"],
             "punctuation_changes": v6_report["fields_changed"],
             "diff_report": str(PUNCTUATION_DIFF_V6_REPORT.relative_to(ROOT)),
+            "speaker_candidate": str(speaker_staging.relative_to(ROOT)),
+            "speaker_corrections": speaker_report["total_speaker_turns"],
+            "speaker_quality_gate": speaker_gate["status"],
             "archival_v5_gate": gate["status"]}
 
 

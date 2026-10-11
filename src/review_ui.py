@@ -48,7 +48,7 @@ from src.database import (
     get_media_root,
 )
 from src.sqlite_archive import assert_sqlite_write_allowed
-from src.extraction_rules import normalize_punctuation_spacing_v3
+from src.extraction_rules import normalize_punctuation_spacing_v3, normalize_speaker_turn_spacing
 
 
 ROOT = PROJECT_ROOT
@@ -376,7 +376,8 @@ class ReviewStore:
         for choice in detail["choices"]:
             choice["display_text"] = normal(choice["text"])
         if detail.get("transcript"):
-            detail["transcript"]["display_text"] = normal(detail["transcript"]["text"])
+            detail["transcript"]["display_text"] = normalize_speaker_turn_spacing(
+                normal(detail["transcript"]["text"]))
         return detail
 
     @staticmethod

@@ -98,6 +98,21 @@ class ImportExamStagingTests(unittest.TestCase):
         self.assertEqual(report["transcripts"], 30)
         self.assertEqual(report["points_by_section"], {"listening": 100, "reading": 100})
 
+    def test_future_v7_dialogue_speaker_spacing_fails_closed(self):
+        candidate = copy.deepcopy(self.staging)
+        candidate["extraction_version"] = "pdf-first-36-v7"
+        candidate["punctuation_rule_version"] = importer.PUNCTUATION_RULE_VERSION_V3
+        candidate["speaker_turn_rule_version"] = "speaker-colon-v1"
+        candidate["questions"][0]["transcript"]["dialogue_text"] = "남자: 안녕하세요.\n여자: 네."
+        self.assertEqual(importer.validate(candidate)["status"], "validated")
+        candidate["questions"][0]["transcript"]["dialogue_text"] = "남자 : 안녕하세요.\n여자: 네."
+        with self.assertRaisesRegex(importer.ImportBlocked, "speaker-turn spacing"):
+            importer.validate(candidate)
+        candidate["questions"][0]["transcript"]["dialogue_text"] = "남자: 안녕하세요.\n여자: 네."
+        del candidate["speaker_turn_rule_version"]
+        with self.assertRaisesRegex(importer.ImportBlocked, "speaker-turn format version"):
+            importer.validate(candidate)
+
     def test_reading_local_answer_number_offset_is_forbidden(self):
         self.staging["questions"][30]["answer_key_number"] = 1
         with self.assertRaisesRegex(importer.ImportBlocked, "global"):

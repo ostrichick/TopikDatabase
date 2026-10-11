@@ -62,6 +62,36 @@ _IMAGE_RULES = {
 PUNCTUATION_RULE_VERSION = "punctuation-space-v2"
 RULE_VERSION = "punctuation-space-v1,image-pure-v1"
 PUNCTUATION_RULE_VERSION_V3 = "punctuation-space-v3"
+SPEAKER_TURN_RULE_VERSION = "speaker-colon-v1"
+
+# Speaker labels in an extracted listening dialogue must be rendered as
+# "화자: 대사". This is deliberately line-anchored: internal colons (12:30,
+# URLs, dialogue punctuation) and continuation lines are not speaker turns.
+# Historical frozen extraction stages must explicitly opt out if they need to
+# reproduce their exact earlier hashes.
+_SPEAKER_LINE = re.compile(
+    r"(?m)^(?P<indent>[ \t]*)(?P<label>[가-힣]{1,12})"
+    r"[ \t]*:[ \t]*(?=\S)"
+)
+_NOT_SPEAKERS = frozenset({"시간", "주소", "제목", "정답", "해설", "보기", "참고", "상황", "장소", "설명", "문항"})
+
+
+def normalize_speaker_turn_spacing(value: str) -> str:
+    """Normalize explicitly labeled dialogue lines, without rewriting speech.
+
+    The label touches ':'; exactly one ASCII space follows ':' and precedes
+    nonempty speech. Preserve leading indentation, newlines and non-turn text.
+    """
+    if not isinstance(value, str):
+        raise TypeError("Expected extracted dialogue text")
+
+    def replace(match: re.Match[str]) -> str:
+        label = match.group("label")
+        if label.strip() in _NOT_SPEAKERS:
+            return match.group(0)
+        return f'{match.group("indent")}{label}: '
+
+    return _SPEAKER_LINE.sub(replace, value)
 
 # TOPIK 36 R51-52 PDF page 8 has an explicitly printed sentence boundary:
 # "... 있습니다. 120전화는 ...".  pypdf loses that gap; v1 intentionally

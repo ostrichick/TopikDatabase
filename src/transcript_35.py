@@ -12,14 +12,16 @@ import sys
 
 def _format_dialogue(value: str) -> str:
     """Add the explicit speaker and punctuation separators lost in extraction."""
-    from src.extraction_rules import normalize_punctuation_spacing
+    from src.extraction_rules import normalize_punctuation_spacing, normalize_speaker_turn_spacing
 
     value = normalize_punctuation_spacing(value)
-    value = re.sub(r"(?m)^(남자|여자)\s*:\s*", r"\1: ", value)
+    value = normalize_speaker_turn_spacing(value)
     return re.sub(r"(?<=[?!])(?=[가-힣])", " ", value)
 
 _QUESTION = re.compile(r"(?m)^([1-9]|[12][0-9]|30)\.\s*")
-_SPEAKER = re.compile(r"^(?:남자|여자)\s*:")
+# Current source labels are 남자/여자; allow the user's sample labels in future
+# PDF transcripts without treating arbitrary metadata headings as speakers.
+_SPEAKER = re.compile(r"^(?:남자|여자|가|나|철수|영희)\s*:")
 _SHARED = {25: (25, 26), 27: (27, 28), 29: (29, 30)}
 
 

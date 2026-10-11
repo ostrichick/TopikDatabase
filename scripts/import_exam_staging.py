@@ -57,12 +57,16 @@ def validate(data, *, allow_historical_v4=False):
                 "historical punctuation exception requires frozen 36th v4 SHA-256")
     else:
         source_version = data.get("extraction_version")
-        require(source_version in ("pdf-first-36-v5", "pdf-first-36-v6"),
-                "PDF staging requires supported extraction version pdf-first-36-v5/v6")
-        expected_rule = (PUNCTUATION_RULE_VERSION_V3 if source_version == "pdf-first-36-v6"
+        require(source_version in ("pdf-first-36-v5", "pdf-first-36-v6", "pdf-first-36-v7"),
+                "PDF staging requires supported extraction version pdf-first-36-v5/v6/v7")
+        expected_rule = (PUNCTUATION_RULE_VERSION_V3 if source_version in ("pdf-first-36-v6", "pdf-first-36-v7")
                          else PUNCTUATION_RULE_VERSION)
         require(data.get("punctuation_rule_version") == expected_rule,
                 "PDF staging requires shared punctuation normalization version")
+        if source_version == "pdf-first-36-v7":
+            from src.extraction_rules import SPEAKER_TURN_RULE_VERSION
+            require(data.get("speaker_turn_rule_version") == SPEAKER_TURN_RULE_VERSION,
+                    "PDF v7 staging requires explicit speaker-turn format version")
     sources, groups, questions = data.get("sources"), data.get("groups"), data.get("questions")
     require(isinstance(sources, list) and len(sources) >= 4, "missing source files")
     require(isinstance(groups, list) and len(groups) > 0, "missing groups")
@@ -182,12 +186,19 @@ def validate(data, *, allow_historical_v4=False):
         if q.get("transcript") is not None:
             text_fields.append((f"{q['id']}.transcript", q["transcript"]["dialogue_text"]))
     normalizer = (normalize_punctuation_spacing_v3
-                  if data.get("extraction_version") == "pdf-first-36-v6"
+                  if data.get("extraction_version") in ("pdf-first-36-v6", "pdf-first-36-v7")
                   else normalize_punctuation_spacing_v2)
     residual = [scope for scope, value in text_fields
                 if normalizer(value) != value]
     require(not residual or historical_v4,
             "unresolved punctuation spacing: " + ", ".join(residual[:12]))
+    if data.get("extraction_version") == "pdf-first-36-v7":
+        from src.extraction_rules import normalize_speaker_turn_spacing
+        speaker_residual = [q["id"] for q in questions if q.get("transcript") is not None
+                            and normalize_speaker_turn_spacing(q["transcript"]["dialogue_text"])
+                            != q["transcript"]["dialogue_text"]]
+        require(not speaker_residual,
+                "unresolved speaker-turn spacing: " + ", ".join(speaker_residual[:12]))
     warnings = data.get("warnings", [])
     require(isinstance(warnings, list), "warnings must be a list")
     all_warnings = []
